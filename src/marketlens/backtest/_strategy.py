@@ -50,7 +50,7 @@ class StrategyContext:
         self,
         size: str,
         *,
-
+        market_id: str | None = None,
         limit_price: str | None = None,
         cancel_after: int | None = None,
     ) -> Order:
