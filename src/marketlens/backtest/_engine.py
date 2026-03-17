@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any, AsyncIterator, Iterator
 
+from marketlens._base import _coerce_timestamp
 from marketlens.exceptions import NotFoundError
 from marketlens.backtest._fees import FeeModel, PolymarketFeeModel, ZeroFeeModel
 from marketlens.backtest._fills import FillSimulator
@@ -425,14 +426,23 @@ class _EngineCore:
 
 
 class BacktestEngine(_EngineCore):
-    def _prefetch_reference_prices(self, client: Any, after: int | None, before: int | None) -> None:
+    def _prefetch_reference_prices(
+        self, client: Any, after: int | None, before: int | None, *, markets: list[Market] | None = None,
+    ) -> None:
         underlyings = {u for u in self._market_underlying.values() if u is not None}
+        # When we know the actual markets, start coverage from the earliest
+        # open_time so markets that open before ``after`` are fully covered.
+        effective_after = _coerce_timestamp(after)
+        if markets:
+            earliest_open = min(m.open_time for m in markets)
+            if effective_after is None or earliest_open < effective_after:
+                effective_after = earliest_open
         for symbol in underlyings:
             if symbol in self._ref_prices:
                 continue
             params: dict[str, Any] = {"order": "asc", "limit": 5000}
-            if after is not None:
-                params["after"] = after
+            if effective_after is not None:
+                params["after"] = effective_after
             if before is not None:
                 params["before"] = before
             candles = client.reference.candles(symbol, **params).to_list()
@@ -458,7 +468,7 @@ class BacktestEngine(_EngineCore):
             market = client.markets.get(id)
             self._market_series[market.id] = market.series_id or market.id
             self._register_market(market)
-            self._prefetch_reference_prices(client, after, before)
+            self._prefetch_reference_prices(client, after, before, markets=[market])
             self._run_merged([self._make_market_stream(client, [market], after=after, before=before)])
             return self._build_result()
         except NotFoundError:
@@ -483,7 +493,7 @@ class BacktestEngine(_EngineCore):
                     self._market_series[m.id] = series.id
                     self._market_group[m.id] = series.id
                     self._register_market(m)
-                self._prefetch_reference_prices(client, after, before)
+                self._prefetch_reference_prices(client, after, before, markets=markets)
                 self._run_merged([self._make_market_stream(client, markets, after=after, before=before)])
             else:
                 raise ValueError(
@@ -496,7 +506,7 @@ class BacktestEngine(_EngineCore):
         if found:
             self._market_series[found[0].id] = found[0].series_id or found[0].id
             self._register_market(found[0])
-            self._prefetch_reference_prices(client, after, before)
+            self._prefetch_reference_prices(client, after, before, markets=found)
             self._run_merged([self._make_market_stream(client, [found[0]], after=after, before=before)])
             return self._build_result()
 
@@ -584,14 +594,21 @@ class BacktestEngine(_EngineCore):
 
 
 class AsyncBacktestEngine(_EngineCore):
-    async def _async_prefetch_reference_prices(self, client: Any, after: int | None, before: int | None) -> None:
+    async def _async_prefetch_reference_prices(
+        self, client: Any, after: int | None, before: int | None, *, markets: list[Market] | None = None,
+    ) -> None:
         underlyings = {u for u in self._market_underlying.values() if u is not None}
+        effective_after = _coerce_timestamp(after)
+        if markets:
+            earliest_open = min(m.open_time for m in markets)
+            if effective_after is None or earliest_open < effective_after:
+                effective_after = earliest_open
         for symbol in underlyings:
             if symbol in self._ref_prices:
                 continue
             params: dict[str, Any] = {"order": "asc", "limit": 5000}
-            if after is not None:
-                params["after"] = after
+            if effective_after is not None:
+                params["after"] = effective_after
             if before is not None:
                 params["before"] = before
             candles = await client.reference.candles(symbol, **params).to_list()
@@ -617,7 +634,7 @@ class AsyncBacktestEngine(_EngineCore):
             market = await client.markets.get(id)
             self._market_series[market.id] = market.series_id or market.id
             self._register_market(market)
-            await self._async_prefetch_reference_prices(client, after, before)
+            await self._async_prefetch_reference_prices(client, after, before, markets=[market])
             await self._run_merged([self._async_make_market_stream(client, [market], after=after, before=before)])
             return self._build_result()
         except NotFoundError:
@@ -644,7 +661,7 @@ class AsyncBacktestEngine(_EngineCore):
                     self._market_series[m.id] = series.id
                     self._market_group[m.id] = series.id
                     self._register_market(m)
-                await self._async_prefetch_reference_prices(client, after, before)
+                await self._async_prefetch_reference_prices(client, after, before, markets=markets)
                 await self._run_merged([self._async_make_market_stream(client, markets, after=after, before=before)])
             else:
                 raise ValueError(
@@ -657,7 +674,7 @@ class AsyncBacktestEngine(_EngineCore):
         if found:
             self._market_series[found[0].id] = found[0].series_id or found[0].id
             self._register_market(found[0])
-            await self._async_prefetch_reference_prices(client, after, before)
+            await self._async_prefetch_reference_prices(client, after, before, markets=found)
             await self._run_merged([self._async_make_market_stream(client, [found[0]], after=after, before=before)])
             return self._build_result()
 
