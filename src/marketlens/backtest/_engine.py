@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import bisect
+import json
 from dataclasses import dataclass
 from decimal import Decimal
+from pathlib import Path
 from typing import Any, AsyncIterator, Iterator
 
 from marketlens._base import _coerce_timestamp
@@ -28,9 +30,44 @@ from marketlens.helpers.merge import (
 from marketlens.helpers.replay import AsyncOrderBookReplay, OrderBookReplay
 from marketlens.types.history import DeltaEvent, HistoryEvent, SnapshotEvent, TradeEvent
 from marketlens.types.market import Market
-from marketlens.types.orderbook import OrderBook
+from marketlens.types.orderbook import OrderBook, PriceLevel
 
 _FOUR = Decimal("0.0001")
+
+
+def _iter_history_parquet(path: Path) -> Iterator[HistoryEvent]:
+    """Read a history Parquet file and yield HistoryEvent objects."""
+    import pandas as pd
+
+    df = pd.read_parquet(path)
+
+    event_types = df["event_type"].values
+    ts = df["t"].values
+    prices = df["price"].values
+    sizes = df["size"].values
+    sides = df["side"].values
+    trade_ids = df["trade_id"].values
+    is_reseeds = df["is_reseed"].values
+    bids_col = df["bids"].values
+    asks_col = df["asks"].values
+
+    for i in range(len(df)):
+        et = event_types[i]
+        t = int(ts[i])
+        if et == "snapshot":
+            bids_raw = json.loads(bids_col[i])
+            asks_raw = json.loads(asks_col[i])
+            bids = [PriceLevel(price=b["price"], size=b["size"]) for b in bids_raw]
+            asks = [PriceLevel(price=a["price"], size=a["size"]) for a in asks_raw]
+            yield SnapshotEvent(t=t, is_reseed=bool(is_reseeds[i]), bids=bids, asks=asks)
+        elif et == "delta":
+            yield DeltaEvent(
+                t=t, price=f"{prices[i]:.4f}", size=f"{sizes[i]:.4f}", side=sides[i],
+            )
+        elif et == "trade":
+            yield TradeEvent(
+                t=t, id=trade_ids[i], price=f"{prices[i]:.4f}", size=f"{sizes[i]:.4f}", side=sides[i],
+            )
 
 
 @dataclass
@@ -399,6 +436,19 @@ class _EngineCore:
             for event, book in replay:
                 yield market, event, book
 
+    def _make_file_stream(
+        self,
+        markets: list[Market],
+        data_dir: str,
+    ) -> Iterator[tuple[Market, HistoryEvent, OrderBook]]:
+        """Read market history from local Parquet files instead of the API."""
+        for market in markets:
+            path = Path(data_dir) / f"history-{market.id}.parquet"
+            events = _iter_history_parquet(path)
+            replay = OrderBookReplay(events, market_id=market.id, platform=market.platform)
+            for event, book in replay:
+                yield market, event, book
+
     def get_reference_price(self, symbol: str | None, at_time: int) -> str | None:
         if symbol is None or symbol not in self._ref_prices:
             return None
@@ -455,10 +505,16 @@ class BacktestEngine(_EngineCore):
         *,
         after: Any = None,
         before: Any = None,
+        data_dir: str | None = None,
         **params: Any,
     ) -> BacktestResult:
+        def _stream(markets: list[Market]) -> Iterator[tuple[Market, HistoryEvent, OrderBook]]:
+            if data_dir is not None:
+                return self._make_file_stream(markets, data_dir)
+            return self._make_market_stream(client, markets, after=after, before=before)
+
         if isinstance(id, list):
-            streams = self._resolve_list(client, id, after=after, before=before, **params)
+            streams = self._resolve_list(client, id, after=after, before=before, data_dir=data_dir, **params)
             self._prefetch_reference_prices(client, after, before)
             self._run_merged(streams)
             return self._build_result()
@@ -469,7 +525,7 @@ class BacktestEngine(_EngineCore):
             self._market_series[market.id] = market.series_id or market.id
             self._register_market(market)
             self._prefetch_reference_prices(client, after, before, markets=[market])
-            self._run_merged([self._make_market_stream(client, [market], after=after, before=before)])
+            self._run_merged([_stream([market])])
             return self._build_result()
         except NotFoundError:
             pass
@@ -483,7 +539,7 @@ class BacktestEngine(_EngineCore):
         if series is not None:
             if series.structured_type:
                 streams = self._resolve_structured(
-                    client, id, series, after=after, before=before, **params,
+                    client, id, series, after=after, before=before, data_dir=data_dir, **params,
                 )
                 self._prefetch_reference_prices(client, after, before)
                 self._run_merged(streams)
@@ -494,7 +550,7 @@ class BacktestEngine(_EngineCore):
                     self._market_group[m.id] = series.id
                     self._register_market(m)
                 self._prefetch_reference_prices(client, after, before, markets=markets)
-                self._run_merged([self._make_market_stream(client, markets, after=after, before=before)])
+                self._run_merged([_stream(markets)])
             else:
                 raise ValueError(
                     f"Series '{series.title}' is neither rolling nor structured."
@@ -507,7 +563,7 @@ class BacktestEngine(_EngineCore):
             self._market_series[found[0].id] = found[0].series_id or found[0].id
             self._register_market(found[0])
             self._prefetch_reference_prices(client, after, before, markets=found)
-            self._run_merged([self._make_market_stream(client, [found[0]], after=after, before=before)])
+            self._run_merged([_stream([found[0]])])
             return self._build_result()
 
         raise NotFoundError(404, "NOT_FOUND", f"No market or series found for '{id}'")
@@ -519,8 +575,14 @@ class BacktestEngine(_EngineCore):
         *,
         after: Any = None,
         before: Any = None,
+        data_dir: str | None = None,
         **params: Any,
     ) -> list[Iterator[tuple[Market, HistoryEvent, OrderBook]]]:
+        def _stream(markets: list[Market]) -> Iterator[tuple[Market, HistoryEvent, OrderBook]]:
+            if data_dir is not None:
+                return self._make_file_stream(markets, data_dir)
+            return self._make_market_stream(client, markets, after=after, before=before)
+
         streams: list[Iterator[tuple[Market, HistoryEvent, OrderBook]]] = []
         for item_id in ids:
             # Try market UUID
@@ -528,7 +590,7 @@ class BacktestEngine(_EngineCore):
                 market = client.markets.get(item_id)
                 self._market_series[market.id] = market.series_id or market.id
                 self._register_market(market)
-                streams.append(self._make_market_stream(client, [market], after=after, before=before))
+                streams.append(_stream([market]))
                 continue
             except NotFoundError:
                 pass
@@ -537,7 +599,7 @@ class BacktestEngine(_EngineCore):
             series = client.series.get(item_id)
             if series.structured_type:
                 streams.extend(self._resolve_structured(
-                    client, item_id, series, after=after, before=before, **params,
+                    client, item_id, series, after=after, before=before, data_dir=data_dir, **params,
                 ))
             elif series.is_rolling:
                 markets = list(client.series.walk(item_id, after=after, before=before, **params))
@@ -545,7 +607,7 @@ class BacktestEngine(_EngineCore):
                     self._market_series[m.id] = series.id
                     self._market_group[m.id] = series.id
                     self._register_market(m)
-                streams.append(self._make_market_stream(client, markets, after=after, before=before))
+                streams.append(_stream(markets))
             else:
                 raise ValueError(
                     f"Series '{series.title}' is neither rolling nor structured."
@@ -561,10 +623,16 @@ class BacktestEngine(_EngineCore):
         *,
         after: Any = None,
         before: Any = None,
+        data_dir: str | None = None,
         **params: Any,
     ) -> list[Iterator[tuple[Market, HistoryEvent, OrderBook]]]:
         """Resolve a structured series into per-market streams."""
         from marketlens._base import _coerce_timestamp
+
+        def _stream(markets: list[Market]) -> Iterator[tuple[Market, HistoryEvent, OrderBook]]:
+            if data_dir is not None:
+                return self._make_file_stream(markets, data_dir)
+            return self._make_market_stream(client, markets, after=after, before=before)
 
         event_params = dict(params)
         if after is not None:
@@ -580,16 +648,13 @@ class BacktestEngine(_EngineCore):
         for evt in events:
             event_markets = client.events.markets(evt.id).to_list()
             for m in event_markets:
-                # Skip markets with no time overlap with [after, before]
                 if after_ms is not None and m.close_time and m.close_time < after_ms:
                     continue
                 if before_ms is not None and m.open_time and m.open_time > before_ms:
                     continue
                 self._market_series[m.id] = series.id
                 self._register_market(m)
-                streams.append(self._make_market_stream(
-                    client, [m], after=after, before=before,
-                ))
+                streams.append(_stream([m]))
         return streams
 
 

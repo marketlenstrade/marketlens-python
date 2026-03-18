@@ -69,7 +69,7 @@ class Orderbook:
     ) -> _HistorySyncPageIterator:
         params["after"] = after
         params["before"] = before
-        params.setdefault("limit", 5000)
+        params.setdefault("limit", 10000)
         return _HistorySyncPageIterator(
             self._client, f"/markets/{market_id}/orderbook/history", params, SnapshotEvent
         )
@@ -186,7 +186,7 @@ class AsyncOrderbook:
     ) -> _HistoryAsyncPageIterator:
         params["after"] = after
         params["before"] = before
-        params.setdefault("limit", 5000)
+        params.setdefault("limit", 10000)
         return _HistoryAsyncPageIterator(
             self._client, f"/markets/{market_id}/orderbook/history", params, SnapshotEvent
         )

@@ -1,135 +1,129 @@
 from __future__ import annotations
 
-import datetime
 from pathlib import Path
-from typing import Literal
+from typing import Any
 
 from marketlens._base import AsyncHTTPClient, SyncHTTPClient
-
-Table = Literal["snapshots", "deltas"]
-
-
-def _date_range(after: str, before: str) -> list[str]:
-    """Generate YYYY-MM-DD strings from after (inclusive) to before (exclusive)."""
-    start = datetime.date.fromisoformat(after)
-    end = datetime.date.fromisoformat(before)
-    dates: list[str] = []
-    d = start
-    while d < end:
-        dates.append(d.isoformat())
-        d += datetime.timedelta(days=1)
-    return dates
+from marketlens.exceptions import NotFoundError
 
 
 class Exports:
-    def __init__(self, client: SyncHTTPClient) -> None:
+    def __init__(self, client: SyncHTTPClient, *, series: Any = None) -> None:
         self._client = client
+        self._series = series
 
     def download(
         self,
         market_id: str,
         *,
-        table: Table,
-        date: str,
         path: str | Path = ".",
     ) -> Path:
-        """Download a day's Parquet export for a market.
+        """Download a market's full history (snapshots + deltas + trades) as Parquet.
 
         Args:
             market_id: Market UUID.
-            table: ``"snapshots"`` or ``"deltas"``.
-            date: Date string (YYYY-MM-DD). Must be before today.
             path: Directory to save the file in.
 
         Returns:
             Path to the downloaded Parquet file.
         """
-        dest = Path(path) / f"{table}-{market_id}-{date}.parquet"
+        dest = Path(path) / f"history-{market_id}.parquet"
+        if dest.exists():
+            return dest
         return self._client.download(
             f"/markets/{market_id}/export",
             dest,
-            params={"table": table, "date": date},
         )
 
-    def download_range(
+    def download_series(
         self,
-        market_id: str,
+        series_id: str,
         *,
-        table: Table,
-        after: str,
-        before: str,
+        after: Any = None,
+        before: Any = None,
         path: str | Path = ".",
-    ) -> list[Path]:
-        """Download multiple days of Parquet exports for a market.
+    ) -> Path:
+        """Download history files for all markets in a series.
+
+        Resolves the series, walks its markets filtered by after/before,
+        and downloads each market's history Parquet file. Skips markets
+        whose files already exist on disk.
 
         Args:
-            market_id: Market UUID.
-            table: ``"snapshots"`` or ``"deltas"``.
-            after: Start date inclusive (YYYY-MM-DD).
-            before: End date exclusive (YYYY-MM-DD).
+            series_id: Series slug or UUID.
+            after: Only markets with close_time >= after.
+            before: Only markets with open_time <= before.
             path: Directory to save files in.
 
         Returns:
-            List of paths to downloaded Parquet files.
+            Path to the data directory (same as *path*).
         """
-        files: list[Path] = []
-        for date in _date_range(after, before):
-            files.append(self.download(market_id, table=table, date=date, path=path))
-        return files
+        data_dir = Path(path)
+        data_dir.mkdir(parents=True, exist_ok=True)
+
+        for market in self._series.walk(series_id, after=after, before=before):
+            try:
+                self.download(market.id, path=data_dir)
+            except NotFoundError:
+                pass
+
+        return data_dir
 
 
 class AsyncExports:
-    def __init__(self, client: AsyncHTTPClient) -> None:
+    def __init__(self, client: AsyncHTTPClient, *, series: Any = None) -> None:
         self._client = client
+        self._series = series
 
     async def download(
         self,
         market_id: str,
         *,
-        table: Table,
-        date: str,
         path: str | Path = ".",
     ) -> Path:
-        """Download a day's Parquet export for a market.
+        """Download a market's full history (snapshots + deltas + trades) as Parquet.
 
         Args:
             market_id: Market UUID.
-            table: ``"snapshots"`` or ``"deltas"``.
-            date: Date string (YYYY-MM-DD). Must be before today.
             path: Directory to save the file in.
 
         Returns:
             Path to the downloaded Parquet file.
         """
-        dest = Path(path) / f"{table}-{market_id}-{date}.parquet"
+        dest = Path(path) / f"history-{market_id}.parquet"
+        if dest.exists():
+            return dest
         return await self._client.download(
             f"/markets/{market_id}/export",
             dest,
-            params={"table": table, "date": date},
         )
 
-    async def download_range(
+    async def download_series(
         self,
-        market_id: str,
+        series_id: str,
         *,
-        table: Table,
-        after: str,
-        before: str,
+        after: Any = None,
+        before: Any = None,
         path: str | Path = ".",
-    ) -> list[Path]:
-        """Download multiple days of Parquet exports for a market.
+    ) -> Path:
+        """Download history files for all markets in a series (async).
 
         Args:
-            market_id: Market UUID.
-            table: ``"snapshots"`` or ``"deltas"``.
-            after: Start date inclusive (YYYY-MM-DD).
-            before: End date exclusive (YYYY-MM-DD).
+            series_id: Series slug or UUID.
+            after: Only markets with close_time >= after.
+            before: Only markets with open_time <= before.
             path: Directory to save files in.
 
         Returns:
-            List of paths to downloaded Parquet files.
+            Path to the data directory (same as *path*).
         """
-        files: list[Path] = []
-        for date in _date_range(after, before):
-            files.append(await self.download(market_id, table=table, date=date, path=path))
-        return files
+        data_dir = Path(path)
+        data_dir.mkdir(parents=True, exist_ok=True)
+
+        async for market in self._series.walk(series_id, after=after, before=before):
+            try:
+                await self.download(market.id, path=data_dir)
+            except NotFoundError:
+                pass
+
+        return data_dir

@@ -38,7 +38,7 @@ class MarketLens:
         self.series = SeriesResource(self._http)
         self.orderbook = Orderbook(self._http, series=self.series, markets=self.markets, events=self.events)
         self.signals = Signals(self._http)
-        self.exports = Exports(self._http)
+        self.exports = Exports(self._http, series=self.series)
         self.reference = Reference(self._http)
 
     def backtest(
@@ -55,9 +55,15 @@ class MarketLens:
         slippage_bps: int = 0,
         limit_fill_rate: float = 0.1,
         queue_position: bool = False,
+        data_dir: str | None = None,
         **params: Any,
     ) -> Any:
         """Run a backtest on a market, series, or list of markets/series.
+
+        Args:
+            data_dir: If set, read market history from local Parquet files
+                in this directory instead of fetching from the API.
+                Files should be named ``history-{market_id}.parquet``.
 
         Simple one-liner API. For advanced config, use ``BacktestEngine`` directly.
         """
@@ -73,7 +79,7 @@ class MarketLens:
             queue_position=queue_position,
         )
         engine = BacktestEngine(strategy, config)
-        return engine.run(self, id, after=after, before=before, **params)
+        return engine.run(self, id, after=after, before=before, data_dir=data_dir, **params)
 
     def close(self) -> None:
         self._http.close()
@@ -110,7 +116,7 @@ class AsyncMarketLens:
         self.series = AsyncSeriesResource(self._http)
         self.orderbook = AsyncOrderbook(self._http, series=self.series, markets=self.markets, events=self.events)
         self.signals = AsyncSignals(self._http)
-        self.exports = AsyncExports(self._http)
+        self.exports = AsyncExports(self._http, series=self.series)
         self.reference = AsyncReference(self._http)
 
     async def backtest(
