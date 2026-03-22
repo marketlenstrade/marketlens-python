@@ -28,6 +28,9 @@ class Strategy(ABC):
     def on_fill(self, ctx: StrategyContext, market: Market, fill: Fill) -> None:
         """Called when your order is filled."""
 
+    def on_reject(self, ctx: StrategyContext, market: Market, order: Order) -> None:
+        """Called when your order is rejected or fails to submit."""
+
     def on_market_start(
         self, ctx: StrategyContext, market: Market, book: OrderBook,
     ) -> None:

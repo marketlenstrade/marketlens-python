@@ -82,6 +82,7 @@ class BacktestConfig:
     slippage_bps: int = 0
     limit_fill_rate: float = 0.1
     queue_position: bool = False
+    settlement_delay_ms: int = 0  # on-chain settlement delay
 
 
 class _EngineCore:
@@ -102,11 +103,14 @@ class _EngineCore:
             queue_position=self._config.queue_position,
         )
         self._latency_ms = self._config.latency_ms
+        self._settlement_delay_ms = self._config.settlement_delay_ms
         self._portfolio = Portfolio(self._config.initial_cash)
         self._order_counter = 0
         self._orders: list[Order] = []
         self._open_orders: list[Order] = []
         self._pending_orders: list[tuple[int, Order]] = []  # (activate_at, order)
+        # Per-market settlement: earliest time a SELL can activate after a BUY fill
+        self._settled_at: dict[str, int] = {}  # market_id → timestamp_ms
         self._settlements: list[SettlementRecord] = []
         self._equity_curve: list[dict] = []
         self._cash_rejected = 0
@@ -185,8 +189,13 @@ class _EngineCore:
         )
         self._orders.append(order)
 
-        if self._latency_ms > 0:
-            activate_at = self._current_time + self._latency_ms
+        # Compute activation time: network latency + settlement delay for SELLs
+        activate_at = self._current_time + self._latency_ms
+        if side in (OrderSide.SELL_YES, OrderSide.SELL_NO):
+            settled_at = self._settled_at.get(target, 0)
+            activate_at = max(activate_at, settled_at)
+
+        if activate_at > self._current_time:
             self._pending_orders.append((activate_at, order))
         elif order_type == OrderType.MARKET:
             self._fill_market_order(order)
@@ -295,6 +304,9 @@ class _EngineCore:
             if self._portfolio._cash < cost:
                 self._cash_rejected += 1
                 raise ValueError("Insufficient cash")
+            # Record when settlement completes (tokens become sellable)
+            if self._settlement_delay_ms > 0:
+                self._settled_at[fill.market_id] = fill.timestamp + self._settlement_delay_ms
         # Apply to portfolio — may also raise ValueError for insufficient shares
         self._portfolio.apply_fill(fill)
 
