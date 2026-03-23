@@ -576,7 +576,7 @@ class TestEngineIntegration:
         mock_api.get("/markets/m1/orderbook/history").mock(
             return_value=httpx.Response(200, json=_history_response(SNAPSHOT_1, DELTA_1, SNAPSHOT_2)))
 
-        result = client.backtest(BuyAndSell(), "m1", after=1000, before=6000, initial_cash="10000.0000", latency_ms=0, limit_fill_rate=1.0)
+        result = client.backtest(BuyAndSell(), "m1", after=1000, before=6000, initial_cash="10000.0000", latency_ms=0, limit_fill_rate=1.0, settlement_delay_ms=0)
         assert result.total_trades == 2
         # No settlement since position is flat
         assert len(result.settlements_df()) == 0

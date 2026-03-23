@@ -82,7 +82,7 @@ class BacktestConfig:
     slippage_bps: int = 0
     limit_fill_rate: float = 0.1
     queue_position: bool = False
-    settlement_delay_ms: int = 0  # on-chain settlement delay
+    settlement_delay_ms: int = 5000  # on-chain balance availability (~5s after MATCHED)
 
 
 class _EngineCore:
