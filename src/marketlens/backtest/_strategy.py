@@ -149,6 +149,11 @@ class StrategyContext:
         underlying = self._engine._market_underlying.get(mid)
         return self._engine.get_reference_price(underlying, self._engine.current_time)
 
+    # ── Signal logging ──────────────────────────────────────────
+
+    def log_signal(self, **metadata: Any) -> None:
+        """No-op in backtest; live context attaches metadata to orders."""
+
     # ── Backwards-compatible aliases ──────────────────────────────
 
     @property
