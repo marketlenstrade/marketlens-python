@@ -467,11 +467,21 @@ class _EngineCore:
         prices = self._ref_prices[symbol]
         if not prices:
             return None
-        # bisect for latest entry <= at_time
+        # Use the PREVIOUS candle's close to avoid look-ahead bias.
+        #
+        # Reference prices are 1-second candles where timestamp = candle OPEN
+        # time and close = last trade within [open, open+1s).  Returning the
+        # candle whose open <= at_time gives a close that includes trades up
+        # to ~1s into the future relative to at_time.  A live Binance WS feed
+        # only knows the current trade price, not the eventual candle close.
+        #
+        # Stepping back one candle (idx - 1) returns the fully-completed
+        # previous second's close — the most recent price a real-time system
+        # could actually observe at at_time.
         idx = bisect.bisect_right(prices, (at_time, "~")) - 1
-        if idx < 0:
+        if idx < 1:
             return None
-        return prices[idx][1]
+        return prices[idx - 1][1]
 
     def _register_market(self, market: Market) -> None:
         self._market_underlying[market.id] = market.underlying
