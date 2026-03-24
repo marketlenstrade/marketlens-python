@@ -456,6 +456,10 @@ class _EngineCore:
         """Read market history from local Parquet files instead of the API."""
         for market in markets:
             path = Path(data_dir) / f"history-{market.id}.parquet"
+            if not path.exists():
+                import warnings
+                warnings.warn(f"Skipping market {market.id}: {path} not found")
+                continue
             events = _iter_history_parquet(path)
             replay = OrderBookReplay(events, market_id=market.id, platform=market.platform)
             for event, book in replay:
