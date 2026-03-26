@@ -7,6 +7,8 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any, AsyncIterator, Iterator
 
+import pyarrow.parquet as pq
+
 from marketlens._base import _coerce_timestamp
 from marketlens.exceptions import NotFoundError
 from marketlens.backtest._fees import FeeModel, PolymarketFeeModel, ZeroFeeModel
@@ -121,7 +123,7 @@ class _EngineCore:
         self._books: dict[str, OrderBook] = {}
         self._market_series: dict[str, str] = {}  # market_id → series_id (for settlement attribution)
         self._market_group: dict[str, str] = {}    # market_id → group key (for sequential slot tracking)
-        self._ref_prices: dict[str, list[tuple[int, str]]] = {}  # symbol → sorted (timestamp, close)
+        self._ref_prices: dict[str, list[tuple[int, str]]] = {}  # symbol → sorted (timestamp, price)
         self._market_underlying: dict[str, str | None] = {}  # market_id → underlying symbol
 
         self._ctx = StrategyContext(self)
@@ -471,21 +473,10 @@ class _EngineCore:
         prices = self._ref_prices[symbol]
         if not prices:
             return None
-        # Use the PREVIOUS candle's close to avoid look-ahead bias.
-        #
-        # Reference prices are 1-second candles where timestamp = candle OPEN
-        # time and close = last trade within [open, open+1s).  Returning the
-        # candle whose open <= at_time gives a close that includes trades up
-        # to ~1s into the future relative to at_time.  A live Binance WS feed
-        # only knows the current trade price, not the eventual candle close.
-        #
-        # Stepping back one candle (idx - 1) returns the fully-completed
-        # previous second's close — the most recent price a real-time system
-        # could actually observe at at_time.
+        # Each entry is a completed trade at its exact timestamp.
+        # Return the most recent trade at or before at_time.
         idx = bisect.bisect_right(prices, (at_time, "~")) - 1
-        if idx < 1:
-            return None
-        return prices[idx - 1][1]
+        return prices[idx][1] if idx >= 0 else None
 
     def _register_market(self, market: Market) -> None:
         self._market_underlying[market.id] = market.underlying
@@ -502,27 +493,26 @@ class _EngineCore:
 
 
 class BacktestEngine(_EngineCore):
-    def _prefetch_reference_prices(
-        self, client: Any, after: int | None, before: int | None, *, markets: list[Market] | None = None,
-    ) -> None:
+    def _prefetch_reference_prices(self, data_dir: str | None = None) -> None:
         underlyings = {u for u in self._market_underlying.values() if u is not None}
-        # When we know the actual markets, start coverage from the earliest
-        # open_time so markets that open before ``after`` are fully covered.
-        effective_after = _coerce_timestamp(after)
-        if markets:
-            earliest_open = min(m.open_time for m in markets)
-            if effective_after is None or earliest_open < effective_after:
-                effective_after = earliest_open
         for symbol in underlyings:
             if symbol in self._ref_prices:
                 continue
-            params: dict[str, Any] = {"order": "asc", "limit": 5000}
-            if effective_after is not None:
-                params["after"] = effective_after
-            if before is not None:
-                params["before"] = before
-            candles = client.reference.candles(symbol, **params).to_list()
-            self._ref_prices[symbol] = [(c.timestamp, c.close) for c in candles]
+            if data_dir is None:
+                raise ValueError(
+                    f"data_dir is required to load reference trades for {symbol}. "
+                    "Use client.exports.download_series() to download data first."
+                )
+            ref_path = Path(data_dir) / f"reference-{symbol}.parquet"
+            if not ref_path.exists():
+                raise FileNotFoundError(
+                    f"Reference trades not found: {ref_path}. "
+                    "Re-run client.exports.download_series() to download tick data."
+                )
+            table = pq.read_table(ref_path, columns=["timestamp", "price"])
+            ts_col = table.column("timestamp").to_pylist()
+            price_col = [str(v) for v in table.column("price").to_pylist()]
+            self._ref_prices[symbol] = list(zip(ts_col, price_col))
 
     def run(
         self,
@@ -541,7 +531,7 @@ class BacktestEngine(_EngineCore):
 
         if isinstance(id, list):
             streams = self._resolve_list(client, id, after=after, before=before, data_dir=data_dir, **params)
-            self._prefetch_reference_prices(client, after, before)
+            self._prefetch_reference_prices(data_dir=data_dir)
             self._run_merged(streams)
             return self._build_result()
 
@@ -550,7 +540,7 @@ class BacktestEngine(_EngineCore):
             market = client.markets.get(id)
             self._market_series[market.id] = market.series_id or market.id
             self._register_market(market)
-            self._prefetch_reference_prices(client, after, before, markets=[market])
+            self._prefetch_reference_prices(data_dir=data_dir)
             self._run_merged([_stream([market])])
             return self._build_result()
         except NotFoundError:
@@ -567,7 +557,7 @@ class BacktestEngine(_EngineCore):
                 streams = self._resolve_structured(
                     client, id, series, after=after, before=before, data_dir=data_dir, **params,
                 )
-                self._prefetch_reference_prices(client, after, before)
+                self._prefetch_reference_prices(data_dir=data_dir)
                 self._run_merged(streams)
             elif series.is_rolling:
                 markets = list(client.series.walk(id, after=after, before=before, **params))
@@ -575,7 +565,7 @@ class BacktestEngine(_EngineCore):
                     self._market_series[m.id] = series.id
                     self._market_group[m.id] = series.id
                     self._register_market(m)
-                self._prefetch_reference_prices(client, after, before, markets=markets)
+                self._prefetch_reference_prices(data_dir=data_dir)
                 self._run_merged([_stream(markets)])
             else:
                 raise ValueError(
@@ -588,7 +578,7 @@ class BacktestEngine(_EngineCore):
         if found:
             self._market_series[found[0].id] = found[0].series_id or found[0].id
             self._register_market(found[0])
-            self._prefetch_reference_prices(client, after, before, markets=found)
+            self._prefetch_reference_prices(data_dir=data_dir)
             self._run_merged([_stream([found[0]])])
             return self._build_result()
 
@@ -685,25 +675,26 @@ class BacktestEngine(_EngineCore):
 
 
 class AsyncBacktestEngine(_EngineCore):
-    async def _async_prefetch_reference_prices(
-        self, client: Any, after: int | None, before: int | None, *, markets: list[Market] | None = None,
-    ) -> None:
+    async def _async_prefetch_reference_prices(self, data_dir: str | None = None) -> None:
         underlyings = {u for u in self._market_underlying.values() if u is not None}
-        effective_after = _coerce_timestamp(after)
-        if markets:
-            earliest_open = min(m.open_time for m in markets)
-            if effective_after is None or earliest_open < effective_after:
-                effective_after = earliest_open
         for symbol in underlyings:
             if symbol in self._ref_prices:
                 continue
-            params: dict[str, Any] = {"order": "asc", "limit": 5000}
-            if effective_after is not None:
-                params["after"] = effective_after
-            if before is not None:
-                params["before"] = before
-            candles = await client.reference.candles(symbol, **params).to_list()
-            self._ref_prices[symbol] = [(c.timestamp, c.close) for c in candles]
+            if data_dir is None:
+                raise ValueError(
+                    f"data_dir is required to load reference trades for {symbol}. "
+                    "Use client.exports.download_series() to download data first."
+                )
+            ref_path = Path(data_dir) / f"reference-{symbol}.parquet"
+            if not ref_path.exists():
+                raise FileNotFoundError(
+                    f"Reference trades not found: {ref_path}. "
+                    "Re-run client.exports.download_series() to download tick data."
+                )
+            table = pq.read_table(ref_path, columns=["timestamp", "price"])
+            ts_col = table.column("timestamp").to_pylist()
+            price_col = [str(v) for v in table.column("price").to_pylist()]
+            self._ref_prices[symbol] = list(zip(ts_col, price_col))
 
     async def run(
         self,
@@ -712,11 +703,12 @@ class AsyncBacktestEngine(_EngineCore):
         *,
         after: Any = None,
         before: Any = None,
+        data_dir: str | None = None,
         **params: Any,
     ) -> BacktestResult:
         if isinstance(id, list):
             streams = await self._resolve_list(client, id, after=after, before=before, **params)
-            await self._async_prefetch_reference_prices(client, after, before)
+            await self._async_prefetch_reference_prices(data_dir=data_dir)
             await self._run_merged(streams)
             return self._build_result()
 
@@ -725,7 +717,7 @@ class AsyncBacktestEngine(_EngineCore):
             market = await client.markets.get(id)
             self._market_series[market.id] = market.series_id or market.id
             self._register_market(market)
-            await self._async_prefetch_reference_prices(client, after, before, markets=[market])
+            await self._async_prefetch_reference_prices(data_dir=data_dir)
             await self._run_merged([self._async_make_market_stream(client, [market], after=after, before=before)])
             return self._build_result()
         except NotFoundError:
@@ -742,7 +734,7 @@ class AsyncBacktestEngine(_EngineCore):
                 streams = await self._async_resolve_structured(
                     client, id, series, after=after, before=before, **params,
                 )
-                await self._async_prefetch_reference_prices(client, after, before)
+                await self._async_prefetch_reference_prices(data_dir=data_dir)
                 await self._run_merged(streams)
             elif series.is_rolling:
                 markets = []
@@ -752,7 +744,7 @@ class AsyncBacktestEngine(_EngineCore):
                     self._market_series[m.id] = series.id
                     self._market_group[m.id] = series.id
                     self._register_market(m)
-                await self._async_prefetch_reference_prices(client, after, before, markets=markets)
+                await self._async_prefetch_reference_prices(data_dir=data_dir)
                 await self._run_merged([self._async_make_market_stream(client, markets, after=after, before=before)])
             else:
                 raise ValueError(
@@ -765,7 +757,7 @@ class AsyncBacktestEngine(_EngineCore):
         if found:
             self._market_series[found[0].id] = found[0].series_id or found[0].id
             self._register_market(found[0])
-            await self._async_prefetch_reference_prices(client, after, before, markets=found)
+            await self._async_prefetch_reference_prices(data_dir=data_dir)
             await self._run_merged([self._async_make_market_stream(client, [found[0]], after=after, before=before)])
             return self._build_result()
 
