@@ -42,9 +42,27 @@ class _MutablePosition:
             self.avg_entry_price = total_cost / self.shares
             self.cost_basis = self.avg_entry_price * self.shares
         else:
-            raise ValueError(
-                f"Cannot add {side.value} shares to existing {self.side.value} position"
-            )
+            # Opposite side — net down.  Matched YES+NO shares settle at $1
+            # guaranteed, so buying the opposite side locks in settlement value.
+            matched = min(self.shares, size)
+            excess = size - matched
+
+            settlement_value = _ONE - price
+            self.realized_pnl += (settlement_value - self.avg_entry_price) * matched
+
+            self.shares -= matched
+            if excess > _ZERO:
+                self.side = side
+                self.shares = excess
+                self.avg_entry_price = price
+                self.cost_basis = excess * price
+            elif self.shares == _ZERO:
+                self.side = PositionSide.FLAT
+                self.avg_entry_price = _ZERO
+                self.cost_basis = _ZERO
+                self.unrealized_pnl = _ZERO
+            else:
+                self.cost_basis = self.avg_entry_price * self.shares
         self.total_fees += fee
 
     def remove_shares(self, size: Decimal, price: Decimal, fee: Decimal) -> None:
