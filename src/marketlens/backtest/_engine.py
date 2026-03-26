@@ -241,6 +241,10 @@ class _EngineCore:
 
         When *market_id* is given, only orders for that market are considered.
         This prevents cross-market fills in event (multi-market) mode.
+
+        Limit orders that cross the spread at activation time are filled
+        immediately as taker orders (with taker fees), matching exchange
+        behaviour where an aggressive limit price is treated as a market order.
         """
         still_pending: list[tuple[int, Order]] = []
         for activate_at, order in self._pending_orders:
@@ -253,17 +257,40 @@ class _EngineCore:
                     if order.order_type == OrderType.MARKET:
                         self._fill_market_order(order)
                     else:
-                        order.status = OrderStatus.OPEN
-                        self._open_orders.append(order)
-                        self._fill_sim.register_limit_order(
-                            order, self._books.get(order.market_id, self._current_book),
-                        )
+                        self._activate_limit_order(order)
                 except ValueError:
                     # Position no longer sufficient (e.g. duplicate sell from latency)
                     order.status = OrderStatus.CANCELLED
             else:
                 still_pending.append((activate_at, order))
         self._pending_orders = still_pending
+
+    def _activate_limit_order(self, order: Order) -> None:
+        """Activate a limit order: fill crossing portion as taker, rest as maker.
+
+        Mirrors real exchange behaviour: when a limit order's price crosses
+        the spread, the exchange fills it immediately against resting
+        liquidity (taker fees). Any unfilled remainder posts to the book
+        as a resting maker order.
+        """
+        book = self._books.get(order.market_id, self._current_book)
+
+        # Try to fill the crossing portion
+        crossing_fill = self._fill_sim.try_fill_crossing_limit_order(
+            order, book, self._current_time,  # type: ignore[arg-type]
+        )
+        if crossing_fill is not None:
+            self._apply_fill(order, crossing_fill)
+
+        # If fully filled, we're done
+        remaining = Decimal(order.size) - Decimal(order.filled_size)
+        if remaining <= Decimal("0.0001"):
+            return
+
+        # Remainder rests on the book as a maker order
+        order.status = OrderStatus.OPEN
+        self._open_orders.append(order)
+        self._fill_sim.register_limit_order(order, book)  # type: ignore[arg-type]
 
     def _fill_market_order(self, order: Order) -> None:
         book = self._books.get(order.market_id, self._current_book)

@@ -210,6 +210,91 @@ class FillSimulator:
             is_maker=False,
         )
 
+    def try_fill_crossing_limit_order(
+        self, order: Order, book: OrderBook, timestamp: int,
+    ) -> Fill | None:
+        """Fill the crossing portion of a limit order as a taker.
+
+        When a limit order arrives at the exchange with a price that
+        crosses the spread (e.g. BUY_YES limit >= best_ask), the exchange
+        fills it immediately against resting liquidity up to the limit
+        price, charging taker fees. Any unfilled remainder would rest
+        as a maker order (handled by the caller).
+
+        Returns None if the order does not cross the spread.
+        """
+        remaining = Decimal(order.size) - Decimal(order.filled_size)
+        if remaining <= 0:
+            return None
+
+        limit_price = Decimal(order.limit_price)  # type: ignore[arg-type]
+
+        # Determine which side of the book to walk and the price constraint.
+        # YES-denominated book: asks sorted ascending, bids sorted descending.
+        if order.side == OrderSide.BUY_YES:
+            levels = book.asks
+            yes_limit = limit_price
+            accept = lambda lp: lp <= yes_limit  # noqa: E731
+        elif order.side == OrderSide.SELL_YES:
+            levels = book.bids
+            yes_limit = limit_price
+            accept = lambda lp: lp >= yes_limit  # noqa: E731
+        elif order.side == OrderSide.BUY_NO:
+            # BUY_NO at p ≡ SELL_YES at (1-p): walk bids, accept bid >= (1-p)
+            levels = book.bids
+            yes_limit = _ONE - limit_price
+            accept = lambda lp: lp >= yes_limit  # noqa: E731
+        elif order.side == OrderSide.SELL_NO:
+            # SELL_NO at p ≡ BUY_YES at (1-p): walk asks, accept ask <= (1-p)
+            levels = book.asks
+            yes_limit = _ONE - limit_price
+            accept = lambda lp: lp <= yes_limit  # noqa: E731
+        else:
+            return None
+
+        # Walk levels up to the limit price
+        total_filled = _ZERO
+        total_cost = _ZERO  # in YES-price space
+
+        for level in levels:
+            level_price = Decimal(level.price)
+            if not accept(level_price):
+                break
+            available = Decimal(level.size) * self._max_fill_fraction
+            fill = min(remaining - total_filled, available)
+            if fill <= 0:
+                break
+            total_cost += fill * level_price
+            total_filled += fill
+            if total_filled >= remaining:
+                break
+
+        if total_filled <= 0:
+            return None
+
+        yes_vwap = total_cost / total_filled
+
+        # Convert to the order's price space
+        if order.side in (OrderSide.BUY_NO, OrderSide.SELL_NO):
+            fill_price = _ONE - yes_vwap
+        else:
+            fill_price = yes_vwap
+
+        fill_price_str = str(fill_price.quantize(_FOUR))
+        fill_size_str = str(total_filled.quantize(_FOUR))
+        fee = self._fee_model.calculate(fill_price, total_filled, is_maker=False)
+
+        return Fill(
+            order_id=order.id,
+            market_id=order.market_id,
+            side=order.side,
+            price=fill_price_str,
+            size=fill_size_str,
+            fee=str(fee.quantize(_FOUR)),
+            timestamp=timestamp,
+            is_maker=False,
+        )
+
     def try_fill_limit_order(
         self,
         order: Order,
