@@ -85,7 +85,8 @@ class Orderbook:
         )
 
     def walk(
-        self, id: str, *, after: Any = None, before: Any = None, **params: Any,
+        self, id: str, *, after: Any = None, before: Any = None,
+        data_dir: str | None = None, **params: Any,
     ):
         """Replay L2 books for a market, rolling series, or structured product.
 
@@ -97,6 +98,7 @@ class Orderbook:
             id: Market UUID, series identifier / platform slug, or condition ID.
             after: Start time (market: book history window; series: close_time filter).
             before: End time (market: book history window; series: close_time filter).
+            data_dir: If set, read from local Parquet files instead of the API.
             **params: Extra filter params (e.g. ``status``, ``platform``).
         """
         from marketlens.helpers.walk import EventOrderBookWalk, OrderBookWalk
@@ -113,6 +115,7 @@ class Orderbook:
             return OrderBookWalk(
                 [market], self, after=after, before=before,
                 series=series, events_resource=self._events,
+                data_dir=data_dir,
             )
         except NotFoundError:
             pass
@@ -135,6 +138,7 @@ class Orderbook:
                 markets = list(self._series.walk(id, after=after, before=before, **params))
                 return OrderBookWalk(
                     markets, self, series=series, events_resource=self._events,
+                    data_dir=data_dir,
                 )
             else:
                 raise ValueError(
@@ -157,6 +161,7 @@ class Orderbook:
             return OrderBookWalk(
                 [market], self, after=after, before=before,
                 series=series, events_resource=self._events,
+                data_dir=data_dir,
             )
 
         raise NotFoundError(404, "NOT_FOUND", f"No market or series found for '{id}'")

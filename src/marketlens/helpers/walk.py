@@ -61,6 +61,7 @@ class OrderBookWalk:
         self, markets: list[Market], orderbook_resource: Any,
         *, after: Any = None, before: Any = None,
         series: Series | None = None, events_resource: Any = None,
+        data_dir: str | None = None,
     ) -> None:
         self._markets_list = markets
         self._orderbook = orderbook_resource
@@ -69,6 +70,7 @@ class OrderBookWalk:
         self._series_obj = series
         self._events_resource = events_resource
         self._event_cache: dict[str, Event | None] = {}
+        self._data_dir = data_dir
 
         self._books: dict[str, OrderBook] = {}
         self._current_event: Event | None = None
@@ -115,18 +117,31 @@ class OrderBookWalk:
         return self._event_cache[eid]
 
     def __iter__(self) -> Iterator[tuple[Market, OrderBook]]:
+        from pathlib import Path
+
         for market in self._markets_list:
             self._current_markets = {market.id: market}
             self._books = {}
             self._current_event = self._resolve_event(market)
 
-            history = self._orderbook.history(
-                market.id,
-                after=self._after or market.open_time,
-                before=self._before or market.close_time,
-            )
+            if self._data_dir:
+                path = Path(self._data_dir) / f"history-{market.id}.parquet"
+                if path.exists():
+                    from marketlens.backtest._engine import _iter_history_parquet
+                    events = _iter_history_parquet(path)
+                else:
+                    import warnings
+                    warnings.warn(f"Skipping {market.id}: {path} not found")
+                    continue
+            else:
+                events = self._orderbook.history(
+                    market.id,
+                    after=self._after or market.open_time,
+                    before=self._before or market.close_time,
+                )
+
             replay = OrderBookReplay(
-                history, market_id=market.id, platform=market.platform,
+                events, market_id=market.id, platform=market.platform,
             )
             for event, book in replay:
                 if not isinstance(event, TradeEvent):
@@ -152,6 +167,7 @@ class AsyncOrderBookWalk:
         self, markets: list[Market], orderbook_resource: Any,
         *, after: Any = None, before: Any = None,
         series: Series | None = None, events_resource: Any = None,
+        data_dir: str | None = None,
     ) -> None:
         self._markets_list = markets
         self._orderbook = orderbook_resource
@@ -160,6 +176,7 @@ class AsyncOrderBookWalk:
         self._series_obj = series
         self._events_resource = events_resource
         self._event_cache: dict[str, Event | None] = {}
+        self._data_dir = data_dir
 
         self._books: dict[str, OrderBook] = {}
         self._current_event: Event | None = None
