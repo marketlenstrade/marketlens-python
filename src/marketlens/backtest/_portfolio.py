@@ -30,17 +30,27 @@ class _MutablePosition:
 
     def add_shares(
         self, side: PositionSide, size: Decimal, price: Decimal, fee: Decimal,
-    ) -> None:
+    ) -> Decimal:
+        """Add shares, returning the number netted against the opposite side.
+
+        When buying the opposite side, matched YES+NO pairs are netted and
+        the caller should credit ``matched * $1`` back to cash to simulate
+        CTF merge.  Returns 0 when adding to the same side or from flat.
+        """
         if self.side == PositionSide.FLAT:
             self.side = side
             self.shares = size
             self.avg_entry_price = price
             self.cost_basis = price * size
+            self.total_fees += fee
+            return _ZERO
         elif self.side == side:
             total_cost = self.avg_entry_price * self.shares + price * size
             self.shares += size
             self.avg_entry_price = total_cost / self.shares
             self.cost_basis = self.avg_entry_price * self.shares
+            self.total_fees += fee
+            return _ZERO
         else:
             # Opposite side — net down.  Matched YES+NO shares settle at $1
             # guaranteed, so buying the opposite side locks in settlement value.
@@ -63,7 +73,8 @@ class _MutablePosition:
                 self.unrealized_pnl = _ZERO
             else:
                 self.cost_basis = self.avg_entry_price * self.shares
-        self.total_fees += fee
+            self.total_fees += fee
+            return matched
 
     def remove_shares(self, size: Decimal, price: Decimal, fee: Decimal) -> None:
         if self.shares < size:
@@ -159,8 +170,11 @@ class Portfolio:
             target_side = (
                 PositionSide.YES if fill.side == OrderSide.BUY_YES else PositionSide.NO
             )
-            pos.add_shares(target_side, size, price, fee)
+            matched = pos.add_shares(target_side, size, price, fee)
             self._cash -= price * size + fee
+            # Simulate CTF merge: matched YES+NO pairs return $1 each.
+            if matched > _ZERO:
+                self._cash += matched * _ONE
         else:  # SELL_YES, SELL_NO
             pos.remove_shares(size, price, fee)
             self._cash += price * size - fee
