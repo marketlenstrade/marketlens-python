@@ -149,6 +149,21 @@ class StrategyContext:
         underlying = self._engine._market_underlying.get(mid)
         return self._engine.get_reference_price(underlying, self._engine.current_time)
 
+    def reference_prices(self, market_id: str | None = None) -> list[tuple[int, str]]:
+        """Return the full reference price history as [(timestamp_ms, price_str), ...].
+
+        Only includes prices up to the current backtest time.
+        """
+        mid = market_id or self._engine.current_market.id
+        underlying = self._engine._market_underlying.get(mid)
+        if underlying is None or underlying not in self._engine._ref_prices:
+            return []
+        all_prices = self._engine._ref_prices[underlying]
+        # Only return prices up to current time to prevent lookahead
+        import bisect
+        end = bisect.bisect_right(all_prices, (self._engine.current_time, "~"))
+        return all_prices[:end]
+
     # ── Signal logging ──────────────────────────────────────────
 
     def log_signal(self, **metadata: Any) -> None:

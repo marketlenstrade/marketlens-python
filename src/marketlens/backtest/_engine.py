@@ -430,14 +430,20 @@ class _EngineCore:
     ) -> None:
         first_book_seen: set[str] = set()
         active: dict[str, Market] = {}  # grouping_key → current Market
+        finalized: set[str] = set()  # market IDs already finalized
 
         for market, event, book in merge_streams(streams):
+            # Skip events for markets already finalized (past close_time)
+            if market.id in finalized:
+                continue
+
             key = self._market_group.get(market.id, market.id)
 
             # Market transition: previous market in this slot ended
             prev = active.get(key)
             if prev is not None and prev.id != market.id:
                 self._finalize_market(prev)
+                finalized.add(prev.id)
             active[key] = market
 
             if self._auto_fees:
@@ -449,9 +455,21 @@ class _EngineCore:
             elif not seen and isinstance(event, (SnapshotEvent, DeltaEvent)):
                 first_book_seen.add(market.id)
 
+            # Finalize markets that have passed their close_time
+            expired = [
+                k for k, m in active.items()
+                if m.close_time and self._current_time >= m.close_time
+                and m.id not in finalized
+            ]
+            for k in expired:
+                self._finalize_market(active[k])
+                finalized.add(active[k].id)
+                del active[k]
+
         # Finalize remaining
         for m in active.values():
-            self._finalize_market(m)
+            if m.id not in finalized:
+                self._finalize_market(m)
 
     def _make_market_stream(
         self,
@@ -520,26 +538,48 @@ class _EngineCore:
 
 
 class BacktestEngine(_EngineCore):
-    def _prefetch_reference_prices(self, data_dir: str | None = None) -> None:
+    def _prefetch_reference_prices(
+        self, data_dir: str | None = None, *, client: Any = None,
+        after: Any = None, before: Any = None,
+    ) -> None:
+        from marketlens._base import _coerce_timestamp
+
         underlyings = {u for u in self._market_underlying.values() if u is not None}
         for symbol in underlyings:
             if symbol in self._ref_prices:
                 continue
-            if data_dir is None:
-                raise ValueError(
-                    f"data_dir is required to load reference trades for {symbol}. "
-                    "Use client.exports.download_series() to download data first."
-                )
-            ref_path = Path(data_dir) / f"reference-{symbol}.parquet"
-            if not ref_path.exists():
-                raise FileNotFoundError(
-                    f"Reference trades not found: {ref_path}. "
-                    "Re-run client.exports.download_series() to download tick data."
-                )
-            table = pq.read_table(ref_path, columns=["timestamp", "price"])
-            ts_col = table.column("timestamp").to_pylist()
-            price_col = [str(v) for v in table.column("price").to_pylist()]
-            self._ref_prices[symbol] = list(zip(ts_col, price_col))
+            # Try local parquet file first
+            if data_dir is not None:
+                ref_path = Path(data_dir) / f"reference-{symbol}.parquet"
+                if ref_path.exists():
+                    table = pq.read_table(ref_path, columns=["timestamp", "price"])
+                    ts_col = table.column("timestamp").to_pylist()
+                    price_col = [str(v) for v in table.column("price").to_pylist()]
+                    self._ref_prices[symbol] = list(zip(ts_col, price_col))
+                    continue
+            # Fall back: download reference trades parquet from API
+            if client is not None:
+                import tempfile
+                params: dict = {"symbol": symbol}
+                if after is not None:
+                    params["after"] = _coerce_timestamp(after)
+                if before is not None:
+                    params["before"] = _coerce_timestamp(before)
+                tmp = Path(tempfile.mkdtemp()) / f"reference-{symbol}.parquet"
+                try:
+                    client._http.download("/reference/trades/export", tmp, params=params)
+                    table = pq.read_table(tmp, columns=["timestamp", "price"])
+                    ts_col = table.column("timestamp").to_pylist()
+                    price_col = [str(v) for v in table.column("price").to_pylist()]
+                    self._ref_prices[symbol] = list(zip(ts_col, price_col))
+                    continue
+                except Exception as exc:
+                    import sys
+                    print(f"  [ref-price] API download failed for {symbol}: {exc}", file=sys.stderr)
+            raise ValueError(
+                f"Cannot load reference prices for {symbol}. "
+                f"Provide a data_dir with reference-{symbol}.parquet or ensure API access."
+            )
 
     def run(
         self,
@@ -558,7 +598,7 @@ class BacktestEngine(_EngineCore):
 
         if isinstance(id, list):
             streams = self._resolve_list(client, id, after=after, before=before, data_dir=data_dir, **params)
-            self._prefetch_reference_prices(data_dir=data_dir)
+            self._prefetch_reference_prices(data_dir=data_dir, client=client, after=after, before=before)
             self._run_merged(streams)
             return self._build_result()
 
@@ -567,7 +607,7 @@ class BacktestEngine(_EngineCore):
             market = client.markets.get(id)
             self._market_series[market.id] = market.series_id or market.id
             self._register_market(market)
-            self._prefetch_reference_prices(data_dir=data_dir)
+            self._prefetch_reference_prices(data_dir=data_dir, client=client, after=after, before=before)
             self._run_merged([_stream([market])])
             return self._build_result()
         except NotFoundError:
@@ -584,7 +624,7 @@ class BacktestEngine(_EngineCore):
                 streams = self._resolve_structured(
                     client, id, series, after=after, before=before, data_dir=data_dir, **params,
                 )
-                self._prefetch_reference_prices(data_dir=data_dir)
+                self._prefetch_reference_prices(data_dir=data_dir, client=client, after=after, before=before)
                 self._run_merged(streams)
             elif series.is_rolling:
                 markets = list(client.series.walk(id, after=after, before=before, **params))
@@ -592,7 +632,7 @@ class BacktestEngine(_EngineCore):
                     self._market_series[m.id] = series.id
                     self._market_group[m.id] = series.id
                     self._register_market(m)
-                self._prefetch_reference_prices(data_dir=data_dir)
+                self._prefetch_reference_prices(data_dir=data_dir, client=client, after=after, before=before)
                 self._run_merged([_stream(markets)])
             else:
                 raise ValueError(
@@ -605,7 +645,7 @@ class BacktestEngine(_EngineCore):
         if found:
             self._market_series[found[0].id] = found[0].series_id or found[0].id
             self._register_market(found[0])
-            self._prefetch_reference_prices(data_dir=data_dir)
+            self._prefetch_reference_prices(data_dir=data_dir, client=client, after=after, before=before)
             self._run_merged([_stream([found[0]])])
             return self._build_result()
 
@@ -680,8 +720,9 @@ class BacktestEngine(_EngineCore):
         event_params = dict(params)
         if after is not None:
             event_params["end_after"] = after
-        if before is not None:
-            event_params["start_before"] = before
+        # Only filter by end_after; many structured events have NULL
+        # start_date which causes start_before to exclude them.
+        # Individual markets are filtered by open_time/close_time below.
         events = client.series.events(series_id, **event_params).to_list()
 
         after_ms = _coerce_timestamp(after) if after is not None else None
@@ -689,6 +730,12 @@ class BacktestEngine(_EngineCore):
 
         streams: list[Iterator[tuple[Market, HistoryEvent, OrderBook]]] = []
         for evt in events:
+            # Skip events that end before our window
+            if after_ms is not None and evt.end_date and evt.end_date < after_ms:
+                continue
+            # Skip events that start after our window (when start_date is known)
+            if before_ms is not None and evt.start_date and evt.start_date > before_ms:
+                continue
             event_markets = client.events.markets(evt.id).to_list()
             for m in event_markets:
                 if after_ms is not None and m.close_time and m.close_time < after_ms:
