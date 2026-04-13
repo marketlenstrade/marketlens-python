@@ -34,11 +34,22 @@ class PolymarketFeeModel(FeeModel):
         """Sports markets (NCAAB, Serie A): fee_rate=0.0175, exponent=1. Max ~0.44% at p=0.50."""
         return cls(Decimal("0.0175"), exponent=1)
 
+    _SPORTS_CATEGORIES = frozenset({
+        "sports", "football", "basketball", "baseball", "hockey",
+        "soccer", "tennis", "golf", "mma", "boxing", "cricket",
+        "rugby", "nfl", "nba", "mlb", "nhl", "ncaab",
+    })
+
     @classmethod
     def for_category(cls, category: str | None) -> FeeModel:
         """Return the correct fee model for a Polymarket market category."""
-        if category and category.lower() == "crypto":
+        if not category:
+            return ZeroFeeModel()
+        cat = category.lower()
+        if cat == "crypto":
             return cls.crypto()
+        if cat in cls._SPORTS_CATEGORIES:
+            return cls.sports()
         return ZeroFeeModel()
 
     def calculate(self, price: Decimal, size: Decimal, is_maker: bool) -> Decimal:

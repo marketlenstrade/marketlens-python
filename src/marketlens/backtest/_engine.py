@@ -757,13 +757,13 @@ class AsyncBacktestEngine(_EngineCore):
             if data_dir is None:
                 raise ValueError(
                     f"data_dir is required to load reference trades for {symbol}. "
-                    "Use client.exports.download_series() to download data first."
+                    "Use client.exports.download_reference() to download data first."
                 )
             ref_path = Path(data_dir) / f"reference-{symbol}.parquet"
             if not ref_path.exists():
                 raise FileNotFoundError(
                     f"Reference trades not found: {ref_path}. "
-                    "Re-run client.exports.download_series() to download tick data."
+                    "Use client.exports.download_reference() to download tick data."
                 )
             table = pq.read_table(ref_path, columns=["timestamp", "price"])
             ts_col = table.column("timestamp").to_pylist()

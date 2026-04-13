@@ -4,7 +4,7 @@ from typing import Any
 
 from marketlens._base import AsyncHTTPClient, SyncHTTPClient
 from marketlens._pagination import AsyncPageIterator, SyncPageIterator
-from marketlens.types.reference import ReferenceCandle
+from marketlens.types.reference import ReferenceCandle, ReferenceTrade
 
 
 class Reference:
@@ -15,6 +15,10 @@ class Reference:
         params["symbol"] = symbol
         return SyncPageIterator(self._client, "/reference/candles", params, ReferenceCandle)
 
+    def trades(self, symbol: str, **params: Any) -> SyncPageIterator[ReferenceTrade]:
+        params["symbol"] = symbol
+        return SyncPageIterator(self._client, "/reference/trades", params, ReferenceTrade)
+
 
 class AsyncReference:
     def __init__(self, client: AsyncHTTPClient) -> None:
@@ -23,3 +27,7 @@ class AsyncReference:
     def candles(self, symbol: str, **params: Any) -> AsyncPageIterator[ReferenceCandle]:
         params["symbol"] = symbol
         return AsyncPageIterator(self._client, "/reference/candles", params, ReferenceCandle)
+
+    def trades(self, symbol: str, **params: Any) -> AsyncPageIterator[ReferenceTrade]:
+        params["symbol"] = symbol
+        return AsyncPageIterator(self._client, "/reference/trades", params, ReferenceTrade)

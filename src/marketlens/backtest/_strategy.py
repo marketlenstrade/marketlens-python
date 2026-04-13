@@ -101,6 +101,29 @@ class StrategyContext:
             market_id=market_id, limit_price=limit_price, cancel_after=cancel_after,
         )
 
+    def buy_batch(
+        self,
+        orders: list[tuple[str, str, str]],
+        *,
+        market_id: str | None = None,
+    ) -> list[Order]:
+        """Submit multiple limit buy orders.
+
+        Args:
+            orders: List of ``(side, size, limit_price)`` tuples where
+                    *side* is ``"YES"`` or ``"NO"``.
+            market_id: Override market (defaults to current).
+
+        In backtest, each order is submitted individually.
+        """
+        results: list[Order] = []
+        for side_str, size, limit_price in orders:
+            if side_str == "YES":
+                results.append(self.buy_yes(size=size, market_id=market_id, limit_price=limit_price))
+            else:
+                results.append(self.buy_no(size=size, market_id=market_id, limit_price=limit_price))
+        return results
+
     # ── Order management ──────────────────────────────────────────
 
     def cancel(self, order: Order) -> None:
@@ -108,6 +131,14 @@ class StrategyContext:
 
     def cancel_all(self, *, market_id: str | None = None) -> None:
         self._engine.cancel_all_orders(market_id=market_id)
+
+    # ── Settlement ───────────────────────────────────────────────
+
+    def request_merge(self, condition_id: str, amount: float, neg_risk: bool = False) -> None:
+        """No-op in backtest — portfolio auto-nets matched YES+NO pairs during fill processing."""
+
+    def request_redeem(self, condition_id: str, neg_risk: bool = False) -> None:
+        """No-op in backtest — settlement is instant."""
 
     # ── State queries ─────────────────────────────────────────────
 

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import io
+import zipfile
 from pathlib import Path
 from typing import Any
 
@@ -8,9 +10,8 @@ from marketlens.exceptions import NotFoundError
 
 
 class Exports:
-    def __init__(self, client: SyncHTTPClient, *, series: Any = None) -> None:
+    def __init__(self, client: SyncHTTPClient, **_: Any) -> None:
         self._client = client
-        self._series = series
 
     def download(
         self,
@@ -25,15 +26,14 @@ class Exports:
             path: Directory to save the file in.
 
         Returns:
-            Path to the downloaded Parquet file.
+            Path to the data directory (same as *path*).
         """
-        dest = Path(path) / f"history-{market_id}.parquet"
-        if dest.exists():
-            return dest
-        return self._client.download(
-            f"/markets/{market_id}/export",
-            dest,
-        )
+        data_dir = Path(path)
+        data_dir.mkdir(parents=True, exist_ok=True)
+        dest = data_dir / f"history-{market_id}.parquet"
+        if not dest.exists():
+            self._client.download(f"/markets/{market_id}/export", dest)
+        return data_dir
 
     def download_series(
         self,
@@ -43,16 +43,15 @@ class Exports:
         before: Any = None,
         path: str | Path = ".",
     ) -> Path:
-        """Download history files for all markets in a series.
+        """Download history for all markets in a series.
 
-        Resolves the series, walks its markets filtered by after/before,
-        and downloads each market's history Parquet file. Also downloads
-        tick-level reference trades for the underlying asset (if available).
+        Downloads a zip from the API containing one Parquet file per market,
+        then extracts to the target directory. Skips if files already exist.
 
         Args:
             series_id: Series slug or UUID.
-            after: Only markets with close_time >= after.
-            before: Only markets with open_time <= before.
+            after: Start time filter (ms epoch or datetime).
+            before: End time filter (ms epoch or datetime).
             path: Directory to save files in.
 
         Returns:
@@ -61,44 +60,57 @@ class Exports:
         data_dir = Path(path)
         data_dir.mkdir(parents=True, exist_ok=True)
 
-        underlying = None
-        first_open = None
-        last_close = None
+        params: dict[str, Any] = {}
+        if after is not None:
+            params["after"] = after
+        if before is not None:
+            params["before"] = before
 
-        for market in self._series.walk(series_id, after=after, before=before):
-            if underlying is None and market.underlying:
-                underlying = market.underlying
-            if market.open_time is not None:
-                if first_open is None or market.open_time < first_open:
-                    first_open = market.open_time
-            if market.close_time is not None:
-                if last_close is None or market.close_time > last_close:
-                    last_close = market.close_time
-            try:
-                self.download(market.id, path=data_dir)
-            except NotFoundError:
-                pass
+        response = self._client._request_with_retry(
+            "GET", f"/series/{series_id}/export", params=params,
+        )
+        with zipfile.ZipFile(io.BytesIO(response.content)) as zf:
+            for name in zf.namelist():
+                dest = data_dir / name
+                if not dest.exists():
+                    dest.write_bytes(zf.read(name))
 
-        # Download tick-level reference trades for the underlying asset
-        if underlying and first_open and last_close:
-            ref_path = data_dir / f"reference-{underlying}.parquet"
-            if not ref_path.exists():
-                try:
-                    self._client.download(
-                        "/reference/trades/export",
-                        ref_path,
-                        params={"symbol": underlying, "after": first_open, "before": last_close},
-                    )
-                except NotFoundError:
-                    pass
+        return data_dir
 
+    def download_reference(
+        self,
+        symbol: str,
+        *,
+        after: Any,
+        before: Any,
+        path: str | Path = ".",
+    ) -> Path:
+        """Download tick-level reference trades as Parquet.
+
+        Args:
+            symbol: Underlying symbol (e.g. BTC, ETH, SOL).
+            after: Start time (ms epoch or datetime).
+            before: End time (ms epoch or datetime).
+            path: Directory to save the file in.
+
+        Returns:
+            Path to the data directory (same as *path*).
+        """
+        data_dir = Path(path)
+        data_dir.mkdir(parents=True, exist_ok=True)
+        dest = data_dir / f"reference-{symbol}.parquet"
+        if not dest.exists():
+            self._client.download(
+                "/reference/trades/export",
+                dest,
+                params={"symbol": symbol, "after": after, "before": before},
+            )
         return data_dir
 
 
 class AsyncExports:
-    def __init__(self, client: AsyncHTTPClient, *, series: Any = None) -> None:
+    def __init__(self, client: AsyncHTTPClient, **_: Any) -> None:
         self._client = client
-        self._series = series
 
     async def download(
         self,
@@ -113,15 +125,14 @@ class AsyncExports:
             path: Directory to save the file in.
 
         Returns:
-            Path to the downloaded Parquet file.
+            Path to the data directory (same as *path*).
         """
-        dest = Path(path) / f"history-{market_id}.parquet"
-        if dest.exists():
-            return dest
-        return await self._client.download(
-            f"/markets/{market_id}/export",
-            dest,
-        )
+        data_dir = Path(path)
+        data_dir.mkdir(parents=True, exist_ok=True)
+        dest = data_dir / f"history-{market_id}.parquet"
+        if not dest.exists():
+            await self._client.download(f"/markets/{market_id}/export", dest)
+        return data_dir
 
     async def download_series(
         self,
@@ -131,12 +142,12 @@ class AsyncExports:
         before: Any = None,
         path: str | Path = ".",
     ) -> Path:
-        """Download history files for all markets in a series (async).
+        """Download history for all markets in a series (async).
 
         Args:
             series_id: Series slug or UUID.
-            after: Only markets with close_time >= after.
-            before: Only markets with open_time <= before.
+            after: Start time filter (ms epoch or datetime).
+            before: End time filter (ms epoch or datetime).
             path: Directory to save files in.
 
         Returns:
@@ -145,34 +156,49 @@ class AsyncExports:
         data_dir = Path(path)
         data_dir.mkdir(parents=True, exist_ok=True)
 
-        underlying = None
-        first_open = None
-        last_close = None
+        params: dict[str, Any] = {}
+        if after is not None:
+            params["after"] = after
+        if before is not None:
+            params["before"] = before
 
-        async for market in self._series.walk(series_id, after=after, before=before):
-            if underlying is None and market.underlying:
-                underlying = market.underlying
-            if market.open_time is not None:
-                if first_open is None or market.open_time < first_open:
-                    first_open = market.open_time
-            if market.close_time is not None:
-                if last_close is None or market.close_time > last_close:
-                    last_close = market.close_time
-            try:
-                await self.download(market.id, path=data_dir)
-            except NotFoundError:
-                pass
+        response = await self._client._request_with_retry(
+            "GET", f"/series/{series_id}/export", params=params,
+        )
+        with zipfile.ZipFile(io.BytesIO(response.content)) as zf:
+            for name in zf.namelist():
+                dest = data_dir / name
+                if not dest.exists():
+                    dest.write_bytes(zf.read(name))
 
-        if underlying and first_open and last_close:
-            ref_path = data_dir / f"reference-{underlying}.parquet"
-            if not ref_path.exists():
-                try:
-                    await self._client.download(
-                        "/reference/trades/export",
-                        ref_path,
-                        params={"symbol": underlying, "after": first_open, "before": last_close},
-                    )
-                except NotFoundError:
-                    pass
+        return data_dir
 
+    async def download_reference(
+        self,
+        symbol: str,
+        *,
+        after: Any,
+        before: Any,
+        path: str | Path = ".",
+    ) -> Path:
+        """Download tick-level reference trades as Parquet (async).
+
+        Args:
+            symbol: Underlying symbol (e.g. BTC, ETH, SOL).
+            after: Start time (ms epoch or datetime).
+            before: End time (ms epoch or datetime).
+            path: Directory to save the file in.
+
+        Returns:
+            Path to the data directory (same as *path*).
+        """
+        data_dir = Path(path)
+        data_dir.mkdir(parents=True, exist_ok=True)
+        dest = data_dir / f"reference-{symbol}.parquet"
+        if not dest.exists():
+            await self._client.download(
+                "/reference/trades/export",
+                dest,
+                params={"symbol": symbol, "after": after, "before": before},
+            )
         return data_dir

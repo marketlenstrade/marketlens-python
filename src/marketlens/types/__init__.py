@@ -12,7 +12,7 @@ from marketlens.types.trade import Trade
 from marketlens.types.candle import Candle
 from marketlens.types.orderbook import OrderBook, PriceLevel, BookMetrics
 from marketlens.types.history import SnapshotEvent, DeltaEvent, TradeEvent
-from marketlens.types.reference import ReferenceCandle
+from marketlens.types.reference import ReferenceCandle, ReferenceTrade
 from marketlens.types.signal import Surface, SurvivalStrike, DensityBucket, BarrierStrike
 
 __all__ = [
@@ -34,6 +34,7 @@ __all__ = [
     "DeltaEvent",
     "TradeEvent",
     "ReferenceCandle",
+    "ReferenceTrade",
     "Surface",
     "SurvivalStrike",
     "DensityBucket",

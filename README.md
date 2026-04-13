@@ -64,6 +64,9 @@ result = client.backtest(strategy, "btc-multi-strikes-weekly", initial_cash="100
 | `fees` | `"polymarket"` | Auto-detects crypto vs sports fee schedule; `None` for zero fees |
 | `max_fill_fraction` | `1.0` | Max fraction of each book level consumed per order |
 | `include_trades` | `True` | Fetch trade data (required for limit fills and `on_trade`) |
+| `settlement_delay_ms` | `5000` | Delay before filled tokens become sellable (on-chain settlement) |
+
+The portfolio automatically handles **CTF merge** (opposite-side netting): buying NO while holding YES nets matched pairs at $1 per share. No explicit merge call needed in backtests.
 
 ### Strategy hooks
 
@@ -122,12 +125,35 @@ active = client.markets.list(status="active", sort="-volume", limit=10).first_pa
 
 ### Bulk export
 
-Download full-day Parquet files — one file per market per day, no pagination.
+Download full history as Parquet — snapshots, deltas, and trades in a single file.
 
 ```python
-path = client.exports.download(market_id, table="deltas", date="2026-03-07")
-paths = client.exports.download_range(
-    market_id, table="snapshots", after="2026-03-01", before="2026-03-08")
+# Single market
+path = client.exports.download(market_id)
+
+# All markets in a series
+data_dir = client.exports.download_series(
+    "btc-up-or-down-5m", after="2026-03-01", before="2026-03-08")
+
+# Reference trades for a crypto underlying
+client.exports.download_reference("BTC", after="2026-03-01", before="2026-03-08", path=data_dir)
+```
+
+### Offline backtesting
+
+Download once, run many backtests without API calls:
+
+```python
+data_dir = client.exports.download_series(
+    "btc-up-or-down-5m", after="2026-03-01", before="2026-03-08")
+client.exports.download_reference("BTC", after="2026-03-01", before="2026-03-08", path=data_dir)
+
+result = client.backtest(
+    strategy, "btc-up-or-down-5m",
+    data_dir=data_dir,
+    after="2026-03-01", before="2026-03-08",
+    initial_cash="10000",
+)
 ```
 
 ## Structured Products & Surfaces
@@ -184,8 +210,8 @@ for candle in client.reference.candles("BTC", after=start, before=end):
 | `client.series` | `list()` `get()` `markets()` `walk()` `events()` |
 | `client.orderbook` | `get()` `history()` `metrics()` `walk()` |
 | `client.signals` | `surfaces()` `surface()` `history()` |
-| `client.reference` | `candles()` |
-| `client.exports` | `download()` `download_range()` |
+| `client.reference` | `candles()` `trades()` |
+| `client.exports` | `download()` `download_series()` `download_reference()` |
 
 Async: use `AsyncMarketLens` — every method has an async counterpart.
 
