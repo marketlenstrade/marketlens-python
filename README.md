@@ -125,18 +125,15 @@ active = client.markets.list(status="active", sort="-volume", limit=10).first_pa
 
 ### Bulk export
 
-Download full history as Parquet — snapshots, deltas, and trades in a single file.
+Download full history as Parquet — snapshots, deltas, trades, and reference prices.
 
 ```python
-# Single market
-path = client.exports.download(market_id)
+# Single market (includes reference trades for the underlying)
+data_dir = client.exports.download(market_id)
 
 # All markets in a series
 data_dir = client.exports.download_series(
     "btc-up-or-down-5m", after="2026-03-01", before="2026-03-08")
-
-# Reference trades for a crypto underlying
-client.exports.download_reference("BTC", after="2026-03-01", before="2026-03-08", path=data_dir)
 ```
 
 ### Offline backtesting
@@ -146,7 +143,6 @@ Download once, run many backtests without API calls:
 ```python
 data_dir = client.exports.download_series(
     "btc-up-or-down-5m", after="2026-03-01", before="2026-03-08")
-client.exports.download_reference("BTC", after="2026-03-01", before="2026-03-08", path=data_dir)
 
 result = client.backtest(
     strategy, "btc-up-or-down-5m",
@@ -211,7 +207,7 @@ for candle in client.reference.candles("BTC", after=start, before=end):
 | `client.orderbook` | `get()` `history()` `metrics()` `walk()` |
 | `client.signals` | `surfaces()` `surface()` `history()` |
 | `client.reference` | `candles()` `trades()` |
-| `client.exports` | `download()` `download_series()` `download_reference()` |
+| `client.exports` | `download()` `download_series()` |
 
 Async: use `AsyncMarketLens` — every method has an async counterpart.
 

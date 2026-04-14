@@ -125,6 +125,7 @@ class _EngineCore:
         self._market_group: dict[str, str] = {}    # market_id → group key (for sequential slot tracking)
         self._ref_prices: dict[str, list[tuple[int, str]]] = {}  # symbol → sorted (timestamp, price)
         self._market_underlying: dict[str, str | None] = {}  # market_id → underlying symbol
+        self._underlying_bounds: dict[str, tuple[int, int]] = {}  # symbol → (earliest_open, latest_close)
 
         self._ctx = StrategyContext(self)
 
@@ -525,6 +526,15 @@ class _EngineCore:
 
     def _register_market(self, market: Market) -> None:
         self._market_underlying[market.id] = market.underlying
+        if market.underlying and (market.open_time or market.close_time):
+            sym = market.underlying
+            prev = self._underlying_bounds.get(sym)
+            lo = market.open_time or market.close_time
+            hi = market.close_time or market.open_time
+            if prev is None:
+                self._underlying_bounds[sym] = (lo, hi)
+            else:
+                self._underlying_bounds[sym] = (min(prev[0], lo), max(prev[1], hi))
 
     def _build_result(self) -> BacktestResult:
         return BacktestResult(
@@ -542,13 +552,11 @@ class BacktestEngine(_EngineCore):
         self, data_dir: str | None = None, *, client: Any = None,
         after: Any = None, before: Any = None,
     ) -> None:
-        from marketlens._base import _coerce_timestamp
-
         underlyings = {u for u in self._market_underlying.values() if u is not None}
         for symbol in underlyings:
             if symbol in self._ref_prices:
                 continue
-            # Try local parquet file first
+            # Local parquet (from download / download_series)
             if data_dir is not None:
                 ref_path = Path(data_dir) / f"reference-{symbol}.parquet"
                 if ref_path.exists():
@@ -557,28 +565,20 @@ class BacktestEngine(_EngineCore):
                     price_col = [str(v) for v in table.column("price").to_pylist()]
                     self._ref_prices[symbol] = list(zip(ts_col, price_col))
                     continue
-            # Fall back: download reference trades parquet from API
+            # Stream from paginated API (1-second candle closes)
             if client is not None:
-                import tempfile
-                params: dict = {"symbol": symbol}
-                if after is not None:
-                    params["after"] = _coerce_timestamp(after)
-                if before is not None:
-                    params["before"] = _coerce_timestamp(before)
-                tmp = Path(tempfile.mkdtemp()) / f"reference-{symbol}.parquet"
-                try:
-                    client._http.download("/reference/trades/export", tmp, params=params)
-                    table = pq.read_table(tmp, columns=["timestamp", "price"])
-                    ts_col = table.column("timestamp").to_pylist()
-                    price_col = [str(v) for v in table.column("price").to_pylist()]
-                    self._ref_prices[symbol] = list(zip(ts_col, price_col))
+                bounds = self._underlying_bounds.get(symbol)
+                eff_after = _coerce_timestamp(after) if after is not None else (bounds[0] if bounds else None)
+                eff_before = _coerce_timestamp(before) if before is not None else (bounds[1] if bounds else None)
+                if eff_after is not None and eff_before is not None:
+                    prices: list[tuple[int, str]] = []
+                    for candle in client.reference.candles(symbol, after=eff_after, before=eff_before, limit=5000):
+                        prices.append((candle.timestamp, candle.close))
+                    self._ref_prices[symbol] = prices
                     continue
-                except Exception as exc:
-                    import sys
-                    print(f"  [ref-price] API download failed for {symbol}: {exc}", file=sys.stderr)
             raise ValueError(
                 f"Cannot load reference prices for {symbol}. "
-                f"Provide a data_dir with reference-{symbol}.parquet or ensure API access."
+                f"Use client.exports.download_series() or pass a data_dir."
             )
 
     def run(

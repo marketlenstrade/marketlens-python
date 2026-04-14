@@ -38,7 +38,7 @@ class MarketLens:
         self.series = SeriesResource(self._http)
         self.orderbook = Orderbook(self._http, series=self.series, markets=self.markets, events=self.events)
         self.signals = Signals(self._http)
-        self.exports = Exports(self._http, series=self.series)
+        self.exports = Exports(self._http, markets=self.markets, series=self.series)
         self.reference = Reference(self._http)
 
     def backtest(
@@ -118,7 +118,7 @@ class AsyncMarketLens:
         self.series = AsyncSeriesResource(self._http)
         self.orderbook = AsyncOrderbook(self._http, series=self.series, markets=self.markets, events=self.events)
         self.signals = AsyncSignals(self._http)
-        self.exports = AsyncExports(self._http, series=self.series)
+        self.exports = AsyncExports(self._http, markets=self.markets, series=self.series)
         self.reference = AsyncReference(self._http)
 
     async def backtest(
