@@ -43,26 +43,24 @@ def _iter_history_parquet(path: Path) -> Iterator[HistoryEvent]:
 
     df = pd.read_parquet(path)
 
-    event_types = df["event_type"].values
-    ts = df["t"].values
-    prices = df["price"].values
-    sizes = df["size"].values
-    sides = df["side"].values
-    trade_ids = df["trade_id"].values
-    is_reseeds = df["is_reseed"].values
-    bids_col = df["bids"].values
-    asks_col = df["asks"].values
+    # PyArrow-backed columns route every .values[i] through arrow __getitem__
+    # (~2.7us, ~970K calls/market). .tolist() materializes once into a native
+    # Python list with C-level O(1) indexing.
+    event_types = df["event_type"].tolist()
+    ts = df["t"].tolist()
+    prices = df["price"].tolist()
+    sizes = df["size"].tolist()
+    sides = df["side"].tolist()
+    trade_ids = df["trade_id"].tolist()
+    is_reseeds = df["is_reseed"].tolist()
+    bids_col = df["bids"].tolist()
+    asks_col = df["asks"].tolist()
 
-    for i in range(len(df)):
+    # Reorder dispatch: deltas + trades dominate; snapshot is rare (~16/market).
+    for i in range(len(event_types)):
         et = event_types[i]
         t = int(ts[i])
-        if et == "snapshot":
-            bids_raw = json.loads(bids_col[i])
-            asks_raw = json.loads(asks_col[i])
-            bids = [PriceLevel(price=b["price"], size=b["size"]) for b in bids_raw]
-            asks = [PriceLevel(price=a["price"], size=a["size"]) for a in asks_raw]
-            yield SnapshotEvent(t=t, is_reseed=bool(is_reseeds[i]), bids=bids, asks=asks)
-        elif et == "delta":
+        if et == "delta":
             yield DeltaEvent(
                 t=t, price=f"{prices[i]:.4f}", size=f"{sizes[i]:.4f}", side=sides[i],
             )
@@ -70,6 +68,12 @@ def _iter_history_parquet(path: Path) -> Iterator[HistoryEvent]:
             yield TradeEvent(
                 t=t, id=trade_ids[i], price=f"{prices[i]:.4f}", size=f"{sizes[i]:.4f}", side=sides[i],
             )
+        elif et == "snapshot":
+            bids_raw = json.loads(bids_col[i])
+            asks_raw = json.loads(asks_col[i])
+            bids = [PriceLevel(price=b["price"], size=b["size"]) for b in bids_raw]
+            asks = [PriceLevel(price=a["price"], size=a["size"]) for a in asks_raw]
+            yield SnapshotEvent(t=t, is_reseed=bool(is_reseeds[i]), bids=bids, asks=asks)
 
 
 @dataclass
