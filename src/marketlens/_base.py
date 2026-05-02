@@ -139,14 +139,77 @@ class SyncHTTPClient:
     def get(self, path: str, params: dict[str, Any] | None = None) -> Any:
         return self.request("GET", path, params=params or {})
 
-    def download(self, path: str, dest: Path, params: dict[str, Any] | None = None) -> Path:
-        """Download binary content to a file. Returns the destination path."""
-        response = self._request_with_retry(
-            "GET", path, params=_prepare_params(params) if params else {},
-        )
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_bytes(response.content)
-        return dest
+    def download(
+        self,
+        path: str,
+        dest: Path,
+        params: dict[str, Any] | None = None,
+        *,
+        reporter: Any = None,
+        label: str | None = None,
+    ) -> Path:
+        """Download binary content to a file. Returns the destination path.
+
+        When a ``reporter`` is given the file is streamed and progress is
+        reported via ``reporter.download_started`` / ``download_progress``.
+        Without a reporter the body is loaded in memory (faster for small
+        files).
+        """
+        if reporter is None:
+            response = self._request_with_retry(
+                "GET", path, params=_prepare_params(params) if params else {},
+            )
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(response.content)
+            return dest
+
+        prepared = _prepare_params(params) if params else {}
+        last_exc: Exception | None = None
+        for attempt in range(1 + self.max_retries):
+            try:
+                with self._client.stream("GET", path, params=prepared) as response:
+                    if _should_retry(response) and attempt < self.max_retries:
+                        delay = 2**attempt
+                        if response.status_code == 429:
+                            retry_after = response.headers.get("Retry-After")
+                            if retry_after:
+                                delay = max(delay, int(retry_after))
+                        time.sleep(delay)
+                        continue
+                    _raise_for_error(response)
+                    # Content-Length is the compressed size when the response
+                    # is gzip/br encoded, but ``iter_bytes`` yields decompressed
+                    # bytes — skip the total in that case so the bar stays
+                    # indeterminate instead of showing X/Y where X>Y.
+                    encoded = bool(response.headers.get("Content-Encoding"))
+                    total_raw = response.headers.get("Content-Length")
+                    total = int(total_raw) if total_raw and not encoded else None
+                    reporter.download_started(label or path, total)
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    n = 0
+                    with dest.open("wb") as f:
+                        for chunk in response.iter_bytes():
+                            f.write(chunk)
+                            n += len(chunk)
+                            reporter.download_progress(n)
+                    reporter.download_finished()
+                    return dest
+            except httpx.TimeoutException as exc:
+                last_exc = TimeoutError(str(exc))
+                if attempt < self.max_retries:
+                    time.sleep(2**attempt)
+                    continue
+                raise last_exc from exc
+            except httpx.ConnectError as exc:
+                last_exc = ConnectionError(str(exc))
+                if attempt < self.max_retries:
+                    time.sleep(2**attempt)
+                    continue
+                raise last_exc from exc
+
+        if last_exc:
+            raise last_exc
+        raise RuntimeError("unreachable")
 
     def close(self) -> None:
         self._client.close()
@@ -217,14 +280,67 @@ class AsyncHTTPClient:
     async def get(self, path: str, params: dict[str, Any] | None = None) -> Any:
         return await self.request("GET", path, params=params or {})
 
-    async def download(self, path: str, dest: Path, params: dict[str, Any] | None = None) -> Path:
+    async def download(
+        self,
+        path: str,
+        dest: Path,
+        params: dict[str, Any] | None = None,
+        *,
+        reporter: Any = None,
+        label: str | None = None,
+    ) -> Path:
         """Download binary content to a file. Returns the destination path."""
-        response = await self._request_with_retry(
-            "GET", path, params=_prepare_params(params) if params else {},
-        )
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_bytes(response.content)
-        return dest
+        if reporter is None:
+            response = await self._request_with_retry(
+                "GET", path, params=_prepare_params(params) if params else {},
+            )
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(response.content)
+            return dest
+
+        prepared = _prepare_params(params) if params else {}
+        last_exc: Exception | None = None
+        for attempt in range(1 + self.max_retries):
+            try:
+                async with self._client.stream("GET", path, params=prepared) as response:
+                    if _should_retry(response) and attempt < self.max_retries:
+                        delay = 2**attempt
+                        if response.status_code == 429:
+                            retry_after = response.headers.get("Retry-After")
+                            if retry_after:
+                                delay = max(delay, int(retry_after))
+                        await asyncio.sleep(delay)
+                        continue
+                    _raise_for_error(response)
+                    encoded = bool(response.headers.get("Content-Encoding"))
+                    total_raw = response.headers.get("Content-Length")
+                    total = int(total_raw) if total_raw and not encoded else None
+                    reporter.download_started(label or path, total)
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    n = 0
+                    with dest.open("wb") as f:
+                        async for chunk in response.aiter_bytes():
+                            f.write(chunk)
+                            n += len(chunk)
+                            reporter.download_progress(n)
+                    reporter.download_finished()
+                    return dest
+            except httpx.TimeoutException as exc:
+                last_exc = TimeoutError(str(exc))
+                if attempt < self.max_retries:
+                    await asyncio.sleep(2**attempt)
+                    continue
+                raise last_exc from exc
+            except httpx.ConnectError as exc:
+                last_exc = ConnectionError(str(exc))
+                if attempt < self.max_retries:
+                    await asyncio.sleep(2**attempt)
+                    continue
+                raise last_exc from exc
+
+        if last_exc:
+            raise last_exc
+        raise RuntimeError("unreachable")
 
     async def close(self) -> None:
         await self._client.aclose()
