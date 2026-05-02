@@ -1,3 +1,9 @@
+import os
+
+# Disable progress bars for the entire test suite so existing tests don't
+# accidentally exercise rich's Live renderer in non-TTY pytest output.
+os.environ.setdefault("MARKETLENS_PROGRESS", "0")
+
 import pytest
 import respx
 import httpx
