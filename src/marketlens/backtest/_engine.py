@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import bisect
 import json
+import os
+import sys
+import warnings
 from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
@@ -10,10 +13,12 @@ from typing import Any, AsyncIterator, Iterator
 import pyarrow.parquet as pq
 
 from marketlens._base import _coerce_timestamp
+from marketlens._progress import _ProgressReporter, make_reporter
 from marketlens.exceptions import NotFoundError
 from marketlens.backtest._fees import FeeModel, PolymarketFeeModel, ZeroFeeModel
 from marketlens.backtest._fills import FillSimulator
 from marketlens.backtest._portfolio import Portfolio
+from marketlens.backtest._prefetch import AsyncPrefetchedIterator, PrefetchedIterator
 from marketlens.backtest._results import BacktestResult
 from marketlens.backtest._strategy import Strategy, StrategyContext
 from marketlens.backtest._types import (
@@ -31,10 +36,55 @@ from marketlens.helpers.merge import (
 )
 from marketlens.helpers.replay import AsyncOrderBookReplay, OrderBookReplay
 from marketlens.types.history import DeltaEvent, HistoryEvent, SnapshotEvent, TradeEvent
+
+
+def _prep_status(message: str) -> None:
+    """One-line status to stderr before the reporter context is active.
+    Suppressed when progress is disabled via env var."""
+    if os.environ.get("MARKETLENS_PROGRESS", "").strip().lower() in {"0", "false", "no", "off"}:
+        return
+    try:
+        sys.stderr.write(f"· {message}\n")
+        sys.stderr.flush()
+    except Exception:
+        pass
 from marketlens.types.market import Market
 from marketlens.types.orderbook import OrderBook, PriceLevel
 
 _FOUR = Decimal("0.0001")
+
+
+def _pack_into_lanes(markets: list[Market]) -> list[list[Market]]:
+    """Pack markets into time-disjoint lanes via greedy interval coloring.
+
+    Each lane becomes one ``_make_market_stream`` chain. Overlapping
+    markets go into separate lanes, so the lane count equals the peak
+    concurrent market count — bounding the prefetcher count regardless
+    of total market count. Markets without ``open_time``/``close_time``
+    are isolated (no overlap info to reason about).
+    """
+    timed = [m for m in markets if m.open_time is not None and m.close_time is not None]
+    untimed = [m for m in markets if m.open_time is None or m.close_time is None]
+
+    timed.sort(key=lambda m: m.open_time)  # type: ignore[arg-type]
+    lanes: list[list[Market]] = []
+    lanes_last_close: list[int] = []
+
+    for m in timed:
+        placed = False
+        for i, last_close in enumerate(lanes_last_close):
+            if last_close <= m.open_time:  # type: ignore[operator]
+                lanes[i].append(m)
+                lanes_last_close[i] = m.close_time  # type: ignore[assignment]
+                placed = True
+                break
+        if not placed:
+            lanes.append([m])
+            lanes_last_close.append(m.close_time)  # type: ignore[arg-type]
+
+    for m in untimed:
+        lanes.append([m])
+    return lanes
 
 
 def _iter_history_parquet(path: Path) -> Iterator[HistoryEvent]:
@@ -89,6 +139,7 @@ class BacktestConfig:
     limit_fill_rate: float = 0.1
     queue_position: bool = False
     settlement_delay_ms: int = 5000  # on-chain balance availability (~5s after MATCHED)
+    progress: bool = True  # show rich progress bars for fetch/backtest
 
 
 class _EngineCore:
@@ -130,8 +181,35 @@ class _EngineCore:
         self._ref_prices: dict[str, list[tuple[int, str]]] = {}  # symbol → sorted (timestamp, price)
         self._market_underlying: dict[str, str | None] = {}  # market_id → underlying symbol
         self._underlying_bounds: dict[str, tuple[int, int]] = {}  # symbol → (earliest_open, latest_close)
+        # Set in run() so get_reference_price() can lazily load on first use.
+        # Strategies that never call ctx.reference_price() pay zero load cost.
+        self._ref_load_ctx: dict[str, Any] = {}
+
+        # Set by run() inside a `with reporter:` block. No-op outside.
+        self._reporter: _ProgressReporter = make_reporter(enabled=False)
 
         self._ctx = StrategyContext(self)
+
+    def _with_reporter(self, n_markets: int):
+        """Context manager that installs a progress reporter for the run."""
+        engine = self
+        config = self._config
+
+        class _Ctx:
+            def __enter__(self_inner):
+                self_inner.reporter = make_reporter(
+                    enabled=config.progress, n_markets=n_markets,
+                )
+                self_inner.reporter.__enter__()
+                self_inner.prev = engine._reporter
+                engine._reporter = self_inner.reporter
+                return self_inner.reporter
+
+            def __exit__(self_inner, *args):
+                engine._reporter = self_inner.prev
+                return self_inner.reporter.__exit__(*args)
+
+        return _Ctx()
 
     @property
     def portfolio(self) -> Portfolio:
@@ -438,6 +516,7 @@ class _EngineCore:
         finalized: set[str] = set()  # market IDs already finalized
 
         for market, event, book in merge_streams(streams):
+            self._reporter.consumed(market.id, 1)
             # Skip events for markets already finalized (past close_time)
             if market.id in finalized:
                 continue
@@ -484,21 +563,63 @@ class _EngineCore:
         after: Any = None,
         before: Any = None,
     ) -> Iterator[tuple[Market, HistoryEvent, OrderBook]]:
-        """Chain sequential markets from one series into a single lazy event stream."""
+        """Stream events from a chronological chain of time-disjoint markets.
+
+        While market[i] is being consumed, market[i+1]'s prefetcher is
+        already running so the inter-market network round-trip is
+        hidden behind the previous market's tail. The first prefetcher
+        starts lazily on first ``next()`` so constructing many streams
+        back-to-back doesn't stampede the API.
+        """
+        if not markets:
+            return
+
         history_params: dict[str, Any] = {}
         if self._config.include_trades:
             history_params["include_trades"] = True
 
-        for market in markets:
+        reporter = self._reporter
+
+        def _make_prefetcher(market: Market) -> PrefetchedIterator:
             history = client.orderbook.history(
                 market.id,
                 after=after or market.open_time,
                 before=before or market.close_time,
                 **history_params,
             )
-            replay = OrderBookReplay(history, market_id=market.id, platform=market.platform)
-            for event, book in replay:
-                yield market, event, book
+            mid = market.id
+            return PrefetchedIterator(
+                history,
+                on_fetched=lambda n, mid=mid: reporter.fetched(mid, n),
+                on_done=lambda mid=mid: reporter.market_fetch_done(mid),
+            )
+
+        current = _make_prefetcher(markets[0]).start()
+        next_prefetcher: PrefetchedIterator | None = None
+        try:
+            for i, market in enumerate(markets):
+                # Prime market[i+1] before consuming market[i] so the next
+                # market's first page is fetched in parallel.
+                if i + 1 < len(markets):
+                    next_prefetcher = _make_prefetcher(markets[i + 1]).start()
+
+                reporter.market_started(market.id, market.id)
+                replay = OrderBookReplay(current, market_id=market.id, platform=market.platform)
+                for event, book in replay:
+                    yield market, event, book
+                reporter.market_finished(market.id)
+
+                current = next_prefetcher
+                next_prefetcher = None
+        finally:
+            # Generator close mid-iteration: stop any prefetchers we still own.
+            # ``current`` is normally cleaned up by OrderBookReplay's iterator
+            # finalization, but if we never even started its replay (e.g. early
+            # return on empty markets) we still need to shut its thread down.
+            if current is not None:
+                current.close()
+            if next_prefetcher is not None:
+                next_prefetcher.close()
 
     def _make_file_stream(
         self,
@@ -506,27 +627,84 @@ class _EngineCore:
         data_dir: str,
     ) -> Iterator[tuple[Market, HistoryEvent, OrderBook]]:
         """Read market history from local Parquet files instead of the API."""
+        reporter = self._reporter
         for market in markets:
             path = Path(data_dir) / f"history-{market.id}.parquet"
             if not path.exists():
-                import warnings
                 warnings.warn(f"Skipping market {market.id}: {path} not found")
                 continue
             events = _iter_history_parquet(path)
+            reporter.market_started(market.id, market.id)
             replay = OrderBookReplay(events, market_id=market.id, platform=market.platform)
             for event, book in replay:
                 yield market, event, book
+            reporter.market_finished(market.id)
 
     def get_reference_price(self, symbol: str | None, at_time: int) -> str | None:
-        if symbol is None or symbol not in self._ref_prices:
+        if symbol is None:
             return None
-        prices = self._ref_prices[symbol]
+        if symbol not in self._ref_prices:
+            self._load_reference_prices_for(symbol)
+        prices = self._ref_prices.get(symbol)
         if not prices:
             return None
-        # Each entry is a completed trade at its exact timestamp.
-        # Return the most recent trade at or before at_time.
+        # Each entry is a candle close at its exact timestamp.
+        # Return the most recent close at or before at_time.
         idx = bisect.bisect_right(prices, (at_time, "~")) - 1
         return prices[idx][1] if idx >= 0 else None
+
+    _REF_RESOLUTION_DEFAULT = "1m"
+    _REF_RESOLUTION_MS = {
+        "1s": 1_000, "5s": 5_000, "10s": 10_000, "30s": 30_000,
+        "1m": 60_000, "5m": 300_000, "15m": 900_000,
+        "1h": 3_600_000, "4h": 14_400_000, "1d": 86_400_000,
+    }
+
+    def _load_reference_prices_for(self, symbol: str) -> None:
+        """Synchronously load reference prices for one symbol on first
+        request. After this returns ``self._ref_prices[symbol]`` is
+        fully populated and subsequent lookups are binary-search cache
+        hits. Strategies that never call ``ctx.reference_price()`` skip
+        this entirely.
+        """
+        ctx = self._ref_load_ctx
+        data_dir = ctx.get("data_dir")
+        if data_dir is not None:
+            ref_path = Path(data_dir) / f"reference-{symbol}.parquet"
+            if ref_path.exists():
+                table = pq.read_table(ref_path, columns=["timestamp", "price"])
+                ts_col = table.column("timestamp").to_pylist()
+                price_col = [str(v) for v in table.column("price").to_pylist()]
+                self._ref_prices[symbol] = list(zip(ts_col, price_col))
+                return
+        client = ctx.get("client")
+        if client is not None:
+            bounds = self._underlying_bounds.get(symbol)
+            after = ctx.get("after")
+            before = ctx.get("before")
+            eff_after = _coerce_timestamp(after) if after is not None else (bounds[0] if bounds else None)
+            eff_before = _coerce_timestamp(before) if before is not None else (bounds[1] if bounds else None)
+            if eff_after is not None and eff_before is not None:
+                resolution = ctx.get("resolution") or self._REF_RESOLUTION_DEFAULT
+                bucket_ms = self._REF_RESOLUTION_MS.get(resolution, 60_000)
+                est_total = max(1, (eff_before - eff_after) // bucket_ms)
+                self._reporter.download_started(
+                    f"{symbol} reference ({resolution})", est_total,
+                )
+                prices: list[tuple[int, str]] = []
+                for candle in client.reference.candles(
+                    symbol, after=eff_after, before=eff_before,
+                    resolution=resolution, limit=5000,
+                ):
+                    prices.append((candle.timestamp, candle.close))
+                    self._reporter.download_progress(len(prices))
+                self._reporter.download_finished()
+                self._ref_prices[symbol] = prices
+                return
+        raise ValueError(
+            f"Cannot load reference prices for {symbol}. "
+            f"Use client.exports.download_series() or pass a data_dir."
+        )
 
     def _register_market(self, market: Market) -> None:
         self._market_underlying[market.id] = market.underlying
@@ -552,39 +730,6 @@ class _EngineCore:
 
 
 class BacktestEngine(_EngineCore):
-    def _prefetch_reference_prices(
-        self, data_dir: str | None = None, *, client: Any = None,
-        after: Any = None, before: Any = None,
-    ) -> None:
-        underlyings = {u for u in self._market_underlying.values() if u is not None}
-        for symbol in underlyings:
-            if symbol in self._ref_prices:
-                continue
-            # Local parquet (from download / download_series)
-            if data_dir is not None:
-                ref_path = Path(data_dir) / f"reference-{symbol}.parquet"
-                if ref_path.exists():
-                    table = pq.read_table(ref_path, columns=["timestamp", "price"])
-                    ts_col = table.column("timestamp").to_pylist()
-                    price_col = [str(v) for v in table.column("price").to_pylist()]
-                    self._ref_prices[symbol] = list(zip(ts_col, price_col))
-                    continue
-            # Stream from paginated API (1-second candle closes)
-            if client is not None:
-                bounds = self._underlying_bounds.get(symbol)
-                eff_after = _coerce_timestamp(after) if after is not None else (bounds[0] if bounds else None)
-                eff_before = _coerce_timestamp(before) if before is not None else (bounds[1] if bounds else None)
-                if eff_after is not None and eff_before is not None:
-                    prices: list[tuple[int, str]] = []
-                    for candle in client.reference.candles(symbol, after=eff_after, before=eff_before, limit=5000):
-                        prices.append((candle.timestamp, candle.close))
-                    self._ref_prices[symbol] = prices
-                    continue
-            raise ValueError(
-                f"Cannot load reference prices for {symbol}. "
-                f"Use client.exports.download_series() or pass a data_dir."
-            )
-
     def run(
         self,
         client: Any,
@@ -593,17 +738,30 @@ class BacktestEngine(_EngineCore):
         after: Any = None,
         before: Any = None,
         data_dir: str | None = None,
+        reference_resolution: str = "1m",
         **params: Any,
     ) -> BacktestResult:
+        # Reference prices are fetched lazily by get_reference_price() on
+        # first call — strategies that don't query them pay zero cost.
+        # Loaders run on background threads so the engine never blocks.
+        self._ref_load_ctx = {
+            "client": client, "data_dir": data_dir,
+            "after": after, "before": before,
+            "resolution": reference_resolution,
+        }
+
         def _stream(markets: list[Market]) -> Iterator[tuple[Market, HistoryEvent, OrderBook]]:
             if data_dir is not None:
                 return self._make_file_stream(markets, data_dir)
             return self._make_market_stream(client, markets, after=after, before=before)
 
         if isinstance(id, list):
-            streams = self._resolve_list(client, id, after=after, before=before, data_dir=data_dir, **params)
-            self._prefetch_reference_prices(data_dir=data_dir, client=client, after=after, before=before)
-            self._run_merged(streams)
+            _prep_status(f"Resolving {len(id)} target(s)…")
+            streams, n_markets, _ = self._resolve_list(
+                client, id, after=after, before=before, data_dir=data_dir, **params,
+            )
+            with self._with_reporter(n_markets):
+                self._run_merged(streams)
             return self._build_result()
 
         # 1. Try as a market UUID
@@ -611,8 +769,8 @@ class BacktestEngine(_EngineCore):
             market = client.markets.get(id)
             self._market_series[market.id] = market.series_id or market.id
             self._register_market(market)
-            self._prefetch_reference_prices(data_dir=data_dir, client=client, after=after, before=before)
-            self._run_merged([_stream([market])])
+            with self._with_reporter(1):
+                self._run_merged([_stream([market])])
             return self._build_result()
         except NotFoundError:
             pass
@@ -625,19 +783,23 @@ class BacktestEngine(_EngineCore):
 
         if series is not None:
             if series.structured_type:
-                streams = self._resolve_structured(
-                    client, id, series, after=after, before=before, data_dir=data_dir, **params,
+                _prep_status(f"Resolving strikes in '{series.title}'…")
+                lanes = self._resolve_structured(
+                    client, id, series, after=after, before=before, **params,
                 )
-                self._prefetch_reference_prices(data_dir=data_dir, client=client, after=after, before=before)
-                self._run_merged(streams)
+                n_markets = sum(len(lane) for lane in lanes)
+                streams = [_stream(lane) for lane in lanes]
+                with self._with_reporter(n_markets):
+                    self._run_merged(streams)
             elif series.is_rolling:
+                _prep_status(f"Resolving markets in '{series.title}'…")
                 markets = list(client.series.walk(id, after=after, before=before, **params))
                 for m in markets:
                     self._market_series[m.id] = series.id
                     self._market_group[m.id] = series.id
                     self._register_market(m)
-                self._prefetch_reference_prices(data_dir=data_dir, client=client, after=after, before=before)
-                self._run_merged([_stream(markets)])
+                with self._with_reporter(len(markets)):
+                    self._run_merged([_stream(markets)])
             else:
                 raise ValueError(
                     f"Series '{series.title}' is neither rolling nor structured."
@@ -649,8 +811,8 @@ class BacktestEngine(_EngineCore):
         if found:
             self._market_series[found[0].id] = found[0].series_id or found[0].id
             self._register_market(found[0])
-            self._prefetch_reference_prices(data_dir=data_dir, client=client, after=after, before=before)
-            self._run_merged([_stream([found[0]])])
+            with self._with_reporter(1):
+                self._run_merged([_stream([found[0]])])
             return self._build_result()
 
         raise NotFoundError(404, "NOT_FOUND", f"No market or series found for '{id}'")
@@ -664,13 +826,14 @@ class BacktestEngine(_EngineCore):
         before: Any = None,
         data_dir: str | None = None,
         **params: Any,
-    ) -> list[Iterator[tuple[Market, HistoryEvent, OrderBook]]]:
+    ) -> tuple[list[Iterator[tuple[Market, HistoryEvent, OrderBook]]], int, list[Market]]:
         def _stream(markets: list[Market]) -> Iterator[tuple[Market, HistoryEvent, OrderBook]]:
             if data_dir is not None:
                 return self._make_file_stream(markets, data_dir)
             return self._make_market_stream(client, markets, after=after, before=before)
 
         streams: list[Iterator[tuple[Market, HistoryEvent, OrderBook]]] = []
+        all_markets: list[Market] = []
         for item_id in ids:
             # Try market UUID
             try:
@@ -678,6 +841,7 @@ class BacktestEngine(_EngineCore):
                 self._market_series[market.id] = market.series_id or market.id
                 self._register_market(market)
                 streams.append(_stream([market]))
+                all_markets.append(market)
                 continue
             except NotFoundError:
                 pass
@@ -685,9 +849,12 @@ class BacktestEngine(_EngineCore):
             # Try series
             series = client.series.get(item_id)
             if series.structured_type:
-                streams.extend(self._resolve_structured(
-                    client, item_id, series, after=after, before=before, data_dir=data_dir, **params,
-                ))
+                lanes = self._resolve_structured(
+                    client, item_id, series, after=after, before=before, **params,
+                )
+                streams.extend(_stream(lane) for lane in lanes)
+                for lane in lanes:
+                    all_markets.extend(lane)
             elif series.is_rolling:
                 markets = list(client.series.walk(item_id, after=after, before=before, **params))
                 for m in markets:
@@ -695,12 +862,13 @@ class BacktestEngine(_EngineCore):
                     self._market_group[m.id] = series.id
                     self._register_market(m)
                 streams.append(_stream(markets))
+                all_markets.extend(markets)
             else:
                 raise ValueError(
                     f"Series '{series.title}' is neither rolling nor structured."
                 )
 
-        return streams
+        return streams, len(all_markets), all_markets
 
     def _resolve_structured(
         self,
@@ -710,17 +878,15 @@ class BacktestEngine(_EngineCore):
         *,
         after: Any = None,
         before: Any = None,
-        data_dir: str | None = None,
         **params: Any,
-    ) -> list[Iterator[tuple[Market, HistoryEvent, OrderBook]]]:
-        """Resolve a structured series into per-market streams."""
-        from marketlens._base import _coerce_timestamp
+    ) -> list[list[Market]]:
+        """Resolve a structured series into time-disjoint market lanes.
 
-        def _stream(markets: list[Market]) -> Iterator[tuple[Market, HistoryEvent, OrderBook]]:
-            if data_dir is not None:
-                return self._make_file_stream(markets, data_dir)
-            return self._make_market_stream(client, markets, after=after, before=before)
-
+        Each lane is a chain of non-overlapping markets that becomes
+        one stream. With overlapping markets (typical for structured
+        products), this collapses N markets into K = peak-concurrency
+        lanes, bounding the prefetcher count to actual data concurrency.
+        """
         event_params = dict(params)
         if after is not None:
             event_params["end_after"] = after
@@ -732,7 +898,7 @@ class BacktestEngine(_EngineCore):
         after_ms = _coerce_timestamp(after) if after is not None else None
         before_ms = _coerce_timestamp(before) if before is not None else None
 
-        streams: list[Iterator[tuple[Market, HistoryEvent, OrderBook]]] = []
+        all_markets: list[Market] = []
         for evt in events:
             # Skip events that end before our window
             if after_ms is not None and evt.end_date and evt.end_date < after_ms:
@@ -748,32 +914,20 @@ class BacktestEngine(_EngineCore):
                     continue
                 self._market_series[m.id] = series.id
                 self._register_market(m)
-                streams.append(_stream([m]))
-        return streams
+                all_markets.append(m)
+
+        lanes = _pack_into_lanes(all_markets)
+        # Mark all markets in a lane as belonging to the same group so
+        # per-lane finalisation in ``_run_merged`` finalises the
+        # outgoing market promptly when the next in the lane fires.
+        for i, lane in enumerate(lanes):
+            lane_key = f"lane:{series.id}:{i}"
+            for m in lane:
+                self._market_group[m.id] = lane_key
+        return lanes
 
 
 class AsyncBacktestEngine(_EngineCore):
-    async def _async_prefetch_reference_prices(self, data_dir: str | None = None) -> None:
-        underlyings = {u for u in self._market_underlying.values() if u is not None}
-        for symbol in underlyings:
-            if symbol in self._ref_prices:
-                continue
-            if data_dir is None:
-                raise ValueError(
-                    f"data_dir is required to load reference trades for {symbol}. "
-                    "Use client.exports.download_reference() to download data first."
-                )
-            ref_path = Path(data_dir) / f"reference-{symbol}.parquet"
-            if not ref_path.exists():
-                raise FileNotFoundError(
-                    f"Reference trades not found: {ref_path}. "
-                    "Use client.exports.download_reference() to download tick data."
-                )
-            table = pq.read_table(ref_path, columns=["timestamp", "price"])
-            ts_col = table.column("timestamp").to_pylist()
-            price_col = [str(v) for v in table.column("price").to_pylist()]
-            self._ref_prices[symbol] = list(zip(ts_col, price_col))
-
     async def run(
         self,
         client: Any,
@@ -782,12 +936,22 @@ class AsyncBacktestEngine(_EngineCore):
         after: Any = None,
         before: Any = None,
         data_dir: str | None = None,
+        reference_resolution: str = "1m",
         **params: Any,
     ) -> BacktestResult:
+        # Async path supports parquet-only reference loading (no API
+        # fallback — the sync iterator can't be driven from an async hook).
+        # get_reference_price() loads on first call.
+        self._ref_load_ctx = {
+            "client": None, "data_dir": data_dir,
+            "after": after, "before": before,
+            "resolution": reference_resolution,
+        }
+
         if isinstance(id, list):
-            streams = await self._resolve_list(client, id, after=after, before=before, **params)
-            await self._async_prefetch_reference_prices(data_dir=data_dir)
-            await self._run_merged(streams)
+            streams, n_markets = await self._resolve_list(client, id, after=after, before=before, **params)
+            with self._with_reporter(n_markets):
+                await self._run_merged(streams)
             return self._build_result()
 
         # 1. Try as a market UUID
@@ -795,8 +959,8 @@ class AsyncBacktestEngine(_EngineCore):
             market = await client.markets.get(id)
             self._market_series[market.id] = market.series_id or market.id
             self._register_market(market)
-            await self._async_prefetch_reference_prices(data_dir=data_dir)
-            await self._run_merged([self._async_make_market_stream(client, [market], after=after, before=before)])
+            with self._with_reporter(1):
+                await self._run_merged([self._async_make_market_stream(client, [market], after=after, before=before)])
             return self._build_result()
         except NotFoundError:
             pass
@@ -809,11 +973,16 @@ class AsyncBacktestEngine(_EngineCore):
 
         if series is not None:
             if series.structured_type:
-                streams = await self._async_resolve_structured(
+                lanes = await self._async_resolve_structured(
                     client, id, series, after=after, before=before, **params,
                 )
-                await self._async_prefetch_reference_prices(data_dir=data_dir)
-                await self._run_merged(streams)
+                n_markets = sum(len(lane) for lane in lanes)
+                streams = [
+                    self._async_make_market_stream(client, lane, after=after, before=before)
+                    for lane in lanes
+                ]
+                with self._with_reporter(n_markets):
+                    await self._run_merged(streams)
             elif series.is_rolling:
                 markets = []
                 async for m in client.series.walk(id, after=after, before=before, **params):
@@ -822,8 +991,8 @@ class AsyncBacktestEngine(_EngineCore):
                     self._market_series[m.id] = series.id
                     self._market_group[m.id] = series.id
                     self._register_market(m)
-                await self._async_prefetch_reference_prices(data_dir=data_dir)
-                await self._run_merged([self._async_make_market_stream(client, markets, after=after, before=before)])
+                with self._with_reporter(len(markets)):
+                    await self._run_merged([self._async_make_market_stream(client, markets, after=after, before=before)])
             else:
                 raise ValueError(
                     f"Series '{series.title}' is neither rolling nor structured."
@@ -835,8 +1004,8 @@ class AsyncBacktestEngine(_EngineCore):
         if found:
             self._market_series[found[0].id] = found[0].series_id or found[0].id
             self._register_market(found[0])
-            await self._async_prefetch_reference_prices(data_dir=data_dir)
-            await self._run_merged([self._async_make_market_stream(client, [found[0]], after=after, before=before)])
+            with self._with_reporter(1):
+                await self._run_merged([self._async_make_market_stream(client, [found[0]], after=after, before=before)])
             return self._build_result()
 
         raise NotFoundError(404, "NOT_FOUND", f"No market or series found for '{id}'")
@@ -849,8 +1018,9 @@ class AsyncBacktestEngine(_EngineCore):
         after: Any = None,
         before: Any = None,
         **params: Any,
-    ) -> list[AsyncIterator[tuple[Market, HistoryEvent, OrderBook]]]:
+    ) -> tuple[list[AsyncIterator[tuple[Market, HistoryEvent, OrderBook]]], int]:
         streams: list[AsyncIterator[tuple[Market, HistoryEvent, OrderBook]]] = []
+        n_markets = 0
         for item_id in ids:
             # Try market UUID
             try:
@@ -858,6 +1028,7 @@ class AsyncBacktestEngine(_EngineCore):
                 self._market_series[market.id] = market.series_id or market.id
                 self._register_market(market)
                 streams.append(self._async_make_market_stream(client, [market], after=after, before=before))
+                n_markets += 1
                 continue
             except NotFoundError:
                 pass
@@ -865,9 +1036,14 @@ class AsyncBacktestEngine(_EngineCore):
             # Try series
             series = await client.series.get(item_id)
             if series.structured_type:
-                streams.extend(await self._async_resolve_structured(
+                lanes = await self._async_resolve_structured(
                     client, item_id, series, after=after, before=before, **params,
-                ))
+                )
+                streams.extend(
+                    self._async_make_market_stream(client, lane, after=after, before=before)
+                    for lane in lanes
+                )
+                n_markets += sum(len(lane) for lane in lanes)
             elif series.is_rolling:
                 markets = []
                 async for m in client.series.walk(item_id, after=after, before=before, **params):
@@ -877,12 +1053,13 @@ class AsyncBacktestEngine(_EngineCore):
                     self._market_group[m.id] = series.id
                     self._register_market(m)
                 streams.append(self._async_make_market_stream(client, markets, after=after, before=before))
+                n_markets += len(markets)
             else:
                 raise ValueError(
                     f"Series '{series.title}' is neither rolling nor structured."
                 )
 
-        return streams
+        return streams, n_markets
 
     async def _async_make_market_stream(
         self,
@@ -892,21 +1069,53 @@ class AsyncBacktestEngine(_EngineCore):
         after: Any = None,
         before: Any = None,
     ) -> AsyncIterator[tuple[Market, HistoryEvent, OrderBook]]:
-        """Async version of ``_make_market_stream``."""
+        """Async version of ``_make_market_stream``.
+
+        Pipelines across market boundaries — see sync version's docstring.
+        """
         history_params: dict[str, Any] = {}
         if self._config.include_trades:
             history_params["include_trades"] = True
 
-        for market in markets:
+        reporter = self._reporter
+
+        def _make_prefetcher(market: Market) -> AsyncPrefetchedIterator:
             history = client.orderbook.history(
                 market.id,
                 after=after or market.open_time,
                 before=before or market.close_time,
                 **history_params,
             )
-            replay = AsyncOrderBookReplay(history, market_id=market.id, platform=market.platform)
-            async for event, book in replay:
-                yield market, event, book
+            mid = market.id
+            return AsyncPrefetchedIterator(
+                history,
+                on_fetched=lambda n, mid=mid: reporter.fetched(mid, n),
+                on_done=lambda mid=mid: reporter.market_fetch_done(mid),
+            )
+
+        if not markets:
+            return
+
+        current = _make_prefetcher(markets[0]).start()
+        next_prefetcher: AsyncPrefetchedIterator | None = None
+        try:
+            for i, market in enumerate(markets):
+                if i + 1 < len(markets):
+                    next_prefetcher = _make_prefetcher(markets[i + 1]).start()
+
+                reporter.market_started(market.id, market.id)
+                replay = AsyncOrderBookReplay(current, market_id=market.id, platform=market.platform)
+                async for event, book in replay:
+                    yield market, event, book
+                reporter.market_finished(market.id)
+
+                current = next_prefetcher
+                next_prefetcher = None
+        finally:
+            if current is not None:
+                await current.close()
+            if next_prefetcher is not None:
+                await next_prefetcher.close()
 
     async def _run_merged(  # type: ignore[override]
         self,
@@ -916,6 +1125,7 @@ class AsyncBacktestEngine(_EngineCore):
         active: dict[str, Market] = {}
 
         async for market, event, book in async_merge_streams(streams):
+            self._reporter.consumed(market.id, 1)
             key = self._market_group.get(market.id, market.id)
             prev = active.get(key)
             if prev is not None and prev.id != market.id:
@@ -943,10 +1153,11 @@ class AsyncBacktestEngine(_EngineCore):
         after: Any = None,
         before: Any = None,
         **params: Any,
-    ) -> list[AsyncIterator[tuple[Market, HistoryEvent, OrderBook]]]:
-        """Resolve a structured series into per-market async streams."""
-        from marketlens._base import _coerce_timestamp
+    ) -> list[list[Market]]:
+        """Resolve a structured series into time-disjoint market lanes.
 
+        See sync ``_resolve_structured`` for the rationale.
+        """
         event_params = dict(params)
         if after is not None:
             event_params["end_after"] = after
@@ -957,7 +1168,7 @@ class AsyncBacktestEngine(_EngineCore):
         after_ms = _coerce_timestamp(after) if after is not None else None
         before_ms = _coerce_timestamp(before) if before is not None else None
 
-        streams: list[AsyncIterator[tuple[Market, HistoryEvent, OrderBook]]] = []
+        all_markets: list[Market] = []
         for evt in events:
             event_markets = await client.events.markets(evt.id).to_list()
             for m in event_markets:
@@ -967,7 +1178,11 @@ class AsyncBacktestEngine(_EngineCore):
                     continue
                 self._market_series[m.id] = series.id
                 self._register_market(m)
-                streams.append(self._async_make_market_stream(
-                    client, [m], after=after, before=before,
-                ))
-        return streams
+                all_markets.append(m)
+
+        lanes = _pack_into_lanes(all_markets)
+        for i, lane in enumerate(lanes):
+            lane_key = f"lane:{series.id}:{i}"
+            for m in lane:
+                self._market_group[m.id] = lane_key
+        return lanes

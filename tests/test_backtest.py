@@ -1418,3 +1418,155 @@ class TestQueuePositionFills:
         trade = self._trade("SELL", "0.6500", size="100.0000")
         fill = sim.try_fill_limit_order(order, book, trade, 2000)
         assert fill is None
+
+
+class TestLazyReferencePrices:
+    """Reference prices should only load when a strategy actually queries them."""
+
+    def _setup_market(self, mock_api, with_underlying: bool):
+        """Create a 1-event market market that may or may not have an underlying."""
+        market = {
+            **SAMPLE_MARKET, "id": "m1",
+            "underlying": "BTC" if with_underlying else None,
+        }
+        snapshot = {
+            "type": "snapshot", "t": 1000, "is_reseed": False,
+            "bids": [{"price": "0.5000", "size": "10.0000"}],
+            "asks": [{"price": "0.6000", "size": "10.0000"}],
+        }
+        mock_api.get("/markets/m1").mock(
+            return_value=httpx.Response(200, json=market)
+        )
+        mock_api.get("/markets/m1/orderbook/history").mock(
+            return_value=httpx.Response(
+                200, json={"data": [snapshot],
+                           "meta": {"cursor": None, "has_more": False}},
+            )
+        )
+
+    def test_strategy_without_reference_skips_fetch(self, mock_api, client):
+        """Strategy that never calls reference_price() must not trigger
+        any /reference/candles requests, even when the market has an
+        underlying symbol set. We deliberately do NOT mock the candles
+        endpoint — any call would raise AllMockedAssertionError."""
+        self._setup_market(mock_api, with_underlying=True)
+
+        class NoRefStrategy(Strategy):
+            def on_book(self, ctx, market, book):
+                pass  # never queries reference
+
+        result = client.backtest(
+            NoRefStrategy(), "m1",
+            initial_cash="1000", include_trades=False,
+            fees=None, progress=False,
+        )
+        assert result is not None
+
+    def test_strategy_with_reference_triggers_fetch(self, mock_api, client):
+        """When reference_price() IS called, the candles endpoint is hit."""
+        self._setup_market(mock_api, with_underlying=True)
+        candle = {
+            "symbol": "BTC", "timestamp": 999,
+            "open": "100", "high": "100", "low": "100", "close": "100",
+            "volume": "1",
+        }
+        ref_route = mock_api.get("/reference/candles").mock(
+            return_value=httpx.Response(200, json={
+                "data": [candle], "meta": {"cursor": None, "has_more": False, "resolution": "1s"},
+            })
+        )
+
+        seen_refs: list = []
+
+        class RefStrategy(Strategy):
+            def on_book(self, ctx, market, book):
+                seen_refs.append(ctx.reference_price())
+
+        result = client.backtest(
+            RefStrategy(), "m1",
+            initial_cash="1000", include_trades=False,
+            fees=None, progress=False,
+        )
+        assert result is not None
+        assert ref_route.call_count >= 1
+        assert any(r is not None for r in seen_refs)
+
+
+class TestPackIntoLanes:
+    """Lane packing for structured products (interval graph coloring).
+
+    The aim is to collapse N parallel time-overlapping markets into
+    K = peak_concurrency lanes, each lane being a chronological chain
+    of time-disjoint markets.
+    """
+
+    def _market(self, mid: str, open_time: int, close_time: int):
+        from marketlens.types.market import Market
+        from conftest import SAMPLE_MARKET
+        data = {**SAMPLE_MARKET, "id": mid, "open_time": open_time, "close_time": close_time}
+        return Market.model_validate(data)
+
+    def test_disjoint_markets_pack_into_one_lane(self):
+        from marketlens.backtest._engine import _pack_into_lanes
+        ms = [
+            self._market("a", 0,   100),
+            self._market("b", 100, 200),
+            self._market("c", 200, 300),
+        ]
+        lanes = _pack_into_lanes(ms)
+        assert len(lanes) == 1
+        assert [m.id for m in lanes[0]] == ["a", "b", "c"]
+
+    def test_overlapping_markets_split_into_separate_lanes(self):
+        from marketlens.backtest._engine import _pack_into_lanes
+        ms = [
+            self._market("a", 0, 100),
+            self._market("b", 50, 150),  # overlaps a
+            self._market("c", 60, 160),  # overlaps a + b
+        ]
+        lanes = _pack_into_lanes(ms)
+        # Three concurrent markets at any point → 3 lanes minimum.
+        assert len(lanes) == 3
+        # Each lane has exactly one of these markets.
+        assert sorted(lane[0].id for lane in lanes) == ["a", "b", "c"]
+
+    def test_weekly_rolling_pattern(self):
+        """Mirror btc-multi-strikes-weekly: markets that open daily and
+        last 7 days. Peak concurrency = 7. Across N opening days we
+        expect exactly 7 lanes regardless of N."""
+        from marketlens.backtest._engine import _pack_into_lanes
+        DAY = 86_400_000  # ms
+        WEEK = 7 * DAY
+        ms = [
+            self._market(f"d{day}", day * DAY, day * DAY + WEEK)
+            for day in range(20)  # 20 daily-opening markets, 7-day overlap
+        ]
+        lanes = _pack_into_lanes(ms)
+        assert len(lanes) == 7  # peak overlap = 7 days
+        # Within each lane, markets are time-disjoint and ordered.
+        for lane in lanes:
+            for prev, nxt in zip(lane, lane[1:]):
+                assert prev.close_time <= nxt.open_time
+
+    def test_multiple_strikes_per_event_and_rolling_overlap(self):
+        """11 strikes/day × 7-day window. Peak concurrency = 11×7 = 77."""
+        from marketlens.backtest._engine import _pack_into_lanes
+        DAY = 86_400_000
+        WEEK = 7 * DAY
+        ms = []
+        for day in range(20):
+            for strike in range(11):
+                ms.append(self._market(f"d{day}-s{strike}", day * DAY, day * DAY + WEEK))
+        lanes = _pack_into_lanes(ms)
+        assert len(lanes) == 77
+
+    def test_untimed_markets_get_own_lanes(self):
+        from marketlens.backtest._engine import _pack_into_lanes
+        from marketlens.types.market import Market
+        from conftest import SAMPLE_MARKET
+        # ``b`` has no close_time → can't reason about overlap, isolate it.
+        a = self._market("a", 0, 100)
+        b_data = {**SAMPLE_MARKET, "id": "b", "open_time": 100, "close_time": None}
+        b = Market.model_validate(b_data)
+        lanes = _pack_into_lanes([a, b])
+        assert len(lanes) == 2

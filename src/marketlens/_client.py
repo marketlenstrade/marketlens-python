@@ -57,6 +57,7 @@ class MarketLens:
         queue_position: bool = False,
         settlement_delay_ms: int = 5000,
         data_dir: str | None = None,
+        progress: bool = True,
         **params: Any,
     ) -> Any:
         """Run a backtest on a market, series, or list of markets/series.
@@ -65,6 +66,9 @@ class MarketLens:
             data_dir: If set, read market history from local Parquet files
                 in this directory instead of fetching from the API.
                 Files should be named ``history-{market_id}.parquet``.
+            progress: Show rich progress bars for fetching and backtesting.
+                Auto-disables in non-TTY contexts. Override with
+                ``MARKETLENS_PROGRESS=0`` env var.
 
         Simple one-liner API. For advanced config, use ``BacktestEngine`` directly.
         """
@@ -79,6 +83,7 @@ class MarketLens:
             limit_fill_rate=limit_fill_rate,
             queue_position=queue_position,
             settlement_delay_ms=settlement_delay_ms,
+            progress=progress,
         )
         engine = BacktestEngine(strategy, config)
         return engine.run(self, id, after=after, before=before, data_dir=data_dir, **params)
@@ -136,6 +141,7 @@ class AsyncMarketLens:
         limit_fill_rate: float = 0.1,
         queue_position: bool = False,
         settlement_delay_ms: int = 5000,
+        progress: bool = True,
         **params: Any,
     ) -> Any:
         """Run a backtest on a market, series, or list of markets/series (async)."""
@@ -150,6 +156,7 @@ class AsyncMarketLens:
             limit_fill_rate=limit_fill_rate,
             queue_position=queue_position,
             settlement_delay_ms=settlement_delay_ms,
+            progress=progress,
         )
         engine = AsyncBacktestEngine(strategy, config)
         return await engine.run(self, id, after=after, before=before, **params)
