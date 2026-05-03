@@ -679,11 +679,17 @@ class _EngineCore:
                 return
         client = ctx.get("client")
         if client is not None:
+            # Use the union of the user's window and the registered markets'
+            # open/close range — book reconstruction can yield events at the
+            # anchor snapshot's timestamp, which may be before `after`.
             bounds = self._underlying_bounds.get(symbol)
-            after = ctx.get("after")
-            before = ctx.get("before")
-            eff_after = _coerce_timestamp(after) if after is not None else (bounds[0] if bounds else None)
-            eff_before = _coerce_timestamp(before) if before is not None else (bounds[1] if bounds else None)
+            after_in = _coerce_timestamp(ctx.get("after"))
+            before_in = _coerce_timestamp(ctx.get("before"))
+            if bounds:
+                eff_after = bounds[0] if after_in is None else min(after_in, bounds[0])
+                eff_before = bounds[1] if before_in is None else max(before_in, bounds[1])
+            else:
+                eff_after, eff_before = after_in, before_in
             if eff_after is not None and eff_before is not None:
                 resolution = ctx.get("resolution") or self._REF_RESOLUTION_DEFAULT
                 bucket_ms = self._REF_RESOLUTION_MS.get(resolution, 60_000)

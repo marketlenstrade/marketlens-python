@@ -21,9 +21,20 @@ from marketlens.exceptions import (
 
 
 def _coerce_timestamp(value: Any) -> Any:
-    """Convert datetime to ms epoch; pass through ints and strings."""
+    """Coerce datetime / numeric str / ISO 8601 str to ms epoch. Pass through ints / None."""
+    if value is None or isinstance(value, int):
+        return value
     if isinstance(value, datetime):
         return int(value.timestamp() * 1000)
+    if isinstance(value, str):
+        s = value.strip()
+        if s.lstrip("-").isdigit():
+            return int(s)
+        try:
+            dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+            return int(dt.timestamp() * 1000)
+        except ValueError:
+            return value
     return value
 
 
