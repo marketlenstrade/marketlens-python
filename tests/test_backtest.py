@@ -1,3 +1,5 @@
+import json
+
 import httpx
 import pytest
 from decimal import Decimal
@@ -8,6 +10,7 @@ from marketlens.backtest import (
     BacktestConfig,
     BacktestEngine,
     BacktestResult,
+    FeeModel,
     Fill,
     FlatFeeModel,
     Order,
@@ -24,6 +27,7 @@ from marketlens.backtest import (
 )
 from marketlens.backtest._fills import FillSimulator, QueuePositionTracker, _order_resting_level
 from marketlens.backtest._portfolio import Portfolio
+from marketlens.backtest._results import _deserialize_config, _serialize_config
 from marketlens.types.orderbook import OrderBook
 
 
@@ -926,6 +930,127 @@ class TestBacktestResult:
         assert result.sharpe_ratio is None
         assert result.trades_df().empty
         assert result.settlements_df().empty
+
+
+# ── Persistence Tests ────────────────────────────────────────────
+
+class TestBacktestResultPersistence:
+    def _run_simple(self, mock_api, client):
+        m1 = _market_with({
+            "id": "m1", "status": "resolved",
+            "winning_outcome": "Yes", "winning_outcome_index": 0,
+            "open_time": 1000, "close_time": 6000, "resolved_at": 6000,
+        })
+
+        class BuyFirst(Strategy):
+            def on_book(self, ctx, market, book):
+                if ctx.position().side == "FLAT":
+                    ctx.buy_yes(size="100.0000")
+
+        mock_api.get("/markets/m1").mock(return_value=httpx.Response(200, json=m1))
+        mock_api.get("/markets/m1/orderbook/history").mock(
+            return_value=httpx.Response(200, json=_history_response(SNAPSHOT_1, SNAPSHOT_2)))
+        return client.backtest(
+            BuyFirst(), "m1",
+            after=1000, before=6000,
+            initial_cash="10000.0000", latency_ms=0, limit_fill_rate=1.0,
+        )
+
+    def test_config_and_targets_attached(self, mock_api, client):
+        result = self._run_simple(mock_api, client)
+        assert result.config.initial_cash == "10000.0000"
+        assert result.config.latency_ms == 0
+        assert result.targets == {
+            "id": "m1", "after": 1000, "before": 6000, "data_dir": None,
+        }
+        assert result.initial_cash == "10000.0000"
+
+    def test_save_overwrite_behavior(self, mock_api, client, tmp_path):
+        result = self._run_simple(mock_api, client)
+        out = tmp_path / "run1"
+        result.save(out)
+        assert (out / "manifest.json").exists()
+
+        with pytest.raises(FileExistsError):
+            result.save(out)
+
+        # overwrite=True clears stray files left in the directory.
+        (out / "stray.txt").write_text("x")
+        result.save(out, overwrite=True)
+        assert not (out / "stray.txt").exists()
+
+    def test_round_trip_full(self, mock_api, client, tmp_path):
+        result = self._run_simple(mock_api, client)
+        result.save(tmp_path / "run1")
+        loaded = BacktestResult.load(tmp_path / "run1")
+
+        # Metrics
+        assert loaded.summary() == result.summary()
+        assert loaded.cash_rejected == result.cash_rejected
+        assert loaded.initial_cash == result.initial_cash
+
+        # DataFrames
+        assert result.trades_df().reset_index().equals(loaded.trades_df().reset_index())
+        assert result.orders_df().reset_index().equals(loaded.orders_df().reset_index())
+        assert result.settlements_df().equals(loaded.settlements_df())
+        assert result.equity_df().reset_index().equals(loaded.equity_df().reset_index())
+        assert result.by_series() == loaded.by_series()
+
+        # Config + targets
+        assert loaded.config.initial_cash == result.config.initial_cash
+        assert loaded.config.latency_ms == result.config.latency_ms
+        assert loaded.targets == result.targets
+
+        # Orders carry their fills back
+        assert len(loaded._orders) == len(result._orders)
+        for orig, restored in zip(result._orders, loaded._orders):
+            assert restored.id == orig.id
+            assert [f.price for f in restored.fills] == [f.price for f in orig.fills]
+
+        # Loaded result has no live portfolio
+        assert loaded._portfolio is None
+
+    def test_round_trip_empty_backtest(self, mock_api, client, tmp_path):
+        m1 = _market_with({"id": "m1", "open_time": 1000, "close_time": 6000})
+
+        class Noop(Strategy):
+            pass
+
+        mock_api.get("/markets/m1").mock(return_value=httpx.Response(200, json=m1))
+        mock_api.get("/markets/m1/orderbook/history").mock(
+            return_value=httpx.Response(200, json=_history_response(SNAPSHOT_1)))
+
+        result = client.backtest(
+            Noop(), "m1", after=1000, before=6000,
+            initial_cash="10000.0000", latency_ms=0, limit_fill_rate=1.0,
+        )
+        result.save(tmp_path / "empty")
+        loaded = BacktestResult.load(tmp_path / "empty")
+
+        assert loaded.summary() == result.summary()
+        assert loaded.trades_df().empty
+        assert loaded.settlements_df().empty
+
+    def test_load_rejects_unknown_format_version(self, tmp_path):
+        out = tmp_path / "bogus"
+        out.mkdir()
+        (out / "manifest.json").write_text(json.dumps({"format_version": 999}))
+        with pytest.raises(ValueError, match="Unsupported format_version"):
+            BacktestResult.load(out)
+
+    def test_custom_fee_model_serializes_as_null(self):
+        class CustomFee(FeeModel):
+            def calculate(self, price, size, is_maker):
+                return Decimal("0")
+
+        cfg = BacktestConfig(initial_cash="100.0000", fee_model=CustomFee())
+        out = _serialize_config(cfg)
+        assert out["fee_model"] is None
+        assert "CustomFee" in out["fee_model_repr"]
+
+        restored = _deserialize_config(out)
+        assert restored.fee_model is None  # custom subclass cannot be reconstructed
+        assert restored.initial_cash == "100.0000"
 
 
 # ── Latency Simulation Tests ────────────────────────────────────

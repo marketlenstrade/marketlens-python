@@ -172,6 +172,8 @@ class _EngineCore:
         self._equity_curve: list[dict] = []
         self._cash_rejected = 0
 
+        self._targets: dict[str, Any] = {}
+
         self._current_market: Market | None = None
         self._current_book: OrderBook | None = None
         self._current_time: int = 0
@@ -731,7 +733,24 @@ class _EngineCore:
             settlements=self._settlements,
             equity_curve=self._equity_curve,
             cash_rejected=self._cash_rejected,
+            config=self._config,
+            targets=dict(self._targets),
         )
+
+    def _capture_targets(
+        self,
+        id: str | list[str],
+        *,
+        after: Any = None,
+        before: Any = None,
+        data_dir: str | None = None,
+    ) -> None:
+        self._targets = {
+            "id": id,
+            "after": _coerce_timestamp(after),
+            "before": _coerce_timestamp(before),
+            "data_dir": data_dir,
+        }
 
 
 
@@ -747,6 +766,7 @@ class BacktestEngine(_EngineCore):
         reference_resolution: str = "1m",
         **params: Any,
     ) -> BacktestResult:
+        self._capture_targets(id, after=after, before=before, data_dir=data_dir)
         # Reference prices are fetched lazily by get_reference_price() on
         # first call — strategies that don't query them pay zero cost.
         # Loaders run on background threads so the engine never blocks.
@@ -945,6 +965,7 @@ class AsyncBacktestEngine(_EngineCore):
         reference_resolution: str = "1m",
         **params: Any,
     ) -> BacktestResult:
+        self._capture_targets(id, after=after, before=before, data_dir=data_dir)
         # Async path supports parquet-only reference loading (no API
         # fallback — the sync iterator can't be driven from an async hook).
         # get_reference_price() loads on first call.

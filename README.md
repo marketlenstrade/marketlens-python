@@ -109,6 +109,18 @@ result.equity_df()          # equity curve time series
 result.by_series()          # per-series P&L attribution
 ```
 
+Persist a result to disk and reload it later:
+
+```python
+from marketlens.backtest import BacktestResult
+
+result.save("runs/spread-timer")            # or overwrite=True
+loaded = BacktestResult.load("runs/spread-timer")
+loaded.config, loaded.targets               # config + run inputs preserved
+```
+
+The directory holds a JSON manifest plus four Parquet files (`trades`, `orders`, `settlements`, `equity`) — readable directly from pandas/duckdb.
+
 ## Data
 
 All list methods return auto-paginating iterators with `.to_list()` and `.to_dataframe()`.
