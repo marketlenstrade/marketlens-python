@@ -14,43 +14,53 @@ Define a strategy, run it against any market or series — the engine replays fu
 from marketlens import MarketLens
 from marketlens.backtest import Strategy
 
-class SpreadTimer(Strategy):
+class OpeningFader(Strategy):
     def on_market_start(self, ctx, market, book):
         self._entered = False
 
     def on_book(self, ctx, market, book):
-        if self._entered:
+        if self._entered or book.midpoint is None:
             return
-        if book.spread_bps() and book.spread_bps() < 300:
+        if float(book.midpoint) < 0.50:
             ctx.buy_yes(size="200")
-            self._entered = True
+        else:
+            ctx.buy_no(size="200")
+        self._entered = True
 
 client = MarketLens()  # uses MARKETLENS_API_KEY env var
 result = client.backtest(
-    SpreadTimer(), "sol-up-or-down-hourly",
+    OpeningFader(), "btc-up-or-down-5m",
     initial_cash="10000",
-    after="2026-03-05T10:00Z", before="2026-03-05T14:00Z",
+    after="2026-04-15T01:45:00Z", before="2026-04-15T02:00:00Z",
 )
-print(result)
+print(result.summary())
 ```
 
 Pass a market ID, series slug, or a list of series for multi-asset portfolios:
 
+Always pass `after`/`before` — series and multi-strike runs are otherwise unbounded.
+
 ```python
-# Single market
+# Single market — replays the full lifetime of the market by default
 result = client.backtest(strategy, market_id, initial_cash="10000")
 
-# Rolling series — walks every market in the series chronologically
+# Rolling series — walks every market in [after, before)
 result = client.backtest(strategy, "btc-up-or-down-5m", initial_cash="10000",
-                         after="2026-03-05", before="2026-03-06")
+                         after="2026-04-15T01:45:00Z",
+                         before="2026-04-15T02:00:00Z")
 
 # Multi-asset portfolio — shared capital across series
 result = client.backtest(strategy,
     ["btc-up-or-down-5m", "eth-up-or-down-5m", "sol-up-or-down-5m"],
-    initial_cash="10000", after="2026-03-05", before="2026-03-06")
+    initial_cash="10000",
+    after="2026-04-15T01:45:00Z", before="2026-04-15T02:00:00Z")
 
-# Structured product — parallel replay of all strike markets in the series
-result = client.backtest(strategy, "btc-multi-strikes-weekly", initial_cash="10000")
+# Structured product — replays every strike market in the matched event(s).
+# Pass `after` to pick a single recent event; events are typically week-long,
+# so a wide window can pull millions of book events.
+result = client.backtest(strategy, "btc-multi-strikes-weekly",
+                         initial_cash="10000",
+                         after="2026-05-08T00:00:00Z")
 ```
 
 ### Execution realism
@@ -108,18 +118,30 @@ All list methods return auto-paginating iterators with `.to_list()` and `.to_dat
 `walk()` replays full L2 book state for any market or series. Pass a market ID, series slug, or condition ID — the same interface for everything.
 
 ```python
-for market, book in client.orderbook.walk("btc-up-or-down-5m", status="resolved"):
+walk = client.orderbook.walk(
+    "btc-up-or-down-5m",
+    after="2026-04-15T01:45:00Z", before="2026-04-15T01:50:00Z",
+)
+for market, book in walk:
     print(market.question, book.midpoint, book.spread_bps())
 
 # As a DataFrame
-df = client.orderbook.walk(market_id, after=start, before=end).to_dataframe()
+df = client.orderbook.walk(
+    market_id, after=start, before=end,
+).to_dataframe()
 ```
 
 ### Candles, trades, markets
 
 ```python
-candles = client.markets.candles(market_id, resolution="1h").to_dataframe()
-trades = client.markets.trades(market_id, after=start, before=end).to_list()
+candles = client.markets.candles(
+    market_id, resolution="1m",
+    after="2026-04-15T01:45:00Z", before="2026-04-15T01:50:00Z",
+).to_dataframe()
+trades = client.markets.trades(
+    market_id,
+    after="2026-04-15T01:45:00Z", before="2026-04-15T01:50:00Z",
+).to_list()
 active = client.markets.list(status="active", sort="-volume", limit=10).first_page()
 ```
 
@@ -157,13 +179,17 @@ result = client.backtest(
 For multi-strike series (survival, density, barrier), all sibling markets replay in parallel. `walk.books` holds the latest book for every strike, and `walk.surface()` fits the implied probability distribution at each tick.
 
 ```python
-walk = client.orderbook.walk("btc-multi-strikes-weekly")
+walk = client.orderbook.walk(
+    "btc-multi-strikes-weekly",
+    after="2026-05-08T00:00:00Z",  # picks the next event ending after this
+)
 for market, book in walk:
     surface = walk.surface()
     if surface:
         for s in surface.survival_strikes():
             print(f"${s.strike:,.0f} P(above)={s.fitted_prob:.3f}")
         print(f"implied_mean=${float(surface.implied_mean):,.0f}")
+        break  # the loop fires per book tick — break to print one fit
 ```
 
 | Type | Source | Stats |
@@ -193,7 +219,12 @@ book.depth_within("0.02")      # (bid, ask) depth within 2c of mid
 Binance spot at 1-second resolution for crypto underlyings (BTC, ETH, SOL, XRP, etc.). Available directly or inside backtests via `ctx.reference_price()`.
 
 ```python
-for candle in client.reference.candles("BTC", after=start, before=end):
+candles = client.reference.candles(
+    "BTC",
+    after="2026-04-15T01:45:00Z", before="2026-04-15T01:50:00Z",
+    resolution="1s",
+)
+for candle in candles:
     print(candle.timestamp, candle.close)
 ```
 
