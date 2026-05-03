@@ -11,6 +11,16 @@ class SyncPageIterator(Generic[T]):
     """Auto-paginating synchronous iterator over API results.
 
     Fetches pages transparently as the caller iterates items.
+
+    Two distinct knobs control how many items you get back:
+
+    - ``limit`` (passed as a query param to the server) sets the **page
+      size** — how many rows the server returns per request.  The iterator
+      keeps fetching pages until the server reports no more results.
+    - ``take`` (handled client-side, never sent to the server) sets a
+      **total-item cap**.  Iteration stops after ``take`` items have been
+      yielded, even if more pages remain.  Combine with a small ``limit``
+      to avoid over-fetching when you only need the first few rows.
     """
 
     def __init__(
@@ -25,6 +35,9 @@ class SyncPageIterator(Generic[T]):
         self._client = client
         self._path = path
         self._params = dict(params)
+        # `take` is a caller-side total-item cap; strip it so it isn't
+        # forwarded to the server as a query param.
+        self._take: int | None = self._params.pop("take", None)
         self._model = model
         self._data_key = data_key
         self._extra_meta_keys = extra_meta_keys
@@ -46,9 +59,14 @@ class SyncPageIterator(Generic[T]):
     def __iter__(self) -> Iterator[T]:
         self._started = True
         self._fetch_page()
+        yielded = 0
         while True:
             if self._current_page:
-                yield from self._current_page
+                for item in self._current_page:
+                    if self._take is not None and yielded >= self._take:
+                        return
+                    yield item
+                    yielded += 1
             if not self._has_more:
                 break
             self._fetch_page()
@@ -76,7 +94,18 @@ class SyncPageIterator(Generic[T]):
 
 
 class AsyncPageIterator(Generic[T]):
-    """Auto-paginating asynchronous iterator over API results."""
+    """Auto-paginating asynchronous iterator over API results.
+
+    Two distinct knobs control how many items you get back:
+
+    - ``limit`` (passed as a query param to the server) sets the **page
+      size** — how many rows the server returns per request.  The iterator
+      keeps fetching pages until the server reports no more results.
+    - ``take`` (handled client-side, never sent to the server) sets a
+      **total-item cap**.  Iteration stops after ``take`` items have been
+      yielded, even if more pages remain.  Combine with a small ``limit``
+      to avoid over-fetching when you only need the first few rows.
+    """
 
     def __init__(
         self,
@@ -90,6 +119,7 @@ class AsyncPageIterator(Generic[T]):
         self._client = client
         self._path = path
         self._params = dict(params)
+        self._take: int | None = self._params.pop("take", None)
         self._model = model
         self._data_key = data_key
         self._extra_meta_keys = extra_meta_keys
@@ -111,10 +141,14 @@ class AsyncPageIterator(Generic[T]):
     async def __aiter__(self):
         self._started = True
         await self._fetch_page()
+        yielded = 0
         while True:
             if self._current_page:
                 for item in self._current_page:
+                    if self._take is not None and yielded >= self._take:
+                        return
                     yield item
+                    yielded += 1
             if not self._has_more:
                 break
             await self._fetch_page()

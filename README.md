@@ -142,7 +142,7 @@ trades = client.markets.trades(
     market_id,
     after="2026-04-15T01:45:00Z", before="2026-04-15T01:50:00Z",
 ).to_list()
-active = client.markets.list(status="active", sort="-volume", limit=10).first_page()
+active = client.markets.list(status="active", sort="-volume", take=10)
 ```
 
 ### Bulk export
