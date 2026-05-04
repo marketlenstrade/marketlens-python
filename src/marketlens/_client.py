@@ -58,17 +58,25 @@ class MarketLens:
         settlement_delay_ms: int = 5000,
         data_dir: str | None = None,
         progress: bool = True,
+        coalesce: bool | None = None,
         **params: Any,
     ) -> Any:
         """Run a backtest on a market, series, or list of markets/series.
 
         Args:
-            data_dir: If set, read market history from local Parquet files
-                in this directory instead of fetching from the API.
-                Files should be named ``history-{market_id}.parquet``.
+            data_dir: Read market history from local Parquet files in this
+                directory instead of the API. Files should be named
+                ``history-{market_id}.parquet`` (full) or
+                ``history-{market_id}-compact.parquet`` (trade-aligned).
+                The engine auto-picks the variant matching the strategy.
             progress: Show rich progress bars for fetching and backtesting.
-                Auto-disables in non-TTY contexts. Override with
-                ``MARKETLENS_PROGRESS=0`` env var.
+                Auto-disables in non-TTY. Override via ``MARKETLENS_PROGRESS=0``.
+            coalesce: Tri-state override for the compact data path.
+                ``None`` (default) auto-detects from the strategy hooks.
+                ``True`` forces compact (requires ``queue_position=False``
+                and ``include_trades=True``). ``False`` forces full firehose.
+                Fill prices are mode-independent — the override only
+                controls inter-trade event density.
 
         Simple one-liner API. For advanced config, use ``BacktestEngine`` directly.
         """
@@ -84,6 +92,7 @@ class MarketLens:
             queue_position=queue_position,
             settlement_delay_ms=settlement_delay_ms,
             progress=progress,
+            coalesce=coalesce,
         )
         engine = BacktestEngine(strategy, config)
         return engine.run(self, id, after=after, before=before, data_dir=data_dir, **params)
@@ -142,9 +151,13 @@ class AsyncMarketLens:
         queue_position: bool = False,
         settlement_delay_ms: int = 5000,
         progress: bool = True,
+        coalesce: bool | None = None,
         **params: Any,
     ) -> Any:
-        """Run a backtest on a market, series, or list of markets/series (async)."""
+        """Run a backtest on a market, series, or list of markets/series (async).
+
+        See :meth:`MarketLens.backtest` for ``coalesce`` semantics.
+        """
         from marketlens.backtest import AsyncBacktestEngine, BacktestConfig
 
         config = BacktestConfig(
@@ -157,6 +170,7 @@ class AsyncMarketLens:
             queue_position=queue_position,
             settlement_delay_ms=settlement_delay_ms,
             progress=progress,
+            coalesce=coalesce,
         )
         engine = AsyncBacktestEngine(strategy, config)
         return await engine.run(self, id, after=after, before=before, **params)

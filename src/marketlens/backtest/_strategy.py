@@ -217,3 +217,12 @@ class StrategyContext:
     @property
     def event_books(self) -> dict[str, OrderBook]:
         return self.books
+
+
+def _is_trade_only(strategy: Strategy) -> bool:
+    """True if the strategy doesn't override ``on_book`` (class- or
+    instance-level). Used by the engine to auto-route to compact data."""
+    return (
+        type(strategy).on_book is Strategy.on_book
+        and "on_book" not in vars(strategy)
+    )

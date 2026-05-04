@@ -21,6 +21,7 @@ class Exports:
         *,
         path: str | Path = ".",
         progress: bool = True,
+        coalesce: bool = True,
     ) -> Path:
         """Download all data needed to backtest a single market.
 
@@ -31,6 +32,11 @@ class Exports:
             market_id: Market UUID.
             path: Directory to save files in.
             progress: Show a rich progress bar. Auto-disables in non-TTY.
+            coalesce: When True (default), download the trade-aligned compact
+                variant — ~4× smaller, book exact at every trade and snapshot.
+                Set False for the full firehose when your strategy needs every
+                inter-trade delta (e.g. ``queue_position=True``). The two
+                variants are cached on disk separately and can coexist.
 
         Returns:
             Path to the data directory.
@@ -38,11 +44,15 @@ class Exports:
         data_dir = Path(path)
         data_dir.mkdir(parents=True, exist_ok=True)
 
+        suffix = "-compact" if coalesce else ""
+        params = {"coalesce": "true"} if coalesce else None
+
         with make_reporter(enabled=progress, n_markets=0) as reporter:
-            dest = data_dir / f"history-{market_id}.parquet"
+            dest = data_dir / f"history-{market_id}{suffix}.parquet"
             if not dest.exists():
                 self._client.download(
                     f"/markets/{market_id}/export", dest,
+                    params=params,
                     reporter=reporter, label=f"market {market_id[:8]}",
                 )
 
@@ -68,6 +78,7 @@ class Exports:
         before: Any = None,
         path: str | Path = ".",
         progress: bool = True,
+        coalesce: bool = True,
     ) -> Path:
         """Download all data needed to backtest a series.
 
@@ -80,6 +91,7 @@ class Exports:
             before: End time filter (ms epoch or datetime).
             path: Directory to save files in.
             progress: Show a rich progress bar. Auto-disables in non-TTY.
+            coalesce: See :meth:`download`. Default True.
 
         Returns:
             Path to the data directory.
@@ -92,6 +104,8 @@ class Exports:
             params["after"] = _coerce_timestamp(after)
         if before is not None:
             params["before"] = _coerce_timestamp(before)
+        if coalesce:
+            params["coalesce"] = "true"
 
         with make_reporter(enabled=progress, n_markets=0) as reporter:
             zip_path = data_dir / f"_series-{series_id}.zip.tmp"
@@ -163,20 +177,24 @@ class AsyncExports:
         *,
         path: str | Path = ".",
         progress: bool = True,
+        coalesce: bool = True,
     ) -> Path:
         """Download all data needed to backtest a single market.
 
-        Downloads the market's order book history and, for crypto markets,
-        tick-level reference trades for the underlying asset.
+        See :meth:`Exports.download` for argument semantics.
         """
         data_dir = Path(path)
         data_dir.mkdir(parents=True, exist_ok=True)
 
+        suffix = "-compact" if coalesce else ""
+        params = {"coalesce": "true"} if coalesce else None
+
         with make_reporter(enabled=progress, n_markets=0) as reporter:
-            dest = data_dir / f"history-{market_id}.parquet"
+            dest = data_dir / f"history-{market_id}{suffix}.parquet"
             if not dest.exists():
                 await self._client.download(
                     f"/markets/{market_id}/export", dest,
+                    params=params,
                     reporter=reporter, label=f"market {market_id[:8]}",
                 )
 
@@ -202,6 +220,7 @@ class AsyncExports:
         before: Any = None,
         path: str | Path = ".",
         progress: bool = True,
+        coalesce: bool = True,
     ) -> Path:
         """Download all data needed to backtest a series."""
         data_dir = Path(path)
@@ -212,6 +231,8 @@ class AsyncExports:
             params["after"] = _coerce_timestamp(after)
         if before is not None:
             params["before"] = _coerce_timestamp(before)
+        if coalesce:
+            params["coalesce"] = "true"
 
         with make_reporter(enabled=progress, n_markets=0) as reporter:
             zip_path = data_dir / f"_series-{series_id}.zip.tmp"

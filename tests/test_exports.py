@@ -67,7 +67,8 @@ class TestStreamingDownload:
 class TestExportsResource:
     """Smoke test that exports.download() runs end-to-end with progress=False."""
 
-    def test_market_download_writes_parquet(self, mock_api, client, tmp_path):
+    def test_market_download_writes_parquet_compact_default(self, mock_api, client, tmp_path):
+        # Default coalesce=True writes the -compact variant.
         mock_api.get("/markets/abc-123/export").mock(
             return_value=httpx.Response(200, content=b"PAR1fake")
         )
@@ -75,14 +76,31 @@ class TestExportsResource:
             return_value=httpx.Response(404, json={"error": {"code": "NOT_FOUND", "message": "x"}})
         )
         out = client.exports.download("abc-123", path=str(tmp_path), progress=False)
+        assert (out / "history-abc-123-compact.parquet").exists()
+        # And the export request carried coalesce=true.
+        export_urls = [str(c.request.url) for c in mock_api.calls if "/export" in str(c.request.url)]
+        assert export_urls and "coalesce=true" in export_urls[0]
+
+    def test_market_download_full_when_coalesce_false(self, mock_api, client, tmp_path):
+        mock_api.get("/markets/abc-123/export").mock(
+            return_value=httpx.Response(200, content=b"PAR1fake")
+        )
+        mock_api.get("/markets/abc-123").mock(
+            return_value=httpx.Response(404, json={"error": {"code": "NOT_FOUND", "message": "x"}})
+        )
+        out = client.exports.download(
+            "abc-123", path=str(tmp_path), progress=False, coalesce=False,
+        )
         assert (out / "history-abc-123.parquet").exists()
+        export_urls = [str(c.request.url) for c in mock_api.calls if "/export" in str(c.request.url)]
+        assert export_urls and "coalesce" not in export_urls[0]
 
     def test_series_download_extracts_zip(self, mock_api, client, tmp_path):
-        # Build an in-memory zip with a single fake parquet
+        # Default coalesce=True → server emits -compact.parquet entries.
         buf = io.BytesIO()
         with zipfile.ZipFile(buf, "w") as zf:
-            zf.writestr("history-m1.parquet", b"PAR1m1")
-            zf.writestr("history-m2.parquet", b"PAR1m2")
+            zf.writestr("history-m1-compact.parquet", b"PAR1m1")
+            zf.writestr("history-m2-compact.parquet", b"PAR1m2")
         zip_bytes = buf.getvalue()
 
         mock_api.get("/series/btc-daily/export").mock(
@@ -96,7 +114,7 @@ class TestExportsResource:
             return_value=httpx.Response(404, json={"error": {"code": "NOT_FOUND", "message": "x"}})
         )
         out = client.exports.download_series("btc-daily", path=str(tmp_path), progress=False)
-        assert (out / "history-m1.parquet").read_bytes() == b"PAR1m1"
-        assert (out / "history-m2.parquet").read_bytes() == b"PAR1m2"
+        assert (out / "history-m1-compact.parquet").read_bytes() == b"PAR1m1"
+        assert (out / "history-m2-compact.parquet").read_bytes() == b"PAR1m2"
         # Temp zip is cleaned up
         assert not list(tmp_path.glob("_series-*.zip.tmp"))

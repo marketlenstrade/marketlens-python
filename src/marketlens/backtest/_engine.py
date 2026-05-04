@@ -20,7 +20,7 @@ from marketlens.backtest._fills import FillSimulator
 from marketlens.backtest._portfolio import Portfolio
 from marketlens.backtest._prefetch import AsyncPrefetchedIterator, PrefetchedIterator
 from marketlens.backtest._results import BacktestResult
-from marketlens.backtest._strategy import Strategy, StrategyContext
+from marketlens.backtest._strategy import Strategy, StrategyContext, _is_trade_only
 from marketlens.backtest._types import (
     Fill,
     Order,
@@ -140,6 +140,11 @@ class BacktestConfig:
     queue_position: bool = False
     settlement_delay_ms: int = 5000  # on-chain balance availability (~5s after MATCHED)
     progress: bool = True  # show rich progress bars for fetch/backtest
+    # None=auto, True=force compact, False=force full. Auto picks compact
+    # when on_book isn't overridden and queue_position/include_trades allow it.
+    # Fill prices are mode-independent (book pinned at submission); the mode
+    # only changes event density between trades.
+    coalesce: bool | None = None
 
 
 class _EngineCore:
@@ -166,6 +171,10 @@ class _EngineCore:
         self._orders: list[Order] = []
         self._open_orders: list[Order] = []
         self._pending_orders: list[tuple[int, Order]] = []  # (activate_at, order)
+        # order.id → book the strategy saw at submission. Fills always price
+        # against this book, decoupling fill price from latency / settlement
+        # / event density. Cleared on fill.
+        self._book_at_submission: dict[str, OrderBook] = {}
         # Per-market settlement: earliest time a SELL can activate after a BUY fill
         self._settled_at: dict[str, int] = {}  # market_id → timestamp_ms
         self._settlements: list[SettlementRecord] = []
@@ -190,7 +199,69 @@ class _EngineCore:
         # Set by run() inside a `with reporter:` block. No-op outside.
         self._reporter: _ProgressReporter = make_reporter(enabled=False)
 
+        self._compact_mode = self._resolve_compact_mode()
+
         self._ctx = StrategyContext(self)
+
+    def _resolve_compact_mode(self) -> bool:
+        """Decide whether to use the trade-aligned compact data path.
+
+        Honours an explicit ``config.coalesce`` override, otherwise
+        auto-detects from the strategy's hook signature.
+        """
+        compatible = (
+            not self._config.queue_position and self._config.include_trades
+        )
+        override = self._config.coalesce
+        if override is True:
+            if not compatible:
+                reason = ("queue_position=True" if self._config.queue_position
+                          else "include_trades=False")
+                raise ValueError(
+                    f"coalesce=True is incompatible with {reason}."
+                )
+            return True
+        if override is False:
+            return False
+        return _is_trade_only(self._strategy) and compatible
+
+    def _resolve_history_file(self, data_dir: Path, market_id: str) -> Path | None:
+        """Pick the history parquet variant for ``market_id``.
+
+        Prefers the variant matching the strategy mode. Falls back to the
+        other one with a stderr note when correctness is preserved; hard-
+        errors when ``queue_position=True`` and only the compact file is
+        present (compact lacks the per-delta detail queue tracking needs).
+        """
+        full = data_dir / f"history-{market_id}.parquet"
+        compact = data_dir / f"history-{market_id}-compact.parquet"
+        preferred, fallback = (compact, full) if self._compact_mode else (full, compact)
+
+        chosen = preferred if preferred.exists() else (
+            fallback if fallback.exists() else None
+        )
+        if chosen is None:
+            return None
+        if chosen is fallback:
+            if self._config.queue_position and chosen == compact:
+                raise ValueError(
+                    f"queue_position=True requires the full-firehose history "
+                    f"file, but only {compact.name} is present in {data_dir}. "
+                    f"Re-run client.exports.download(..., coalesce=False)."
+                )
+            note = (
+                "compact data with on_book overridden — book updates fire only at "
+                "snapshot and trade boundaries" if not self._compact_mode
+                else "full data with trade-only strategy — slower than necessary; "
+                "consider re-downloading with coalesce=True"
+            )
+            try:
+                sys.stderr.write(f"· using {chosen.name}: {note}\n")
+                sys.stderr.flush()
+            except Exception:
+                pass
+        self._targets.setdefault("resolved_files", {})[market_id] = chosen.name
+        return chosen
 
     def _with_reporter(self, n_markets: int):
         """Context manager that installs a progress reporter for the run."""
@@ -276,20 +347,24 @@ class _EngineCore:
         )
         self._orders.append(order)
 
-        # Compute activation time: network latency + settlement delay for SELLs
+        # Pin the book the strategy is looking at; fill price is anchored
+        # here regardless of latency / settlement delay / activation timing.
+        submission_book = self._books.get(target, self._current_book)
+        if submission_book is not None:
+            self._book_at_submission[order.id] = submission_book
+
+        # latency / settlement delays gate _when_ the fill is recorded, not
+        # the price it fills at.
         activate_at = self._current_time + self._latency_ms
         if side in (OrderSide.SELL_YES, OrderSide.SELL_NO):
-            settled_at = self._settled_at.get(target, 0)
-            activate_at = max(activate_at, settled_at)
+            activate_at = max(activate_at, self._settled_at.get(target, 0))
 
         if activate_at > self._current_time:
             self._pending_orders.append((activate_at, order))
         elif order_type == OrderType.MARKET:
             self._fill_market_order(order)
         else:
-            order.status = OrderStatus.OPEN
-            self._open_orders.append(order)
-            self._fill_sim.register_limit_order(order, self._current_book)
+            self._activate_limit_order(order)
 
         return order
 
@@ -350,37 +425,36 @@ class _EngineCore:
                 still_pending.append((activate_at, order))
         self._pending_orders = still_pending
 
+    def _fill_book(self, order: Order) -> OrderBook:
+        """Submission-pinned book for pricing ``order``; falls back to the
+        live per-market book if the pin is missing."""
+        return self._book_at_submission.get(order.id) or self._books.get(
+            order.market_id, self._current_book,  # type: ignore[arg-type]
+        )
+
     def _activate_limit_order(self, order: Order) -> None:
-        """Activate a limit order: fill crossing portion as taker, rest as maker.
-
-        Mirrors real exchange behaviour: when a limit order's price crosses
-        the spread, the exchange fills it immediately against resting
-        liquidity (taker fees). Any unfilled remainder posts to the book
-        as a resting maker order.
-        """
-        book = self._books.get(order.market_id, self._current_book)
-
-        # Try to fill the crossing portion
+        """Activate a limit order: fill crossing portion as taker, rest as maker."""
+        book = self._fill_book(order)
         crossing_fill = self._fill_sim.try_fill_crossing_limit_order(
-            order, book, self._current_time,  # type: ignore[arg-type]
+            order, book, self._current_time,
         )
         if crossing_fill is not None:
             self._apply_fill(order, crossing_fill)
 
-        # If fully filled, we're done
-        remaining = Decimal(order.size) - Decimal(order.filled_size)
-        if remaining <= Decimal("0.0001"):
+        if Decimal(order.size) - Decimal(order.filled_size) <= Decimal("0.0001"):
             return
 
-        # Remainder rests on the book as a maker order
+        # Rest the remainder. Register against the LIVE book so trade-driven
+        # queue-position tracking reflects state at activation.
         order.status = OrderStatus.OPEN
         self._open_orders.append(order)
-        self._fill_sim.register_limit_order(order, book)  # type: ignore[arg-type]
+        self._fill_sim.register_limit_order(
+            order, self._books.get(order.market_id, self._current_book),  # type: ignore[arg-type]
+        )
 
     def _fill_market_order(self, order: Order) -> None:
-        book = self._books.get(order.market_id, self._current_book)
         fill = self._fill_sim.try_fill_market_order(
-            order, book, self._current_time,  # type: ignore[arg-type]
+            order, self._fill_book(order), self._current_time,
         )
         if fill is None:
             order.status = OrderStatus.CANCELLED
@@ -439,6 +513,7 @@ class _EngineCore:
             order.status = OrderStatus.FILLED
             self._open_orders = [o for o in self._open_orders if o.id != order.id]
             self._fill_sim.unregister_order(order.id)
+            self._book_at_submission.pop(order.id, None)
         else:
             order.status = OrderStatus.PARTIALLY_FILLED
 
@@ -579,6 +654,8 @@ class _EngineCore:
         history_params: dict[str, Any] = {}
         if self._config.include_trades:
             history_params["include_trades"] = True
+        if self._compact_mode:
+            history_params["coalesce"] = True
 
         reporter = self._reporter
 
@@ -630,10 +707,13 @@ class _EngineCore:
     ) -> Iterator[tuple[Market, HistoryEvent, OrderBook]]:
         """Read market history from local Parquet files instead of the API."""
         reporter = self._reporter
+        dir_path = Path(data_dir)
         for market in markets:
-            path = Path(data_dir) / f"history-{market.id}.parquet"
-            if not path.exists():
-                warnings.warn(f"Skipping market {market.id}: {path} not found")
+            path = self._resolve_history_file(dir_path, market.id)
+            if path is None:
+                warnings.warn(
+                    f"Skipping market {market.id}: no history file in {dir_path}"
+                )
                 continue
             events = _iter_history_parquet(path)
             reporter.market_started(market.id, market.id)
@@ -1103,6 +1183,8 @@ class AsyncBacktestEngine(_EngineCore):
         history_params: dict[str, Any] = {}
         if self._config.include_trades:
             history_params["include_trades"] = True
+        if self._compact_mode:
+            history_params["coalesce"] = True
 
         reporter = self._reporter
 

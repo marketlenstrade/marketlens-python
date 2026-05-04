@@ -61,7 +61,7 @@ class OrderBookWalk:
         self, markets: list[Market], orderbook_resource: Any,
         *, after: Any = None, before: Any = None,
         series: Series | None = None, events_resource: Any = None,
-        data_dir: str | None = None,
+        data_dir: str | None = None, coalesce: bool = False,
     ) -> None:
         self._markets_list = markets
         self._orderbook = orderbook_resource
@@ -71,6 +71,7 @@ class OrderBookWalk:
         self._events_resource = events_resource
         self._event_cache: dict[str, Event | None] = {}
         self._data_dir = data_dir
+        self._coalesce = coalesce
 
         self._books: dict[str, OrderBook] = {}
         self._current_event: Event | None = None
@@ -125,7 +126,8 @@ class OrderBookWalk:
             self._current_event = self._resolve_event(market)
 
             if self._data_dir:
-                path = Path(self._data_dir) / f"history-{market.id}.parquet"
+                suffix = "-compact" if self._coalesce else ""
+                path = Path(self._data_dir) / f"history-{market.id}{suffix}.parquet"
                 if path.exists():
                     from marketlens.backtest._engine import _iter_history_parquet
                     events = _iter_history_parquet(path)
@@ -138,6 +140,7 @@ class OrderBookWalk:
                     market.id,
                     after=self._after or market.open_time,
                     before=self._before or market.close_time,
+                    **({"coalesce": True} if self._coalesce else {}),
                 )
 
             replay = OrderBookReplay(
@@ -167,7 +170,7 @@ class AsyncOrderBookWalk:
         self, markets: list[Market], orderbook_resource: Any,
         *, after: Any = None, before: Any = None,
         series: Series | None = None, events_resource: Any = None,
-        data_dir: str | None = None,
+        data_dir: str | None = None, coalesce: bool = False,
     ) -> None:
         self._markets_list = markets
         self._orderbook = orderbook_resource
@@ -177,6 +180,7 @@ class AsyncOrderBookWalk:
         self._events_resource = events_resource
         self._event_cache: dict[str, Event | None] = {}
         self._data_dir = data_dir
+        self._coalesce = coalesce
 
         self._books: dict[str, OrderBook] = {}
         self._current_event: Event | None = None
@@ -228,6 +232,7 @@ class AsyncOrderBookWalk:
                 market.id,
                 after=self._after or market.open_time,
                 before=self._before or market.close_time,
+                **({"coalesce": True} if self._coalesce else {}),
             )
             replay = AsyncOrderBookReplay(
                 history, market_id=market.id, platform=market.platform,
@@ -263,7 +268,7 @@ class EventOrderBookWalk:
     def __init__(
         self, events: list[Event], events_resource: Any,
         orderbook_resource: Any, series: Series,
-        *, after: Any = None, before: Any = None,
+        *, after: Any = None, before: Any = None, coalesce: bool = False,
     ) -> None:
         self._events_list = events
         self._events_resource = events_resource
@@ -271,6 +276,7 @@ class EventOrderBookWalk:
         self._series_obj = series
         self._after = after
         self._before = before
+        self._coalesce = coalesce
 
         self._books: dict[str, OrderBook] = {}
         self._current_event: Event | None = None
@@ -322,11 +328,13 @@ class EventOrderBookWalk:
             self._current_markets = {m.id: m for m in event_markets}
 
             replays: list[tuple[Market, OrderBookReplay]] = []
+            coalesce_kw = {"coalesce": True} if self._coalesce else {}
             for m in event_markets:
                 history = self._orderbook.history(
                     m.id,
                     after=self._after or m.open_time,
                     before=self._before or m.close_time,
+                    **coalesce_kw,
                 )
                 replays.append((
                     m,
@@ -357,7 +365,7 @@ class AsyncEventOrderBookWalk:
     def __init__(
         self, events: list[Event], events_resource: Any,
         orderbook_resource: Any, series: Series,
-        *, after: Any = None, before: Any = None,
+        *, after: Any = None, before: Any = None, coalesce: bool = False,
     ) -> None:
         self._events_list = events
         self._events_resource = events_resource
@@ -365,6 +373,7 @@ class AsyncEventOrderBookWalk:
         self._series_obj = series
         self._after = after
         self._before = before
+        self._coalesce = coalesce
 
         self._books: dict[str, OrderBook] = {}
         self._current_event: Event | None = None
@@ -406,11 +415,13 @@ class AsyncEventOrderBookWalk:
             self._current_markets = {m.id: m for m in event_markets}
 
             replays: list[tuple[Market, AsyncOrderBookReplay]] = []
+            coalesce_kw = {"coalesce": True} if self._coalesce else {}
             for m in event_markets:
                 history = self._orderbook.history(
                     m.id,
                     after=self._after or m.open_time,
                     before=self._before or m.close_time,
+                    **coalesce_kw,
                 )
                 replays.append((
                     m,

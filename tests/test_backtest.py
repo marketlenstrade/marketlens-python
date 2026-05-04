@@ -1111,8 +1111,9 @@ class TestLatencySimulation:
         assert result.total_trades == 1
         assert fill_times[0] == 1000
 
-    def test_latency_fills_against_later_book(self, mock_api, client):
-        """Delayed order fills against the book at activation time, not submission time."""
+    def test_latency_fills_against_submission_book(self, mock_api, client):
+        """Order fills against the book at submission time, not activation
+        time, even when latency_ms shifts activation to a later event."""
         m1 = _market_with({
             "id": "m1", "status": "resolved",
             "winning_outcome": "Yes", "winning_outcome_index": 0,
@@ -1125,8 +1126,9 @@ class TestLatencySimulation:
                     ctx.buy_yes(size="100.0000")
 
         mock_api.get("/markets/m1").mock(return_value=httpx.Response(200, json=m1))
-        # SNAPSHOT_1 asks: 0.67/100, 0.68/250
-        # SNAPSHOT_2 asks: 0.68/300 (worse price)
+        # SNAPSHOT_1 asks: 0.67/100, 0.68/250  (submission book)
+        # SNAPSHOT_2 asks: 0.68/300            (later book — what the OLD
+        #                                       behaviour would have used)
         mock_api.get("/markets/m1/orderbook/history").mock(
             return_value=httpx.Response(200, json=_history_response(
                 SNAPSHOT_1, SNAPSHOT_2)))
@@ -1134,9 +1136,9 @@ class TestLatencySimulation:
         result = client.backtest(BuyFirst(), "m1", after=1000, before=6000,
                                  initial_cash="10000.0000", latency_ms=50, limit_fill_rate=1.0)
         assert result.total_trades == 1
-        # Fills against SNAPSHOT_2 book (asks at 0.68), not SNAPSHOT_1 (asks at 0.67)
+        # Fills against SNAPSHOT_1 (submission book) — best ask 0.67.
         fill_price = result.trades_df()["price"].iloc[0]
-        assert abs(fill_price - 0.68) < 0.0001
+        assert abs(fill_price - 0.67) < 0.0001
 
     def test_latency_no_fill_if_only_one_event(self, mock_api, client):
         """With latency and only one event, order stays pending → cancelled."""

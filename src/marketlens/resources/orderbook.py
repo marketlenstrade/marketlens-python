@@ -67,6 +67,15 @@ class Orderbook:
     def history(
         self, market_id: str, *, after: Any, before: Any, **params: Any
     ) -> _HistorySyncPageIterator:
+        """Stream order-book events for a market.
+
+        Recognised kwargs:
+          * ``include_trades`` — interleave trade executions in the stream.
+          * ``coalesce`` — request the trade-aligned coalesced variant
+            (only net inter-trade level changes are emitted; book is exact
+            at every trade and snapshot).
+          * ``limit`` — server-side max events per page (default 50000).
+        """
         params["after"] = after
         params["before"] = before
         params.setdefault("limit", 50_000)
@@ -86,7 +95,7 @@ class Orderbook:
 
     def walk(
         self, id: str, *, after: Any = None, before: Any = None,
-        data_dir: str | None = None, **params: Any,
+        data_dir: str | None = None, coalesce: bool = False, **params: Any,
     ):
         """Replay L2 books for a market, rolling series, or structured product.
 
@@ -99,6 +108,10 @@ class Orderbook:
             after: Start time (market: book history window; series: close_time filter).
             before: End time (market: book history window; series: close_time filter).
             data_dir: If set, read from local Parquet files instead of the API.
+            coalesce: When True, request the compact data variant — the walk
+                yields ``(market, book)`` only at trade and snapshot boundaries
+                (book exact at each). Defaults to False since walk callers
+                typically iterate every book transition.
             **params: Extra filter params (e.g. ``status``, ``platform``).
         """
         from marketlens.helpers.walk import EventOrderBookWalk, OrderBookWalk
@@ -115,7 +128,7 @@ class Orderbook:
             return OrderBookWalk(
                 [market], self, after=after, before=before,
                 series=series, events_resource=self._events,
-                data_dir=data_dir,
+                data_dir=data_dir, coalesce=coalesce,
             )
         except NotFoundError:
             pass
@@ -132,13 +145,13 @@ class Orderbook:
                 events = self._series.events(id, **event_params).to_list()
                 return EventOrderBookWalk(
                     events, self._events, self, series,
-                    after=after, before=before,
+                    after=after, before=before, coalesce=coalesce,
                 )
             elif series.is_rolling:
                 markets = list(self._series.walk(id, after=after, before=before, **params))
                 return OrderBookWalk(
                     markets, self, series=series, events_resource=self._events,
-                    data_dir=data_dir,
+                    data_dir=data_dir, coalesce=coalesce,
                 )
             else:
                 raise ValueError(
@@ -161,7 +174,7 @@ class Orderbook:
             return OrderBookWalk(
                 [market], self, after=after, before=before,
                 series=series, events_resource=self._events,
-                data_dir=data_dir,
+                data_dir=data_dir, coalesce=coalesce,
             )
 
         raise NotFoundError(404, "NOT_FOUND", f"No market or series found for '{id}'")
@@ -207,7 +220,8 @@ class AsyncOrderbook:
         )
 
     async def walk(
-        self, id: str, *, after: Any = None, before: Any = None, **params: Any,
+        self, id: str, *, after: Any = None, before: Any = None,
+        coalesce: bool = False, **params: Any,
     ):
         """Async version of :meth:`Orderbook.walk`."""
         from marketlens.helpers.walk import AsyncEventOrderBookWalk, AsyncOrderBookWalk
@@ -224,6 +238,7 @@ class AsyncOrderbook:
             return AsyncOrderBookWalk(
                 [market], self, after=after, before=before,
                 series=series, events_resource=self._events,
+                coalesce=coalesce,
             )
         except NotFoundError:
             pass
@@ -240,7 +255,7 @@ class AsyncOrderbook:
                 events = await (await self._series.events(id, **event_params)).to_list()
                 return AsyncEventOrderBookWalk(
                     events, self._events, self, series,
-                    after=after, before=before,
+                    after=after, before=before, coalesce=coalesce,
                 )
             elif series.is_rolling:
                 markets = []
@@ -248,6 +263,7 @@ class AsyncOrderbook:
                     markets.append(m)
                 return AsyncOrderBookWalk(
                     markets, self, series=series, events_resource=self._events,
+                    coalesce=coalesce,
                 )
             else:
                 raise ValueError(
@@ -270,6 +286,7 @@ class AsyncOrderbook:
             return AsyncOrderBookWalk(
                 [market], self, after=after, before=before,
                 series=series, events_resource=self._events,
+                coalesce=coalesce,
             )
 
         raise NotFoundError(404, "NOT_FOUND", f"No market or series found for '{id}'")
