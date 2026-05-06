@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
+import httpx
+
 from marketlens._base import AsyncHTTPClient, SyncHTTPClient
 from marketlens._constants import DEFAULT_BASE_URL, DEFAULT_MAX_RETRIES, DEFAULT_TIMEOUT
 from marketlens.resources.events import AsyncEvents, Events
@@ -19,7 +21,10 @@ class MarketLens:
     Args:
         api_key: API key. Falls back to ``MARKETLENS_API_KEY`` env var.
         base_url: API base URL.
-        timeout: Request timeout in seconds.
+        timeout: Request timeout. Pass a number for a uniform per-phase
+            timeout, or an ``httpx.Timeout`` for granular connect/read/write/pool
+            control. Long-running download endpoints override the read timeout
+            internally so streaming responses aren't cut off.
         max_retries: Max retries on 429/5xx errors.
     """
 
@@ -27,7 +32,7 @@ class MarketLens:
         self,
         api_key: str | None = None,
         base_url: str = DEFAULT_BASE_URL,
-        timeout: float = DEFAULT_TIMEOUT,
+        timeout: float | httpx.Timeout = DEFAULT_TIMEOUT,
         max_retries: int = DEFAULT_MAX_RETRIES,
     ) -> None:
         self._http = SyncHTTPClient(
@@ -113,7 +118,10 @@ class AsyncMarketLens:
     Args:
         api_key: API key. Falls back to ``MARKETLENS_API_KEY`` env var.
         base_url: API base URL.
-        timeout: Request timeout in seconds.
+        timeout: Request timeout. Pass a number for a uniform per-phase
+            timeout, or an ``httpx.Timeout`` for granular connect/read/write/pool
+            control. Long-running download endpoints override the read timeout
+            internally so streaming responses aren't cut off.
         max_retries: Max retries on 429/5xx errors.
     """
 
@@ -121,7 +129,7 @@ class AsyncMarketLens:
         self,
         api_key: str | None = None,
         base_url: str = DEFAULT_BASE_URL,
-        timeout: float = DEFAULT_TIMEOUT,
+        timeout: float | httpx.Timeout = DEFAULT_TIMEOUT,
         max_retries: int = DEFAULT_MAX_RETRIES,
     ) -> None:
         self._http = AsyncHTTPClient(

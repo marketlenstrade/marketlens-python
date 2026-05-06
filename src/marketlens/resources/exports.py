@@ -1,12 +1,18 @@
 from __future__ import annotations
 
-import zipfile
 from pathlib import Path
 from typing import Any
+
+from stream_unzip import async_stream_unzip, stream_unzip
 
 from marketlens._base import AsyncHTTPClient, SyncHTTPClient, _coerce_timestamp
 from marketlens._progress import make_reporter
 from marketlens.exceptions import NotFoundError
+
+
+def _extracted_name(raw: bytes | str) -> str:
+    """Decode stream-unzip's bytes name to a string."""
+    return raw.decode("utf-8") if isinstance(raw, bytes) else raw
 
 
 class Exports:
@@ -108,20 +114,36 @@ class Exports:
             params["coalesce"] = "true"
 
         with make_reporter(enabled=progress, n_markets=0) as reporter:
-            zip_path = data_dir / f"_series-{series_id}.zip.tmp"
-            try:
-                self._client.download(
-                    f"/series/{series_id}/export", zip_path, params=params,
-                    reporter=reporter, label=f"series {series_id}",
-                )
-                with zipfile.ZipFile(zip_path) as zf:
-                    for name in zf.namelist():
-                        dest = data_dir / name
-                        if not dest.exists():
-                            dest.write_bytes(zf.read(name))
-            finally:
-                if zip_path.exists():
-                    zip_path.unlink()
+            chunks = self._client.stream_bytes(
+                f"/series/{series_id}/export", params=params,
+                reporter=reporter, label=f"series {series_id}",
+            )
+            # Stream-extract: each parquet lands at its final path as soon as
+            # its bytes finish flowing. Already-extracted files are skipped so
+            # a partial-then-resumed download picks up where it left off.
+            # In-progress writes go through a ``.part`` file and are renamed
+            # atomically — so a crash mid-member never leaves a half-written
+            # final file.
+            for raw_name, _size, member_chunks in stream_unzip(chunks):
+                name = _extracted_name(raw_name)
+                final = data_dir / name
+                if final.exists():
+                    # stream-unzip requires each member's chunks to be drained
+                    # before advancing to the next member.
+                    for _ in member_chunks:
+                        pass
+                    continue
+                tmp = data_dir / (name + ".part")
+                tmp.parent.mkdir(parents=True, exist_ok=True)
+                try:
+                    with tmp.open("wb") as f:
+                        for chunk in member_chunks:
+                            f.write(chunk)
+                    tmp.replace(final)
+                except BaseException:
+                    if tmp.exists():
+                        tmp.unlink()
+                    raise
 
             if self._series is not None:
                 try:
@@ -235,20 +257,28 @@ class AsyncExports:
             params["coalesce"] = "true"
 
         with make_reporter(enabled=progress, n_markets=0) as reporter:
-            zip_path = data_dir / f"_series-{series_id}.zip.tmp"
-            try:
-                await self._client.download(
-                    f"/series/{series_id}/export", zip_path, params=params,
-                    reporter=reporter, label=f"series {series_id}",
-                )
-                with zipfile.ZipFile(zip_path) as zf:
-                    for name in zf.namelist():
-                        dest = data_dir / name
-                        if not dest.exists():
-                            dest.write_bytes(zf.read(name))
-            finally:
-                if zip_path.exists():
-                    zip_path.unlink()
+            chunks = self._client.stream_bytes(
+                f"/series/{series_id}/export", params=params,
+                reporter=reporter, label=f"series {series_id}",
+            )
+            async for raw_name, _size, member_chunks in async_stream_unzip(chunks):
+                name = _extracted_name(raw_name)
+                final = data_dir / name
+                if final.exists():
+                    async for _ in member_chunks:
+                        pass
+                    continue
+                tmp = data_dir / (name + ".part")
+                tmp.parent.mkdir(parents=True, exist_ok=True)
+                try:
+                    with tmp.open("wb") as f:
+                        async for chunk in member_chunks:
+                            f.write(chunk)
+                    tmp.replace(final)
+                except BaseException:
+                    if tmp.exists():
+                        tmp.unlink()
+                    raise
 
             if self._series is not None:
                 try:
