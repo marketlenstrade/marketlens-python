@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Iterator
 
-from marketlens._base import AsyncHTTPClient, SyncHTTPClient
+from marketlens._base import AsyncHTTPClient, SyncHTTPClient, _coerce_timestamp
 from marketlens._pagination import AsyncPageIterator, SyncPageIterator
 from marketlens.exceptions import NotFoundError
 from marketlens.types.event import Event
@@ -42,10 +42,17 @@ class SeriesResource:
     def walk(
         self, series_id: str, *, after: Any = None, before: Any = None, **params: Any,
     ) -> Iterator[Market]:
-        """Iterate markets in a series chronologically.
+        """Iterate markets in a series chronologically over a half-open window.
 
         Markets are sorted by ``close_time`` ascending (earliest first).
         Pass ``status="resolved"`` to only walk completed markets.
+
+        The ``(after, before)`` window is half-open ``[after, before)``: a
+        market with ``close_time == after`` or ``open_time == before`` is
+        excluded. This matches the set returned by
+        ``client.exports.download_series(after=..., before=...)`` so the same
+        backtest produces the same market set whether streamed or replayed
+        from a local export.
 
         Usage::
 
@@ -54,10 +61,10 @@ class SeriesResource:
 
         Args:
             series_id: Series identifier.
-            after: Only include markets active at or after this time — filters
-                ``close_time >= after`` (epoch ms or ``datetime``).
-            before: Only include markets active at or before this time — filters
-                ``open_time <= before`` (epoch ms or ``datetime``).
+            after: Half-open lower bound — only include markets whose lifetime
+                strictly extends past this time (``close_time > after``).
+            before: Half-open upper bound — only include markets whose lifetime
+                strictly starts before this time (``open_time < before``).
             **params: Extra filter params (e.g. ``status``, ``platform``).
         """
         resolved = self._resolve(series_id)
@@ -70,10 +77,13 @@ class SeriesResource:
 
         if after is not None or before is not None:
             params["series_id"] = resolved.id
+            # Translate to the server's inclusive bounds. close_time >= after+1
+            # iff close_time > after; open_time <= before-1 iff open_time < before.
+            # Timestamps are integer ms so the +1/-1 is exact.
             if after is not None:
-                params["close_after"] = after
+                params["close_after"] = _coerce_timestamp(after) + 1
             if before is not None:
-                params["open_before"] = before
+                params["open_before"] = _coerce_timestamp(before) - 1
             yield from SyncPageIterator(self._client, "/markets", params, Market)
         else:
             yield from SyncPageIterator(
@@ -129,6 +139,9 @@ class AsyncSeriesResource:
     ):
         """Async version of :meth:`SeriesResource.walk`.
 
+        The ``(after, before)`` window is half-open ``[after, before)`` — see
+        the sync version for the rationale and details.
+
         Usage::
 
             async for market in client.series.walk("btc-5min-rolling"):
@@ -145,9 +158,9 @@ class AsyncSeriesResource:
         if after is not None or before is not None:
             params["series_id"] = resolved.id
             if after is not None:
-                params["close_after"] = after
+                params["close_after"] = _coerce_timestamp(after) + 1
             if before is not None:
-                params["open_before"] = before
+                params["open_before"] = _coerce_timestamp(before) - 1
             async for market in AsyncPageIterator(self._client, "/markets", params, Market):
                 yield market
         else:

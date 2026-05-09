@@ -79,6 +79,41 @@ class TestSeriesWalk:
         with pytest.raises(ValueError, match="not rolling"):
             list(client.series.walk("btc-hit-price"))
 
+    def test_series_walk_excludes_boundary_touching_markets(self, mock_api, client):
+        """walk(after, before) maps to a half-open ``[after, before)`` window:
+        a market with ``close_time == after`` or ``open_time == before`` is
+        excluded.
+
+        The server's ``/markets`` endpoint exposes inclusive ``close_after`` /
+        ``open_before`` params. The SDK translates the user's half-open window
+        to the server's inclusive params via ``+1`` / ``-1`` on the integer-ms
+        timestamps so the resulting set matches ``/series/{id}/export``.
+        """
+        _mock_series_resolve(mock_api)
+
+        AFTER = 2_000_000
+        BEFORE = 3_000_000
+        # The handler will receive close_after=AFTER+1, open_before=BEFORE-1.
+        route = mock_api.get("/markets").mock(
+            return_value=httpx.Response(200, json={
+                "data": [],
+                "meta": {"cursor": None, "has_more": False},
+            })
+        )
+
+        list(client.series.walk("btc-daily", after=AFTER, before=BEFORE))
+
+        assert route.call_count == 1
+        params = route.calls[0].request.url.params
+        assert params["close_after"] == str(AFTER + 1), (
+            f"expected close_after={AFTER + 1} (half-open lower bound), "
+            f"got {params['close_after']}"
+        )
+        assert params["open_before"] == str(BEFORE - 1), (
+            f"expected open_before={BEFORE - 1} (half-open upper bound), "
+            f"got {params['open_before']}"
+        )
+
 
 class TestSeriesEvents:
     def test_series_events(self, mock_api, client):

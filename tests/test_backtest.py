@@ -1697,3 +1697,305 @@ class TestPackIntoLanes:
         b = Market.model_validate(b_data)
         lanes = _pack_into_lanes([a, b])
         assert len(lanes) == 2
+
+
+class TestFileStreamWindow:
+    """``_make_file_stream`` must apply the user's ``[after, before)`` window
+    so bulk-mode replays match streaming-mode replays event-for-event.
+
+    The bug: the file stream today reads the entire parquet (full market
+    lifetime) and yields every event regardless of the user's window. For a
+    sub-window backtest, this delivers extra events to the strategy compared
+    to streaming mode and corrupts the result.
+    """
+
+    @staticmethod
+    def _write_parquet(path, events: list[dict]) -> None:
+        """Write a synthetic history parquet matching the production schema."""
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        schema = pa.schema([
+            ("event_type", pa.string()),
+            ("t", pa.int64()),
+            ("price", pa.float64()),
+            ("size", pa.float64()),
+            ("side", pa.string()),
+            ("trade_id", pa.string()),
+            ("is_reseed", pa.bool_()),
+            ("bids", pa.string()),
+            ("asks", pa.string()),
+        ])
+        cols = {f.name: [] for f in schema}
+        for e in events:
+            for k in cols:
+                cols[k].append(e.get(k))
+        pq.write_table(pa.table(cols, schema=schema), str(path))
+
+    def _market(self, mid, open_time, close_time):
+        from marketlens.types.market import Market
+        return Market.model_validate({
+            **SAMPLE_MARKET, "id": mid,
+            "open_time": open_time, "close_time": close_time,
+        })
+
+    def test_make_file_stream_filters_window(self, tmp_path):
+        """Events with ``t < after`` are silently replayed (book seeded);
+        events with ``t >= after`` are yielded; events with ``t >= before``
+        are not yielded. The first yielded event's book must reflect the
+        anchor snapshot AND every pre-window delta — i.e. silent replay
+        builds the book correctly behind the visibility gate."""
+        T_OPEN, T_CLOSE = 1_000, 5_000
+        AFTER, BEFORE = 2_000, 4_000
+
+        # Anchor snapshot at t=1000: bid 0.60 @ 100, ask 0.70 @ 100.
+        # Pre-window delta at t=1500: add bid 0.55 @ 50.
+        # Pre-window delta at t=1501: add ask 0.65 @ 50 (new best ask).
+        # First in-window event is a trade at t=2500. The book at that
+        # moment must reflect both pre-window deltas (best_ask = 0.65).
+        # Post-window delta at t=4500 must NOT be yielded.
+        events = [
+            {
+                "event_type": "snapshot", "t": T_OPEN, "is_reseed": False,
+                "price": None, "size": None, "side": None, "trade_id": None,
+                "bids": json.dumps([{"price": "0.6000", "size": "100.0000"}]),
+                "asks": json.dumps([{"price": "0.7000", "size": "100.0000"}]),
+            },
+            {
+                "event_type": "delta", "t": 1_500,
+                "price": 0.55, "size": 50.0, "side": "BUY",
+                "trade_id": None, "is_reseed": None, "bids": None, "asks": None,
+            },
+            {
+                "event_type": "delta", "t": 1_501,
+                "price": 0.65, "size": 50.0, "side": "SELL",
+                "trade_id": None, "is_reseed": None, "bids": None, "asks": None,
+            },
+            {
+                "event_type": "trade", "t": 2_500,
+                "price": 0.65, "size": 5.0, "side": "BUY", "trade_id": "t1",
+                "is_reseed": None, "bids": None, "asks": None,
+            },
+            {
+                "event_type": "trade", "t": 3_500,
+                "price": 0.60, "size": 5.0, "side": "SELL", "trade_id": "t2",
+                "is_reseed": None, "bids": None, "asks": None,
+            },
+            {
+                "event_type": "delta", "t": 4_500,
+                "price": 0.65, "size": 100.0, "side": "SELL",
+                "trade_id": None, "is_reseed": None, "bids": None, "asks": None,
+            },
+        ]
+        market = self._market("mkt", T_OPEN, T_CLOSE)
+        path = tmp_path / "history-mkt-compact.parquet"
+        self._write_parquet(path, events)
+
+        engine = BacktestEngine(strategy=Strategy())
+        yielded = list(engine._make_file_stream(
+            [market], str(tmp_path), after_ms=AFTER, before_ms=BEFORE,
+        ))
+
+        # Every yielded event lies in [AFTER, BEFORE).
+        ts = [evt.t for _, evt, _ in yielded]
+        assert ts, "expected at least one yielded event"
+        assert all(AFTER <= t < BEFORE for t in ts), (
+            f"events outside [{AFTER}, {BEFORE}) were yielded: {ts}"
+        )
+
+        # First yielded event's book reflects the anchor + pre-window delta:
+        # ask side is 0.65 @ 50 (from t=1501), bid side is 0.60 @ 100 (anchor).
+        _, _, first_book = yielded[0]
+        assert first_book.best_ask == "0.6500", (
+            f"silent replay must apply pre-window delta; got best_ask={first_book.best_ask}"
+        )
+        assert first_book.best_bid == "0.6000"
+
+
+class TestStreamingEqualsBulk:
+    """End-to-end: same backtest, run via streaming and via bulk-export, must
+    produce identical ``BacktestResult.summary()``.
+
+    This is the regression net for the playground.ipynb bug: walk + export
+    market sets agree (Fix A), the parquet carries the pre-open anchor and
+    both endpoints share one coalescer (Fix C), and the bulk file stream
+    applies the user's window (Fix B). When all three are right, the two
+    modes are observationally equivalent.
+    """
+
+    @staticmethod
+    def _write_parquet(path, events: list[dict]) -> None:
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        schema = pa.schema([
+            ("event_type", pa.string()),
+            ("t", pa.int64()),
+            ("price", pa.float64()),
+            ("size", pa.float64()),
+            ("side", pa.string()),
+            ("trade_id", pa.string()),
+            ("is_reseed", pa.bool_()),
+            ("bids", pa.string()),
+            ("asks", pa.string()),
+        ])
+        cols = {f.name: [] for f in schema}
+        for e in events:
+            for k in cols:
+                cols[k].append(e.get(k))
+        pq.write_table(pa.table(cols, schema=schema), str(path))
+
+    @staticmethod
+    def _wire_history(events: list[dict]) -> dict:
+        """Convert the parquet-row events to the wire format the SDK expects
+        from ``/markets/{id}/orderbook/history``."""
+        out = []
+        for e in events:
+            et = e["event_type"]
+            if et == "snapshot":
+                out.append({
+                    "type": "snapshot",
+                    "t": e["t"],
+                    "is_reseed": e["is_reseed"],
+                    "bids": json.loads(e["bids"]),
+                    "asks": json.loads(e["asks"]),
+                })
+            elif et == "delta":
+                out.append({
+                    "type": "delta",
+                    "t": e["t"],
+                    "price": f"{e['price']:.4f}",
+                    "size": f"{e['size']:.4f}",
+                    "side": e["side"],
+                })
+            else:
+                out.append({
+                    "type": "trade",
+                    "t": e["t"],
+                    "id": e["trade_id"],
+                    "price": f"{e['price']:.4f}",
+                    "size": f"{e['size']:.4f}",
+                    "side": e["side"],
+                })
+        return {"data": out, "meta": {"cursor": None, "has_more": False}}
+
+    def test_playground_streaming_equals_bulk(self, mock_api, tmp_path):
+        """Mirror playground.ipynb's reproduction: a 5-minute rolling-series
+        backtest run twice — once via streaming, once via ``data_dir`` — must
+        produce identical summaries."""
+        T_OPEN, T_CLOSE = 1_776_218_400_000, 1_776_218_700_000  # the playground window
+        AFTER_ISO = "2026-04-15T02:00:00Z"
+        BEFORE_ISO = "2026-04-15T02:05:00Z"
+
+        market = {
+            **SAMPLE_MARKET,
+            "id": "mkt-1", "platform": "polymarket",
+            "series_id": "btc-rolling",
+            "open_time": T_OPEN, "close_time": T_CLOSE,
+            "category": "Crypto",
+        }
+        rolling_series = {
+            **SAMPLE_SERIES,
+            "id": "btc-rolling", "platform_series_id": "btc-up-or-down-5m",
+            "is_rolling": True, "title": "BTC Up or Down 5m",
+        }
+
+        # Anchor + a few deltas push the midpoint down to 0.31 (= (0.30+0.32)/2)
+        # before the first trade. The strategy enters on that trade.
+        events = [
+            {"event_type": "snapshot", "t": T_OPEN + 10, "is_reseed": False,
+             "price": None, "size": None, "side": None, "trade_id": None,
+             "bids": json.dumps([{"price": "0.4500", "size": "100.0000"}]),
+             "asks": json.dumps([{"price": "0.4700", "size": "100.0000"}])},
+            {"event_type": "delta", "t": T_OPEN + 100,
+             "price": 0.45, "size": 0.0, "side": "BUY",
+             "trade_id": None, "is_reseed": None, "bids": None, "asks": None},
+            {"event_type": "delta", "t": T_OPEN + 101,
+             "price": 0.30, "size": 200.0, "side": "BUY",
+             "trade_id": None, "is_reseed": None, "bids": None, "asks": None},
+            {"event_type": "delta", "t": T_OPEN + 102,
+             "price": 0.47, "size": 0.0, "side": "SELL",
+             "trade_id": None, "is_reseed": None, "bids": None, "asks": None},
+            {"event_type": "delta", "t": T_OPEN + 103,
+             "price": 0.32, "size": 100.0, "side": "SELL",
+             "trade_id": None, "is_reseed": None, "bids": None, "asks": None},
+            {"event_type": "trade", "t": T_OPEN + 200,
+             "price": 0.32, "size": 5.0, "side": "BUY", "trade_id": "tr1",
+             "is_reseed": None, "bids": None, "asks": None},
+            {"event_type": "trade", "t": T_OPEN + 1_000,
+             "price": 0.32, "size": 3.0, "side": "BUY", "trade_id": "tr2",
+             "is_reseed": None, "bids": None, "asks": None},
+        ]
+
+        # ── streaming mocks ─────────────────────────────────────────────
+        mock_api.get("/series/btc-up-or-down-5m").mock(
+            return_value=httpx.Response(200, json=rolling_series)
+        )
+        mock_api.get("/markets/btc-up-or-down-5m").mock(
+            return_value=httpx.Response(404, json={
+                "error": {"code": "MARKET_NOT_FOUND", "message": "Not found"},
+            })
+        )
+        # walk hits /markets with close_after=T_OPEN+1, open_before=T_CLOSE-1
+        # (Fix A's half-open translation). Return the single in-flight market.
+        mock_api.get("/markets").mock(
+            return_value=httpx.Response(200, json={
+                "data": [market],
+                "meta": {"cursor": None, "has_more": False},
+            })
+        )
+        mock_api.get(f"/markets/{market['id']}/orderbook/history").mock(
+            return_value=httpx.Response(200, json=self._wire_history(events))
+        )
+
+        # ── bulk: write the parquet ───────────────────────────────────
+        self._write_parquet(
+            tmp_path / f"history-{market['id']}-compact.parquet",
+            events,
+        )
+
+        # ── strategy: enter on first trade with midpoint < 0.35 ────────
+        class ValueBuyer(Strategy):
+            def on_market_start(self, ctx, market, book):
+                self._entered = False
+
+            def on_trade(self, ctx, market, book, trade):
+                if self._entered or book.midpoint is None:
+                    return
+                if Decimal(book.midpoint) < Decimal("0.35"):
+                    ctx.buy_yes(size="10")
+                    self._entered = True
+
+        client = MarketLens(api_key="mk_test", base_url=BASE_URL)
+        try:
+            r_stream = client.backtest(
+                strategy=ValueBuyer(),
+                id="btc-up-or-down-5m",
+                initial_cash="10000",
+                after=AFTER_ISO, before=BEFORE_ISO,
+                progress=False,
+            )
+            r_bulk = client.backtest(
+                strategy=ValueBuyer(),
+                id="btc-up-or-down-5m",
+                initial_cash="10000",
+                after=AFTER_ISO, before=BEFORE_ISO,
+                data_dir=str(tmp_path),
+                progress=False,
+            )
+        finally:
+            client.close()
+
+        s_stream = r_stream.summary()
+        s_bulk = r_bulk.summary()
+
+        # The trade must have entered (proves the strategy fired in both modes).
+        assert s_stream["total_trades"] == 1, (
+            f"streaming run did not enter; summary={s_stream}"
+        )
+        # Headline equivalence — every summary key matches.
+        assert s_stream == s_bulk, (
+            f"streaming and bulk produced different summaries.\n"
+            f"  streaming: {s_stream}\n"
+            f"  bulk:      {s_bulk}"
+        )

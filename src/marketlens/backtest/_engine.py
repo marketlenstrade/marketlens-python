@@ -647,6 +647,16 @@ class _EngineCore:
         hidden behind the previous market's tail. The first prefetcher
         starts lazily on first ``next()`` so constructing many streams
         back-to-back doesn't stampede the API.
+
+        Per-market query bounds are clamped to the market's lifetime
+        ``[open_time, close_time)`` intersected with the user window so the
+        streaming endpoint never returns post-close stale events for one
+        market or pre-open events that belong to a neighbouring market.
+        Without this clamp, multi-market backtests over a window wider than
+        any single market's lifetime see different events in streaming vs
+        bulk modes — bulk's parquet is naturally bounded by ``close_time``
+        but the streaming endpoint honours the user-supplied ``before``
+        verbatim.
         """
         if not markets:
             return
@@ -658,12 +668,24 @@ class _EngineCore:
             history_params["coalesce"] = True
 
         reporter = self._reporter
+        user_after_ms = _coerce_timestamp(after)
+        user_before_ms = _coerce_timestamp(before)
 
         def _make_prefetcher(market: Market) -> PrefetchedIterator:
+            # Clamp per-market query bounds to ``[open_time, close_time)`` ∩
+            # ``[user.after, user.before)``. Snapshot anchor lookup is still
+            # extended ``_ANCHOR_LOWER_MARGIN_MS`` past ``open_time`` server-
+            # side, so a pre-open anchor is still picked up.
+            eff_after = market.open_time if user_after_ms is None else max(
+                user_after_ms, market.open_time or user_after_ms,
+            )
+            eff_before = market.close_time if user_before_ms is None else min(
+                user_before_ms, market.close_time or user_before_ms,
+            )
             history = client.orderbook.history(
                 market.id,
-                after=after or market.open_time,
-                before=before or market.close_time,
+                after=eff_after,
+                before=eff_before,
                 **history_params,
             )
             mid = market.id
@@ -704,8 +726,23 @@ class _EngineCore:
         self,
         markets: list[Market],
         data_dir: str,
+        *,
+        after_ms: int | None = None,
+        before_ms: int | None = None,
     ) -> Iterator[tuple[Market, HistoryEvent, OrderBook]]:
-        """Read market history from local Parquet files instead of the API."""
+        """Read market history from local Parquet files instead of the API.
+
+        Applies the same ``[after, before)`` half-open window as the streaming
+        path: events with ``t < after_ms`` are silently replayed through
+        ``OrderBookReplay`` so the book is fully seeded; events with
+        ``t >= before_ms`` halt the per-market stream. The first event yielded
+        is therefore guaranteed to come with a book that reflects every prior
+        snapshot and delta — matching the streaming endpoint's anchor-then-
+        replay semantics.
+
+        Missing parquets stay non-fatal: collector downtime can leave gaps,
+        and a backtest should still run on the markets it has data for.
+        """
         reporter = self._reporter
         dir_path = Path(data_dir)
         for market in markets:
@@ -719,6 +756,12 @@ class _EngineCore:
             reporter.market_started(market.id, market.id)
             replay = OrderBookReplay(events, market_id=market.id, platform=market.platform)
             for event, book in replay:
+                if before_ms is not None and event.t >= before_ms:
+                    break
+                if after_ms is not None and event.t < after_ms:
+                    # Silent replay: book state advances inside ``replay``;
+                    # we just don't yield this pre-window event to the engine.
+                    continue
                 yield market, event, book
             reporter.market_finished(market.id)
 
@@ -856,9 +899,16 @@ class BacktestEngine(_EngineCore):
             "resolution": reference_resolution,
         }
 
+        # Pre-coerce the user's window so both stream paths apply identical
+        # half-open ``[after, before)`` filtering.
+        after_ms = _coerce_timestamp(after)
+        before_ms = _coerce_timestamp(before)
+
         def _stream(markets: list[Market]) -> Iterator[tuple[Market, HistoryEvent, OrderBook]]:
             if data_dir is not None:
-                return self._make_file_stream(markets, data_dir)
+                return self._make_file_stream(
+                    markets, data_dir, after_ms=after_ms, before_ms=before_ms,
+                )
             return self._make_market_stream(client, markets, after=after, before=before)
 
         if isinstance(id, list):
@@ -933,9 +983,14 @@ class BacktestEngine(_EngineCore):
         data_dir: str | None = None,
         **params: Any,
     ) -> tuple[list[Iterator[tuple[Market, HistoryEvent, OrderBook]]], int, list[Market]]:
+        after_ms = _coerce_timestamp(after)
+        before_ms = _coerce_timestamp(before)
+
         def _stream(markets: list[Market]) -> Iterator[tuple[Market, HistoryEvent, OrderBook]]:
             if data_dir is not None:
-                return self._make_file_stream(markets, data_dir)
+                return self._make_file_stream(
+                    markets, data_dir, after_ms=after_ms, before_ms=before_ms,
+                )
             return self._make_market_stream(client, markets, after=after, before=before)
 
         streams: list[Iterator[tuple[Market, HistoryEvent, OrderBook]]] = []
@@ -1179,6 +1234,9 @@ class AsyncBacktestEngine(_EngineCore):
         """Async version of ``_make_market_stream``.
 
         Pipelines across market boundaries — see sync version's docstring.
+        Per-market query bounds are clamped to ``[open_time, close_time)`` ∩
+        the user window for the same reason: streaming and bulk modes must
+        see the same per-market events.
         """
         history_params: dict[str, Any] = {}
         if self._config.include_trades:
@@ -1187,12 +1245,20 @@ class AsyncBacktestEngine(_EngineCore):
             history_params["coalesce"] = True
 
         reporter = self._reporter
+        user_after_ms = _coerce_timestamp(after)
+        user_before_ms = _coerce_timestamp(before)
 
         def _make_prefetcher(market: Market) -> AsyncPrefetchedIterator:
+            eff_after = market.open_time if user_after_ms is None else max(
+                user_after_ms, market.open_time or user_after_ms,
+            )
+            eff_before = market.close_time if user_before_ms is None else min(
+                user_before_ms, market.close_time or user_before_ms,
+            )
             history = client.orderbook.history(
                 market.id,
-                after=after or market.open_time,
-                before=before or market.close_time,
+                after=eff_after,
+                before=eff_before,
                 **history_params,
             )
             mid = market.id
