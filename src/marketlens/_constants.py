@@ -1,6 +1,6 @@
 import httpx
 
-VERSION = "1.1.1"
+VERSION = "1.1.2"
 DEFAULT_BASE_URL = "https://api.marketlens.trade/v1"
 DEFAULT_MAX_RETRIES = 2
 
