@@ -11,6 +11,7 @@ license = "MIT"
 requires-python = ">=3.10"
 dependencies = [
     "httpx>=0.25",
+    "orjson>=3.9",
     "pydantic>=2.0",
     "pandas>=1.5",
     "pyarrow>=14.0",

@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, AsyncIterator, Iterator
 
 import httpx
+import orjson
 
 from marketlens._constants import (
     DEFAULT_BASE_URL,
@@ -105,7 +106,7 @@ def _raise_for_error(response: httpx.Response) -> None:
         return
 
     try:
-        body = response.json()
+        body = orjson.loads(response.content)
         error = body.get("error", {})
         code = error.get("code", str(response.status_code))
         message = error.get("message", response.text)
@@ -192,7 +193,10 @@ class SyncHTTPClient:
     def request(self, method: str, path: str, **kwargs: Any) -> Any:
         if "params" in kwargs:
             kwargs["params"] = _prepare_params(kwargs["params"])
-        return self._request_with_retry(method, path, **kwargs).json()
+        # orjson.loads on raw bytes is ~3-5x faster than httpx's json() (which
+        # decodes to str then runs stdlib json.loads). The body comes back as
+        # gunzipped bytes already; we never need the str representation.
+        return orjson.loads(self._request_with_retry(method, path, **kwargs).content)
 
     def get(self, path: str, params: dict[str, Any] | None = None) -> Any:
         return self.request("GET", path, params=params or {})
@@ -400,7 +404,9 @@ class AsyncHTTPClient:
     async def request(self, method: str, path: str, **kwargs: Any) -> Any:
         if "params" in kwargs:
             kwargs["params"] = _prepare_params(kwargs["params"])
-        return (await self._request_with_retry(method, path, **kwargs)).json()
+        return orjson.loads(
+            (await self._request_with_retry(method, path, **kwargs)).content
+        )
 
     async def get(self, path: str, params: dict[str, Any] | None = None) -> Any:
         return await self.request("GET", path, params=params or {})

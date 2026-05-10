@@ -52,12 +52,21 @@ class _BookBuilder:
 
     On snapshot: full rebuild.  On delta: bisect insert/remove of one level.
     Both sides are stored in ascending price order internally.
+
+    Per-event hot path: builds ``OrderBook`` via ``model_construct`` (skipping
+    Pydantic validation, since the builder is the sole producer and inputs are
+    already canonical) and caches best/spread/midpoint/depth strings — only
+    refreshing the side that changed and only recomputing top-of-book when
+    the best level actually moved.
     """
 
     __slots__ = (
         "_market_id", "_platform",
         "_bid_prices", "_bid_levels", "_bid_depth",
         "_ask_prices", "_ask_levels", "_ask_depth",
+        "_best_bid", "_best_ask",
+        "_spread", "_midpoint",
+        "_bid_depth_str", "_ask_depth_str",
     )
 
     def __init__(self, market_id: str, platform: str) -> None:
@@ -69,6 +78,12 @@ class _BookBuilder:
         self._ask_prices: list[str] = []
         self._ask_levels: list[PriceLevel] = []
         self._ask_depth = ZERO
+        self._best_bid: str | None = None
+        self._best_ask: str | None = None
+        self._spread: str | None = None
+        self._midpoint: str | None = None
+        self._bid_depth_str = "0.0000"
+        self._ask_depth_str = "0.0000"
 
     def snapshot(self, bids: list[PriceLevel], asks: list[PriceLevel], as_of: int) -> OrderBook:
         """Full reset from snapshot data."""
@@ -79,10 +94,11 @@ class _BookBuilder:
                 bid_data[_norm_price(level.price)] = s
         self._bid_prices = sorted(bid_data)
         self._bid_levels = [
-            PriceLevel(price=p, size=str(bid_data[p].quantize(FOUR)))
+            PriceLevel.model_construct(price=p, size=str(bid_data[p].quantize(FOUR)))
             for p in self._bid_prices
         ]
         self._bid_depth = sum(bid_data.values(), ZERO)
+        self._bid_depth_str = str(self._bid_depth.quantize(FOUR))
 
         ask_data: dict[str, Decimal] = {}
         for level in asks:
@@ -91,10 +107,16 @@ class _BookBuilder:
                 ask_data[_norm_price(level.price)] = s
         self._ask_prices = sorted(ask_data)
         self._ask_levels = [
-            PriceLevel(price=p, size=str(ask_data[p].quantize(FOUR)))
+            PriceLevel.model_construct(price=p, size=str(ask_data[p].quantize(FOUR)))
             for p in self._ask_prices
         ]
         self._ask_depth = sum(ask_data.values(), ZERO)
+        self._ask_depth_str = str(self._ask_depth.quantize(FOUR))
+
+        # Snapshot resets both tops; force spread/midpoint refresh.
+        self._best_bid = None
+        self._best_ask = None
+        self._refresh_top()
 
         return self._make_book(as_of)
 
@@ -102,9 +124,23 @@ class _BookBuilder:
         """Apply a single price level change."""
         price = _norm_price(price)
         if side == "BUY":
-            self._bid_depth += self._apply(self._bid_prices, self._bid_levels, price, size)
+            delta_depth = self._apply(self._bid_prices, self._bid_levels, price, size)
+            if delta_depth != ZERO:
+                self._bid_depth += delta_depth
+                self._bid_depth_str = str(self._bid_depth.quantize(FOUR))
+            new_best = self._bid_prices[-1] if self._bid_prices else None
+            if new_best != self._best_bid:
+                self._best_bid = new_best
+                self._refresh_spread()
         else:
-            self._ask_depth += self._apply(self._ask_prices, self._ask_levels, price, size)
+            delta_depth = self._apply(self._ask_prices, self._ask_levels, price, size)
+            if delta_depth != ZERO:
+                self._ask_depth += delta_depth
+                self._ask_depth_str = str(self._ask_depth.quantize(FOUR))
+            new_best = self._ask_prices[0] if self._ask_prices else None
+            if new_best != self._best_ask:
+                self._best_ask = new_best
+                self._refresh_spread()
         return self._make_book(as_of)
 
     @staticmethod
@@ -119,37 +155,53 @@ class _BookBuilder:
         if exists:
             old_size = Decimal(levels[idx].size)
             if size > ZERO:
-                levels[idx] = PriceLevel(price=price, size=str(size.quantize(FOUR)))
+                levels[idx] = PriceLevel.model_construct(
+                    price=price, size=str(size.quantize(FOUR)),
+                )
             else:
                 prices.pop(idx)
                 levels.pop(idx)
         elif size > ZERO:
             prices.insert(idx, price)
-            levels.insert(idx, PriceLevel(price=price, size=str(size.quantize(FOUR))))
+            levels.insert(idx, PriceLevel.model_construct(
+                price=price, size=str(size.quantize(FOUR)),
+            ))
 
         return size - old_size
 
+    def _refresh_top(self) -> None:
+        """Recompute best_bid/best_ask + spread/midpoint after a snapshot."""
+        self._best_bid = self._bid_prices[-1] if self._bid_prices else None
+        self._best_ask = self._ask_prices[0] if self._ask_prices else None
+        self._refresh_spread()
+
+    def _refresh_spread(self) -> None:
+        bb, ba = self._best_bid, self._best_ask
+        if bb is not None and ba is not None:
+            bb_d = Decimal(bb)
+            ba_d = Decimal(ba)
+            self._spread = str((ba_d - bb_d).quantize(FOUR))
+            self._midpoint = str(((bb_d + ba_d) / 2).quantize(FOUR))
+        else:
+            self._spread = None
+            self._midpoint = None
+
     def _make_book(self, as_of: int) -> OrderBook:
-        best_bid = self._bid_prices[-1] if self._bid_prices else None
-        best_ask = self._ask_prices[0] if self._ask_prices else None
-
-        spread = midpoint = None
-        if best_bid is not None and best_ask is not None:
-            spread = str((Decimal(best_ask) - Decimal(best_bid)).quantize(FOUR))
-            midpoint = str(((Decimal(best_bid) + Decimal(best_ask)) / 2).quantize(FOUR))
-
-        return OrderBook(
+        # model_construct skips validation: this is the sole producer and the
+        # inputs were validated when first parsed (or are server-canonical 4dp
+        # strings). The list copies keep callers isolated from internal state.
+        return OrderBook.model_construct(
             market_id=self._market_id,
             platform=self._platform,
             as_of=as_of,
-            bids=list(reversed(self._bid_levels)),
-            asks=list(self._ask_levels),
-            best_bid=best_bid,
-            best_ask=best_ask,
-            spread=spread,
-            midpoint=midpoint,
-            bid_depth=str(self._bid_depth.quantize(FOUR)),
-            ask_depth=str(self._ask_depth.quantize(FOUR)),
+            bids=self._bid_levels[::-1],
+            asks=self._ask_levels[:],
+            best_bid=self._best_bid,
+            best_ask=self._best_ask,
+            spread=self._spread,
+            midpoint=self._midpoint,
+            bid_depth=self._bid_depth_str,
+            ask_depth=self._ask_depth_str,
             bid_levels=len(self._bid_levels),
             ask_levels=len(self._ask_levels),
         )
