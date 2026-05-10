@@ -39,9 +39,15 @@ def _coerce_timestamp(value: Any) -> Any:
         try:
             dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
             return int(dt.timestamp() * 1000)
-        except ValueError:
-            return value
-    return value
+        except ValueError as exc:
+            raise ValueError(
+                f"Could not parse {value!r} as a timestamp. Pass an int (ms epoch), "
+                f"a datetime, or an ISO 8601 string like '2026-04-07T03:10:00Z'."
+            ) from exc
+    raise TypeError(
+        f"Cannot coerce {type(value).__name__} to a timestamp. Pass an int "
+        f"(ms epoch), a datetime, or an ISO 8601 string."
+    )
 
 
 def _prepare_params(params: dict[str, Any]) -> dict[str, Any]:
