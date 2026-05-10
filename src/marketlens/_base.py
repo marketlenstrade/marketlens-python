@@ -50,17 +50,52 @@ def _coerce_timestamp(value: Any) -> Any:
     )
 
 
+# Query-param keys the API treats as timestamps. Resource methods that
+# accept **params route them through _coerce_timestamp_params so callers
+# can pass datetimes/ISO strings for any of these. Keys here mirror the
+# Timestamp/OptionalTimestamp Query params declared in the API routes.
+_TIMESTAMP_PARAM_KEYS: frozenset[str] = frozenset({
+    "at",
+    "after", "before",
+    "open_after", "open_before",
+    "close_after", "close_before",
+    "resolved_after", "resolved_before",
+    "end_after", "start_before",
+})
+
+
+def _coerce_timestamp_params(params: dict[str, Any]) -> dict[str, Any]:
+    """Coerce known timestamp param keys to ms-epoch ints in place.
+
+    Used by resource methods that accept user-supplied **params kwargs to
+    timestamp-aware list / history endpoints. Non-timestamp keys are left
+    untouched (cursors, slugs, statuses, …)."""
+    for k in _TIMESTAMP_PARAM_KEYS & params.keys():
+        if params[k] is not None:
+            params[k] = _coerce_timestamp(params[k])
+    return params
+
+
 def _prepare_params(params: dict[str, Any]) -> dict[str, Any]:
-    """Clean None values and coerce timestamps."""
+    """Drop None values and serialize bools as lowercase strings.
+
+    Timestamp coercion happens at the resource boundary — see
+    :func:`_coerce_timestamp_params` and individual resource methods. This
+    function is purposely value-type agnostic so opaque pass-through values
+    (pagination cursors, slugs, condition IDs) survive untouched."""
     out: dict[str, Any] = {}
     for k, v in params.items():
         if v is None:
             continue
-        v = _coerce_timestamp(v)
         if isinstance(v, bool):
             out[k] = str(v).lower()
-        else:
-            out[k] = v
+            continue
+        if isinstance(v, datetime):
+            # Defensive: a datetime that slipped past the resource layer
+            # would otherwise be serialized as a non-API string by httpx.
+            out[k] = int(v.timestamp() * 1000)
+            continue
+        out[k] = v
     return out
 
 

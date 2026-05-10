@@ -4,7 +4,12 @@ from typing import Any
 
 from pydantic import TypeAdapter
 
-from marketlens._base import AsyncHTTPClient, SyncHTTPClient
+from marketlens._base import (
+    AsyncHTTPClient,
+    SyncHTTPClient,
+    _coerce_timestamp,
+    _coerce_timestamp_params,
+)
 from marketlens.exceptions import NotFoundError
 from marketlens._pagination import AsyncPageIterator, SyncPageIterator
 from marketlens.types.history import DeltaEvent, HistoryEvent, SnapshotEvent, TradeEvent
@@ -58,7 +63,7 @@ class Orderbook:
     def get(self, market_id: str, *, at: Any = None, depth: int | None = None) -> OrderBook:
         params: dict[str, Any] = {}
         if at is not None:
-            params["at"] = at
+            params["at"] = _coerce_timestamp(at)
         if depth is not None:
             params["depth"] = depth
         raw = self._client.get(f"/markets/{market_id}/orderbook", params=params)
@@ -76,8 +81,8 @@ class Orderbook:
             at every trade and snapshot).
           * ``limit`` — server-side max events per page (default 50000).
         """
-        params["after"] = after
-        params["before"] = before
+        params["after"] = _coerce_timestamp(after)
+        params["before"] = _coerce_timestamp(before)
         params.setdefault("limit", 50_000)
         return _HistorySyncPageIterator(
             self._client, f"/markets/{market_id}/orderbook/history", params, SnapshotEvent
@@ -86,8 +91,8 @@ class Orderbook:
     def metrics(
         self, market_id: str, *, after: Any, before: Any, resolution: str, **params: Any
     ) -> SyncPageIterator[BookMetrics]:
-        params["after"] = after
-        params["before"] = before
+        params["after"] = _coerce_timestamp(after)
+        params["before"] = _coerce_timestamp(before)
         params["resolution"] = resolution
         return SyncPageIterator(
             self._client, f"/markets/{market_id}/orderbook/metrics", params, BookMetrics
@@ -193,7 +198,7 @@ class AsyncOrderbook:
     async def get(self, market_id: str, *, at: Any = None, depth: int | None = None) -> OrderBook:
         params: dict[str, Any] = {}
         if at is not None:
-            params["at"] = at
+            params["at"] = _coerce_timestamp(at)
         if depth is not None:
             params["depth"] = depth
         raw = await self._client.get(f"/markets/{market_id}/orderbook", params=params)
@@ -202,8 +207,8 @@ class AsyncOrderbook:
     def history(
         self, market_id: str, *, after: Any, before: Any, **params: Any
     ) -> _HistoryAsyncPageIterator:
-        params["after"] = after
-        params["before"] = before
+        params["after"] = _coerce_timestamp(after)
+        params["before"] = _coerce_timestamp(before)
         params.setdefault("limit", 50_000)
         return _HistoryAsyncPageIterator(
             self._client, f"/markets/{market_id}/orderbook/history", params, SnapshotEvent
@@ -212,8 +217,8 @@ class AsyncOrderbook:
     def metrics(
         self, market_id: str, *, after: Any, before: Any, resolution: str, **params: Any
     ) -> AsyncPageIterator[BookMetrics]:
-        params["after"] = after
-        params["before"] = before
+        params["after"] = _coerce_timestamp(after)
+        params["before"] = _coerce_timestamp(before)
         params["resolution"] = resolution
         return AsyncPageIterator(
             self._client, f"/markets/{market_id}/orderbook/metrics", params, BookMetrics

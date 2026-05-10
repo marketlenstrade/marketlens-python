@@ -180,7 +180,11 @@ class Exports:
         try:
             self._client.download(
                 "/reference/trades/export", dest,
-                params={"symbol": symbol, "after": after, "before": before},
+                params={
+                    "symbol": symbol,
+                    "after": _coerce_timestamp(after),
+                    "before": _coerce_timestamp(before),
+                },
                 reporter=reporter, label=f"reference {symbol}",
             )
         except NotFoundError:
@@ -315,7 +319,11 @@ class AsyncExports:
         try:
             await self._client.download(
                 "/reference/trades/export", dest,
-                params={"symbol": symbol, "after": after, "before": before},
+                params={
+                    "symbol": symbol,
+                    "after": _coerce_timestamp(after),
+                    "before": _coerce_timestamp(before),
+                },
                 reporter=reporter, label=f"reference {symbol}",
             )
         except NotFoundError:

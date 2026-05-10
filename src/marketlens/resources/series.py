@@ -2,7 +2,12 @@ from __future__ import annotations
 
 from typing import Any, Iterator
 
-from marketlens._base import AsyncHTTPClient, SyncHTTPClient, _coerce_timestamp
+from marketlens._base import (
+    AsyncHTTPClient,
+    SyncHTTPClient,
+    _coerce_timestamp,
+    _coerce_timestamp_params,
+)
 from marketlens._pagination import AsyncPageIterator, SyncPageIterator
 from marketlens.exceptions import NotFoundError
 from marketlens.types.event import Event
@@ -30,14 +35,19 @@ class SeriesResource:
         raise NotFoundError(404, "SERIES_NOT_FOUND", f"Series {series_id} not found")
 
     def list(self, **params: Any) -> SyncPageIterator[Series]:
-        return SyncPageIterator(self._client, "/series", params, Series)
+        return SyncPageIterator(
+            self._client, "/series", _coerce_timestamp_params(params), Series,
+        )
 
     def get(self, series_id: str) -> Series:
         return self._resolve(series_id)
 
     def markets(self, series_id: str, **params: Any) -> SyncPageIterator[Market]:
         resolved = self._resolve(series_id).id
-        return SyncPageIterator(self._client, f"/series/{resolved}/markets", params, Market)
+        return SyncPageIterator(
+            self._client, f"/series/{resolved}/markets",
+            _coerce_timestamp_params(params), Market,
+        )
 
     def walk(
         self, series_id: str, *, after: Any = None, before: Any = None, **params: Any,
@@ -84,10 +94,14 @@ class SeriesResource:
                 params["close_after"] = _coerce_timestamp(after) + 1
             if before is not None:
                 params["open_before"] = _coerce_timestamp(before) - 1
-            yield from SyncPageIterator(self._client, "/markets", params, Market)
+            yield from SyncPageIterator(
+                self._client, "/markets",
+                _coerce_timestamp_params(params), Market,
+            )
         else:
             yield from SyncPageIterator(
-                self._client, f"/series/{resolved.id}/markets", params, Market,
+                self._client, f"/series/{resolved.id}/markets",
+                _coerce_timestamp_params(params), Market,
             )
 
     def events(self, series_id: str, **params: Any) -> SyncPageIterator[Event]:
@@ -103,7 +117,9 @@ class SeriesResource:
         resolved = self._resolve(series_id)
         params.setdefault("sort", "end_date")
         params["series_id"] = resolved.id
-        return SyncPageIterator(self._client, "/events", params, Event)
+        return SyncPageIterator(
+            self._client, "/events", _coerce_timestamp_params(params), Event,
+        )
 
 
 class AsyncSeriesResource:
@@ -125,14 +141,19 @@ class AsyncSeriesResource:
         raise NotFoundError(404, "SERIES_NOT_FOUND", f"Series {series_id} not found")
 
     def list(self, **params: Any) -> AsyncPageIterator[Series]:
-        return AsyncPageIterator(self._client, "/series", params, Series)
+        return AsyncPageIterator(
+            self._client, "/series", _coerce_timestamp_params(params), Series,
+        )
 
     async def get(self, series_id: str) -> Series:
         return await self._resolve(series_id)
 
     async def markets(self, series_id: str, **params: Any) -> AsyncPageIterator[Market]:
         resolved = (await self._resolve(series_id)).id
-        return AsyncPageIterator(self._client, f"/series/{resolved}/markets", params, Market)
+        return AsyncPageIterator(
+            self._client, f"/series/{resolved}/markets",
+            _coerce_timestamp_params(params), Market,
+        )
 
     async def walk(
         self, series_id: str, *, after: Any = None, before: Any = None, **params: Any,
@@ -161,11 +182,15 @@ class AsyncSeriesResource:
                 params["close_after"] = _coerce_timestamp(after) + 1
             if before is not None:
                 params["open_before"] = _coerce_timestamp(before) - 1
-            async for market in AsyncPageIterator(self._client, "/markets", params, Market):
+            async for market in AsyncPageIterator(
+                self._client, "/markets",
+                _coerce_timestamp_params(params), Market,
+            ):
                 yield market
         else:
             async for market in AsyncPageIterator(
-                self._client, f"/series/{resolved.id}/markets", params, Market,
+                self._client, f"/series/{resolved.id}/markets",
+                _coerce_timestamp_params(params), Market,
             ):
                 yield market
 
@@ -179,4 +204,6 @@ class AsyncSeriesResource:
         resolved = await self._resolve(series_id)
         params.setdefault("sort", "end_date")
         params["series_id"] = resolved.id
-        return AsyncPageIterator(self._client, "/events", params, Event)
+        return AsyncPageIterator(
+            self._client, "/events", _coerce_timestamp_params(params), Event,
+        )

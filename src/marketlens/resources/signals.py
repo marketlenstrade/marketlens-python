@@ -2,7 +2,11 @@ from __future__ import annotations
 
 from typing import Any
 
-from marketlens._base import AsyncHTTPClient, SyncHTTPClient
+from marketlens._base import (
+    AsyncHTTPClient,
+    SyncHTTPClient,
+    _coerce_timestamp_params,
+)
 from marketlens._pagination import AsyncPageIterator, SyncPageIterator
 from marketlens.types.signal import Surface
 
@@ -17,7 +21,8 @@ class Signals:
         Params: underlying, surface_type
         """
         return SyncPageIterator(
-            self._client, "/signals/surfaces", params, Surface,
+            self._client, "/signals/surfaces",
+            _coerce_timestamp_params(params), Surface,
         )
 
     def surface(self, series_id: str, event_id: str) -> Surface:
@@ -35,7 +40,7 @@ class Signals:
         return SyncPageIterator(
             self._client,
             f"/signals/surfaces/{series_id}/{event_id}/history",
-            params,
+            _coerce_timestamp_params(params),
             Surface,
         )
 
@@ -50,7 +55,8 @@ class AsyncSignals:
         Params: underlying, surface_type
         """
         return AsyncPageIterator(
-            self._client, "/signals/surfaces", params, Surface,
+            self._client, "/signals/surfaces",
+            _coerce_timestamp_params(params), Surface,
         )
 
     async def surface(self, series_id: str, event_id: str) -> Surface:
@@ -68,6 +74,6 @@ class AsyncSignals:
         return AsyncPageIterator(
             self._client,
             f"/signals/surfaces/{series_id}/{event_id}/history",
-            params,
+            _coerce_timestamp_params(params),
             Surface,
         )
