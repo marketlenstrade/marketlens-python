@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any, AsyncIterator, Iterator
+from typing import Any
 
 import httpx
 import orjson
@@ -20,11 +21,15 @@ from marketlens._constants import (
 from marketlens.exceptions import (
     APIError,
     ConnectionError,
+    ExportNotReadyError,
     RateLimitError,
     TimeoutError,
     _CODE_TO_EXCEPTION,
     _STATUS_TO_EXCEPTION,
 )
+
+
+_EXPORT_NOT_READY_RE = re.compile(r"status=([^)]+)\)(?::\s*(.+))?")
 
 
 def _coerce_timestamp(value: Any) -> Any:
@@ -121,6 +126,18 @@ def _raise_for_error(response: httpx.Response) -> None:
         retry_after_raw = response.headers.get("Retry-After")
         retry_after = int(retry_after_raw) if retry_after_raw else None
         raise RateLimitError(response.status_code, code, message, retry_after=retry_after)
+
+    if exc_cls is ExportNotReadyError:
+        export_status: str | None = None
+        last_error: str | None = None
+        m = _EXPORT_NOT_READY_RE.search(message)
+        if m:
+            export_status = m.group(1)
+            last_error = m.group(2)
+        raise ExportNotReadyError(
+            response.status_code, code, message,
+            export_status=export_status, last_error=last_error,
+        )
 
     raise exc_cls(response.status_code, code, message)
 
@@ -278,67 +295,70 @@ class SyncHTTPClient:
             raise last_exc
         raise RuntimeError("unreachable")
 
-    def stream_bytes(
-        self,
-        path: str,
-        params: dict[str, Any] | None = None,
-        *,
-        reporter: Any = None,
-        label: str | None = None,
-    ) -> Iterator[bytes]:
-        """Yield raw response bytes from a GET endpoint with retries.
+    @staticmethod
+    def _stream_to_disk(
+        response: httpx.Response, dest: Path,
+        reporter: Any = None, label: str | None = None,
+    ) -> None:
+        """Iterate a streaming response body into `dest`. Optional reporter."""
+        encoded = bool(response.headers.get("Content-Encoding"))
+        total_raw = response.headers.get("Content-Length")
+        total = int(total_raw) if total_raw and not encoded else None
+        if reporter is not None:
+            reporter.download_started(label or str(dest), total)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        n = 0
+        with dest.open("wb") as f:
+            for chunk in response.iter_bytes():
+                f.write(chunk)
+                n += len(chunk)
+                if reporter is not None:
+                    reporter.download_progress(n)
+        if reporter is not None:
+            reporter.download_finished()
 
-        Used by callers that consume the body via a streaming parser (e.g.
-        ``stream-unzip`` for series exports), so no intermediate file on
-        disk is needed. Reports progress via ``reporter`` exactly like
-        :meth:`download` so the existing rich progress bar still works.
+    def fetch_presigned(
+        self, url: str, dest: Path, *,
+        reporter: Any = None, label: str | None = None,
+    ) -> Path:
+        """Stream an unauthenticated (presigned) URL to `dest`. Atomic via .part rename."""
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        tmp = dest.with_suffix(dest.suffix + ".part")
+        try:
+            with httpx.stream("GET", url, timeout=DOWNLOAD_TIMEOUT) as response:
+                response.raise_for_status()
+                self._stream_to_disk(response, tmp, reporter, label or url)
+            tmp.replace(dest)
+        except BaseException:
+            if tmp.exists():
+                tmp.unlink()
+            raise
+        return dest
+
+    def download_via_redirect(
+        self, path: str, dest: Path,
+        params: dict[str, Any] | None = None, *,
+        reporter: Any = None, label: str | None = None,
+    ) -> Path:
+        """GET `path` (authed), expect 302, follow Location unauthenticated to `dest`.
+
+        Raises ExportNotReadyError on 409 and other APIErrors on >=400 statuses
+        via the standard `_raise_for_error` path. A non-302 success status is
+        treated as a protocol error.
         """
-        prepared = _prepare_params(params) if params else {}
-        last_exc: Exception | None = None
-        for attempt in range(1 + self.max_retries):
-            try:
-                with self._client.stream("GET", path, params=prepared, timeout=DOWNLOAD_TIMEOUT) as response:
-                    if _should_retry(response) and attempt < self.max_retries:
-                        delay = 2**attempt
-                        if response.status_code == 429:
-                            retry_after = response.headers.get("Retry-After")
-                            if retry_after:
-                                delay = max(delay, int(retry_after))
-                        time.sleep(delay)
-                        continue
-                    if response.status_code >= 400:
-                        response.read()
-                    _raise_for_error(response)
-                    encoded = bool(response.headers.get("Content-Encoding"))
-                    total_raw = response.headers.get("Content-Length")
-                    total = int(total_raw) if total_raw and not encoded else None
-                    if reporter is not None:
-                        reporter.download_started(label or path, total)
-                    n = 0
-                    for chunk in response.iter_bytes():
-                        n += len(chunk)
-                        if reporter is not None:
-                            reporter.download_progress(n)
-                        yield chunk
-                    if reporter is not None:
-                        reporter.download_finished()
-                    return
-            except httpx.TimeoutException as exc:
-                last_exc = TimeoutError(str(exc))
-                if attempt < self.max_retries:
-                    time.sleep(2**attempt)
-                    continue
-                raise last_exc from exc
-            except httpx.ConnectError as exc:
-                last_exc = ConnectionError(str(exc))
-                if attempt < self.max_retries:
-                    time.sleep(2**attempt)
-                    continue
-                raise last_exc from exc
-
-        if last_exc:
-            raise last_exc
-        raise RuntimeError("unreachable")
+        initial = self._request_with_retry(
+            "GET", path,
+            params=_prepare_params(params) if params else {},
+            timeout=DEFAULT_TIMEOUT,
+            follow_redirects=False,
+        )
+        if initial.status_code != 302:
+            raise APIError(
+                initial.status_code, "UNEXPECTED_STATUS",
+                f"Expected 302 from {path}, got {initial.status_code}",
+            )
+        location = initial.headers["Location"]
+        return self.fetch_presigned(location, dest, reporter=reporter, label=label)
 
     def close(self) -> None:
         self._client.close()
@@ -476,61 +496,66 @@ class AsyncHTTPClient:
             raise last_exc
         raise RuntimeError("unreachable")
 
-    async def stream_bytes(
-        self,
-        path: str,
-        params: dict[str, Any] | None = None,
-        *,
-        reporter: Any = None,
-        label: str | None = None,
-    ) -> AsyncIterator[bytes]:
-        """Async equivalent of :meth:`SyncHTTPClient.stream_bytes`."""
-        prepared = _prepare_params(params) if params else {}
-        last_exc: Exception | None = None
-        for attempt in range(1 + self.max_retries):
-            try:
-                async with self._client.stream("GET", path, params=prepared, timeout=DOWNLOAD_TIMEOUT) as response:
-                    if _should_retry(response) and attempt < self.max_retries:
-                        delay = 2**attempt
-                        if response.status_code == 429:
-                            retry_after = response.headers.get("Retry-After")
-                            if retry_after:
-                                delay = max(delay, int(retry_after))
-                        await asyncio.sleep(delay)
-                        continue
-                    if response.status_code >= 400:
-                        await response.aread()
-                    _raise_for_error(response)
-                    encoded = bool(response.headers.get("Content-Encoding"))
-                    total_raw = response.headers.get("Content-Length")
-                    total = int(total_raw) if total_raw and not encoded else None
-                    if reporter is not None:
-                        reporter.download_started(label or path, total)
-                    n = 0
-                    async for chunk in response.aiter_bytes():
-                        n += len(chunk)
-                        if reporter is not None:
-                            reporter.download_progress(n)
-                        yield chunk
-                    if reporter is not None:
-                        reporter.download_finished()
-                    return
-            except httpx.TimeoutException as exc:
-                last_exc = TimeoutError(str(exc))
-                if attempt < self.max_retries:
-                    await asyncio.sleep(2**attempt)
-                    continue
-                raise last_exc from exc
-            except httpx.ConnectError as exc:
-                last_exc = ConnectionError(str(exc))
-                if attempt < self.max_retries:
-                    await asyncio.sleep(2**attempt)
-                    continue
-                raise last_exc from exc
+    @staticmethod
+    async def _astream_to_disk(
+        response: httpx.Response, dest: Path,
+        reporter: Any = None, label: str | None = None,
+    ) -> None:
+        """Async iterate a streaming response body into `dest`."""
+        encoded = bool(response.headers.get("Content-Encoding"))
+        total_raw = response.headers.get("Content-Length")
+        total = int(total_raw) if total_raw and not encoded else None
+        if reporter is not None:
+            reporter.download_started(label or str(dest), total)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        n = 0
+        with dest.open("wb") as f:
+            async for chunk in response.aiter_bytes():
+                f.write(chunk)
+                n += len(chunk)
+                if reporter is not None:
+                    reporter.download_progress(n)
+        if reporter is not None:
+            reporter.download_finished()
 
-        if last_exc:
-            raise last_exc
-        raise RuntimeError("unreachable")
+    async def fetch_presigned(
+        self, url: str, dest: Path, *,
+        reporter: Any = None, label: str | None = None,
+    ) -> Path:
+        """Stream an unauthenticated (presigned) URL to `dest`."""
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        tmp = dest.with_suffix(dest.suffix + ".part")
+        try:
+            async with httpx.AsyncClient(timeout=DOWNLOAD_TIMEOUT) as cli:
+                async with cli.stream("GET", url) as response:
+                    response.raise_for_status()
+                    await self._astream_to_disk(response, tmp, reporter, label or url)
+            tmp.replace(dest)
+        except BaseException:
+            if tmp.exists():
+                tmp.unlink()
+            raise
+        return dest
+
+    async def download_via_redirect(
+        self, path: str, dest: Path,
+        params: dict[str, Any] | None = None, *,
+        reporter: Any = None, label: str | None = None,
+    ) -> Path:
+        """GET `path` (authed), expect 302, follow Location unauthenticated to `dest`."""
+        initial = await self._request_with_retry(
+            "GET", path,
+            params=_prepare_params(params) if params else {},
+            timeout=DEFAULT_TIMEOUT,
+            follow_redirects=False,
+        )
+        if initial.status_code != 302:
+            raise APIError(
+                initial.status_code, "UNEXPECTED_STATUS",
+                f"Expected 302 from {path}, got {initial.status_code}",
+            )
+        location = initial.headers["Location"]
+        return await self.fetch_presigned(location, dest, reporter=reporter, label=label)
 
     async def close(self) -> None:
         await self._client.aclose()

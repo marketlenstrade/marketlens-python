@@ -6,12 +6,18 @@ from marketlens.exceptions import (
     APIError,
     AuthenticationError,
     ConnectionError,
+    ExportNotReadyError,
     ForbiddenError,
     InvalidParameterError,
     MarketLensError,
     NotFoundError,
     RateLimitError,
     TimeoutError,
+)
+from marketlens.resources.exports import (
+    SeriesDownloadResult,
+    SeriesFailed,
+    SeriesPending,
 )
 from marketlens.backtest import BacktestConfig, BacktestEngine, BacktestResult, Strategy
 from marketlens.helpers.walk import AsyncOrderBookWalk, OrderBookWalk
@@ -74,6 +80,10 @@ __all__ = [
     # Helpers
     "OrderBookWalk",
     "AsyncOrderBookWalk",
+    # Exports
+    "SeriesDownloadResult",
+    "SeriesPending",
+    "SeriesFailed",
     # Exceptions
     "MarketLensError",
     "APIError",
@@ -82,6 +92,7 @@ __all__ = [
     "NotFoundError",
     "InvalidParameterError",
     "RateLimitError",
+    "ExportNotReadyError",
     "ConnectionError",
     "TimeoutError",
     # Version

@@ -1,170 +1,341 @@
-"""Tests for download progress and exports flow."""
+"""Tests for the 1.2.0 exports flow.
+
+Per-market: 302 redirect from the API → presigned bucket URL we fetch
+unauthenticated. Per-series: JSON manifest with ready/pending/failed
+buckets and one presigned URL per ready market.
+"""
 from __future__ import annotations
 
-import io
-import zipfile
+import asyncio
+import os
+from pathlib import Path
 
 import httpx
 import pytest
+import respx
 
 from conftest import BASE_URL
-from marketlens._constants import DEFAULT_TIMEOUT, DOWNLOAD_TIMEOUT
+from marketlens import (
+    AsyncMarketLens,
+    ExportNotReadyError,
+    MarketLens,
+    NotFoundError,
+    RateLimitError,
+    SeriesDownloadResult,
+)
 
 
-class _RecordingReporter:
-    """Captures download_started / download_progress calls."""
-
-    def __init__(self):
-        self.started: list[tuple[str, int | None]] = []
-        self.progress: list[int] = []
-        self.finished = 0
-
-    def __enter__(self): return self
-    def __exit__(self, *a): pass
-    def fetched(self, *a, **k): pass
-    def consumed(self, *a, **k): pass
-    def market_started(self, *a, **k): pass
-    def market_fetch_done(self, *a, **k): pass
-    def market_finished(self, *a, **k): pass
-    def download_started(self, label, total): self.started.append((label, total))
-    def download_progress(self, n): self.progress.append(n)
-    def download_finished(self): self.finished += 1
-    def status(self, *a, **k): pass
+BUCKET_BASE = "https://bucket.example.com/marketlens"
 
 
-class TestStreamingDownload:
-    """Confirm reporter-driven streaming download reports byte progress."""
+def _market_404(mock_api, market_id: str = "m1") -> None:
+    """Short-circuit the optional ``self._markets.get(...)`` lookup so the
+    underlying-reference download is skipped."""
+    mock_api.get(f"/markets/{market_id}").mock(
+        return_value=httpx.Response(
+            404, json={"error": {"code": "MARKET_NOT_FOUND", "message": "x"}},
+        )
+    )
 
-    def test_download_reports_progress(self, mock_api, client, tmp_path):
-        body = b"x" * 4096
-        mock_api.get("/markets/abc/export").mock(
+
+def _series_404(mock_api, series_id: str) -> None:
+    """Short-circuit the optional underlying walk in ``download_series``.
+
+    ``self._series.walk(...)`` hits ``/series/{id}`` first; a 404 there raises
+    NotFoundError which is swallowed by ``download_series``'s ``except`` clause.
+    """
+    mock_api.get(f"/series/{series_id}").mock(
+        return_value=httpx.Response(
+            404, json={"error": {"code": "SERIES_NOT_FOUND", "message": "x"}},
+        )
+    )
+
+
+# ── Per-market download ────────────────────────────────────────────
+
+
+class TestMarketDownload:
+    def test_follows_302_to_presigned_url(self, mock_api, client, tmp_path):
+        body = b"PAR1" + b"x" * 1024
+        bucket_url = f"{BUCKET_BASE}/history/m1.parquet"
+        mock_api.get("/markets/m1/export").mock(
             return_value=httpx.Response(
-                200, content=body, headers={"Content-Length": str(len(body))},
+                302,
+                headers={"Location": bucket_url, "X-Export-Events": "100"},
             )
         )
+        mock_api.get(bucket_url).mock(return_value=httpx.Response(200, content=body))
+        _market_404(mock_api)
 
-        rep = _RecordingReporter()
-        client._http.download(
-            "/markets/abc/export",
-            tmp_path / "history-abc.parquet",
-            reporter=rep, label="market abc",
-        )
-
-        assert rep.started == [("market abc", len(body))]
-        assert rep.progress and rep.progress[-1] == len(body)
-        assert rep.progress == sorted(rep.progress)  # monotonic
-        assert rep.finished == 1
-        assert (tmp_path / "history-abc.parquet").read_bytes() == body
-
-    def test_no_reporter_uses_unstreamed_path(self, mock_api, client, tmp_path):
-        body = b"y" * 256
-        mock_api.get("/markets/abc/export").mock(
-            return_value=httpx.Response(200, content=body)
-        )
-        client._http.download("/markets/abc/export", tmp_path / "out.bin")
-        assert (tmp_path / "out.bin").read_bytes() == body
-
-
-class TestExportsResource:
-    """Smoke test that exports.download() runs end-to-end with progress=False."""
-
-    def test_market_download_writes_parquet_compact_default(self, mock_api, client, tmp_path):
-        # Default coalesce=True writes the -compact variant.
-        mock_api.get("/markets/abc-123/export").mock(
-            return_value=httpx.Response(200, content=b"PAR1fake")
-        )
-        mock_api.get("/markets/abc-123").mock(
-            return_value=httpx.Response(404, json={"error": {"code": "NOT_FOUND", "message": "x"}})
-        )
-        out = client.exports.download("abc-123", path=str(tmp_path), progress=False)
-        assert (out / "history-abc-123-compact.parquet").exists()
-        # And the export request carried coalesce=true.
-        export_urls = [str(c.request.url) for c in mock_api.calls if "/export" in str(c.request.url)]
-        assert export_urls and "coalesce=true" in export_urls[0]
-
-    def test_market_download_full_when_coalesce_false(self, mock_api, client, tmp_path):
-        mock_api.get("/markets/abc-123/export").mock(
-            return_value=httpx.Response(200, content=b"PAR1fake")
-        )
-        mock_api.get("/markets/abc-123").mock(
-            return_value=httpx.Response(404, json={"error": {"code": "NOT_FOUND", "message": "x"}})
-        )
         out = client.exports.download(
-            "abc-123", path=str(tmp_path), progress=False, coalesce=False,
+            "m1", path=str(tmp_path), progress=False, coalesce=False,
         )
-        assert (out / "history-abc-123.parquet").exists()
-        export_urls = [str(c.request.url) for c in mock_api.calls if "/export" in str(c.request.url)]
-        assert export_urls and "coalesce" not in export_urls[0]
 
-    def test_download_uses_download_timeout(self, mock_api, client, tmp_path):
-        """Download paths must override the per-call read timeout to ``None``
-        so streaming exports aren't cut off mid-flight."""
-        mock_api.get("/markets/abc/export").mock(
-            return_value=httpx.Response(200, content=b"x" * 32)
+        assert (out / "history-m1.parquet").read_bytes() == body
+        assert not list(tmp_path.glob("*.part"))
+
+    def test_coalesce_default_compact(self, mock_api, client, tmp_path):
+        bucket_url = f"{BUCKET_BASE}/history/m1-compact.parquet"
+        mock_api.get("/markets/m1/export").mock(
+            return_value=httpx.Response(302, headers={"Location": bucket_url})
         )
-        # No reporter → unstreamed path.
-        client._http.download("/markets/abc/export", tmp_path / "f.bin")
-        recorded = mock_api.calls[-1].request.extensions["timeout"]
-        assert recorded["read"] is None  # DOWNLOAD_TIMEOUT.read
-        assert recorded["connect"] == DOWNLOAD_TIMEOUT.connect
+        mock_api.get(bucket_url).mock(return_value=httpx.Response(200, content=b"OK"))
+        _market_404(mock_api)
 
-    def test_streamed_download_uses_download_timeout(self, mock_api, client, tmp_path):
-        body = b"y" * 64
-        mock_api.get("/markets/abc/export").mock(
-            return_value=httpx.Response(200, content=body, headers={"Content-Length": str(len(body))})
+        out = client.exports.download("m1", path=str(tmp_path), progress=False)
+        assert (out / "history-m1-compact.parquet").exists()
+
+        export_calls = [
+            c for c in mock_api.calls
+            if c.request.url.path == "/v1/markets/m1/export"
+        ]
+        assert export_calls and "coalesce=true" in str(export_calls[0].request.url)
+
+    def test_coalesce_false_writes_full(self, mock_api, client, tmp_path):
+        bucket_url = f"{BUCKET_BASE}/history/m1.parquet"
+        mock_api.get("/markets/m1/export").mock(
+            return_value=httpx.Response(302, headers={"Location": bucket_url})
         )
-        client._http.download(
-            "/markets/abc/export", tmp_path / "f.bin",
-            reporter=_RecordingReporter(), label="x",
+        mock_api.get(bucket_url).mock(return_value=httpx.Response(200, content=b"OK"))
+        _market_404(mock_api)
+
+        out = client.exports.download(
+            "m1", path=str(tmp_path), progress=False, coalesce=False,
         )
-        recorded = mock_api.calls[-1].request.extensions["timeout"]
-        assert recorded["read"] is None
+        assert (out / "history-m1.parquet").exists()
 
-    def test_non_download_uses_default_timeout(self, mock_api, client):
-        """Non-download requests keep the strict 30 s read timeout."""
-        mock_api.get("/markets/abc-123").mock(
-            return_value=httpx.Response(200, json={"id": "abc-123"})
-        )
-        client._http.get("/markets/abc-123")
-        recorded = mock_api.calls[-1].request.extensions["timeout"]
-        assert recorded["read"] == DEFAULT_TIMEOUT.read  # 30.0
+        export_calls = [
+            c for c in mock_api.calls
+            if c.request.url.path == "/v1/markets/m1/export"
+        ]
+        assert export_calls and "coalesce" not in str(export_calls[0].request.url)
 
-    def test_series_download_extracts_zip(self, mock_api, client, tmp_path):
-        # Default coalesce=True → server emits -compact.parquet entries.
-        buf = io.BytesIO()
-        with zipfile.ZipFile(buf, "w") as zf:
-            zf.writestr("history-m1-compact.parquet", b"PAR1m1")
-            zf.writestr("history-m2-compact.parquet", b"PAR1m2")
-        zip_bytes = buf.getvalue()
-
-        mock_api.get("/series/btc-daily/export").mock(
+    def test_404_raises_not_found(self, mock_api, client, tmp_path):
+        mock_api.get("/markets/missing/export").mock(
             return_value=httpx.Response(
-                200, content=zip_bytes,
-                headers={"Content-Length": str(len(zip_bytes))},
+                404, json={"error": {"code": "MARKET_NOT_FOUND", "message": "Market missing not found"}},
             )
         )
-        # series.walk → 404 so the underlying-lookup path is skipped
-        mock_api.get("/series/btc-daily").mock(
-            return_value=httpx.Response(404, json={"error": {"code": "NOT_FOUND", "message": "x"}})
-        )
-        out = client.exports.download_series("btc-daily", path=str(tmp_path), progress=False)
-        assert (out / "history-m1-compact.parquet").read_bytes() == b"PAR1m1"
-        assert (out / "history-m2-compact.parquet").read_bytes() == b"PAR1m2"
-        # Streaming extract leaves no leftover .part files.
-        assert not list(tmp_path.glob("*.part"))
-        # No legacy intermediate zip on disk either.
-        assert not list(tmp_path.glob("_series-*.zip.tmp"))
+        with pytest.raises(NotFoundError):
+            client.exports.download("missing", path=str(tmp_path), progress=False)
 
-    def test_streaming_error_response_raises_clean_exception(self, mock_api, client, tmp_path):
-        """A 4xx during a streaming download must surface as the proper SDK
-        exception rather than crashing on ``ResponseNotRead``. Without
-        explicit ``response.read()`` before parsing JSON, streaming-mode
-        httpx responses don't auto-buffer their body."""
-        from marketlens.exceptions import NotFoundError
+    def test_409_raises_export_not_ready_with_fields(self, mock_api, client, tmp_path):
+        mock_api.get("/markets/m1/export").mock(
+            return_value=httpx.Response(
+                409,
+                json={"error": {
+                    "code": "EXPORT_NOT_READY",
+                    "message": "Export not ready (status=pending): worker crashed at step 3",
+                }},
+            )
+        )
+        with pytest.raises(ExportNotReadyError) as ei:
+            client.exports.download("m1", path=str(tmp_path), progress=False)
+        assert ei.value.code == "EXPORT_NOT_READY"
+        assert ei.value.export_status == "pending"
+        assert ei.value.last_error == "worker crashed at step 3"
+
+    def test_409_without_last_error(self, mock_api, client, tmp_path):
+        mock_api.get("/markets/m1/export").mock(
+            return_value=httpx.Response(
+                409,
+                json={"error": {
+                    "code": "EXPORT_NOT_READY",
+                    "message": "Export not ready (status=in_progress)",
+                }},
+            )
+        )
+        with pytest.raises(ExportNotReadyError) as ei:
+            client.exports.download("m1", path=str(tmp_path), progress=False)
+        assert ei.value.export_status == "in_progress"
+        assert ei.value.last_error is None
+
+    def test_429_raises_rate_limit_with_retry_after(self, mock_api, tmp_path):
+        # Use a no-retry client so the test doesn't sleep through 1+2 retries.
+        client = MarketLens(api_key="mk_test_key", base_url=BASE_URL, max_retries=0)
+        try:
+            mock_api.get("/markets/m1/export").mock(
+                return_value=httpx.Response(
+                    429,
+                    headers={"Retry-After": "60"},
+                    json={"error": {"code": "RATE_LIMITED", "message": "Slow down"}},
+                )
+            )
+            with pytest.raises(RateLimitError) as ei:
+                client.exports.download("m1", path=str(tmp_path), progress=False)
+            assert ei.value.retry_after == 60
+        finally:
+            client.close()
+
+    def test_skips_when_file_exists(self, mock_api, client, tmp_path):
+        (tmp_path / "history-m1-compact.parquet").write_bytes(b"PRE-EXISTING")
+        _market_404(mock_api)
+
+        out = client.exports.download("m1", path=str(tmp_path), progress=False)
+
+        # Bytes untouched and no /export call was made.
+        assert (out / "history-m1-compact.parquet").read_bytes() == b"PRE-EXISTING"
+        export_calls = [
+            c for c in mock_api.calls
+            if c.request.url.path.endswith("/export")
+        ]
+        assert export_calls == []
+
+    def test_presigned_fetch_does_not_send_authorization(self, mock_api, client, tmp_path):
+        bucket_url = f"{BUCKET_BASE}/history/m1-compact.parquet"
+        mock_api.get("/markets/m1/export").mock(
+            return_value=httpx.Response(302, headers={"Location": bucket_url})
+        )
+        bucket_route = mock_api.get(bucket_url).mock(
+            return_value=httpx.Response(200, content=b"OK")
+        )
+        _market_404(mock_api)
+
+        client.exports.download("m1", path=str(tmp_path), progress=False)
+
+        bucket_calls = bucket_route.calls
+        assert len(bucket_calls) == 1
+        assert "authorization" not in {h.lower() for h in bucket_calls[0].request.headers.keys()}
+
+
+# ── Per-series download ────────────────────────────────────────────
+
+
+class TestSeriesDownload:
+    def _manifest(self, ready_ids: list[str], pending: list[dict] = None,
+                  failed: list[dict] = None, events: int = 0,
+                  with_url: bool = True) -> dict:
+        return {
+            "ready": [
+                {"market_id": mid,
+                 "url": f"{BUCKET_BASE}/history/{mid}-compact.parquet" if with_url else "",
+                 "events": 100}
+                for mid in ready_ids
+            ],
+            "pending": pending or [],
+            "failed": failed or [],
+            "events_charged": events or 100 * len(ready_ids),
+        }
+
+    def test_parses_json_and_downloads_ready(self, mock_api, client, tmp_path):
+        manifest = self._manifest(
+            ready_ids=["m1", "m2"],
+            pending=[{"market_id": "m3", "status": "pending"}],
+            failed=[{"market_id": "m4", "error": "boom"}],
+            events=12345,
+        )
+        mock_api.get("/series/btc-daily/export").mock(
+            return_value=httpx.Response(200, json=manifest)
+        )
+        mock_api.get(f"{BUCKET_BASE}/history/m1-compact.parquet").mock(
+            return_value=httpx.Response(200, content=b"PAR1-m1")
+        )
+        mock_api.get(f"{BUCKET_BASE}/history/m2-compact.parquet").mock(
+            return_value=httpx.Response(200, content=b"PAR1-m2")
+        )
+        _series_404(mock_api, "btc-daily")
+
+        result = client.exports.download_series(
+            "btc-daily", path=str(tmp_path), progress=False,
+        )
+
+        assert isinstance(result, SeriesDownloadResult)
+        assert sorted(result.ready) == ["m1", "m2"]
+        assert len(result.pending) == 1 and result.pending[0].market_id == "m3"
+        assert len(result.failed) == 1 and result.failed[0].market_id == "m4"
+        assert result.events_charged == 12345
+        assert (tmp_path / "history-m1-compact.parquet").read_bytes() == b"PAR1-m1"
+        assert (tmp_path / "history-m2-compact.parquet").read_bytes() == b"PAR1-m2"
+        assert not list(tmp_path.glob("*.part"))
+
+    def test_result_is_pathlike(self, mock_api, client, tmp_path):
+        mock_api.get("/series/btc-daily/export").mock(
+            return_value=httpx.Response(200, json=self._manifest([]))
+        )
+        _series_404(mock_api, "btc-daily")
+
+        result = client.exports.download_series(
+            "btc-daily", path=str(tmp_path), progress=False,
+        )
+        assert os.fspath(result) == str(tmp_path)
+        assert Path(result) == tmp_path
+
+    def test_concurrency_downloads_all_ready(self, mock_api, client, tmp_path):
+        ready = [f"m{i}" for i in range(4)]
+        mock_api.get("/series/btc-daily/export").mock(
+            return_value=httpx.Response(200, json=self._manifest(ready))
+        )
+        for mid in ready:
+            mock_api.get(f"{BUCKET_BASE}/history/{mid}-compact.parquet").mock(
+                return_value=httpx.Response(200, content=f"PAR1-{mid}".encode())
+            )
+        _series_404(mock_api, "btc-daily")
+
+        result = client.exports.download_series(
+            "btc-daily", path=str(tmp_path), progress=False, concurrency=4,
+        )
+        assert sorted(result.ready) == sorted(ready)
+        for mid in ready:
+            assert (tmp_path / f"history-{mid}-compact.parquet").exists()
+
+    def test_skips_existing_files(self, mock_api, client, tmp_path):
+        ready = ["m1", "m2"]
+        (tmp_path / "history-m1-compact.parquet").write_bytes(b"OLD")
+        mock_api.get("/series/btc-daily/export").mock(
+            return_value=httpx.Response(200, json=self._manifest(ready))
+        )
+        # Only m2 should be fetched. m1's bucket URL is deliberately NOT
+        # registered — if the SDK tried to fetch it, respx would raise.
+        m2_route = mock_api.get(f"{BUCKET_BASE}/history/m2-compact.parquet").mock(
+            return_value=httpx.Response(200, content=b"PAR1-m2")
+        )
+        _series_404(mock_api, "btc-daily")
+
+        result = client.exports.download_series(
+            "btc-daily", path=str(tmp_path), progress=False,
+        )
+
+        assert (tmp_path / "history-m1-compact.parquet").read_bytes() == b"OLD"
+        assert (tmp_path / "history-m2-compact.parquet").read_bytes() == b"PAR1-m2"
+        assert sorted(result.ready) == ["m1", "m2"]
+        assert m2_route.call_count == 1
+
+    def test_all_pending(self, mock_api, client, tmp_path):
+        manifest = {
+            "ready": [],
+            "pending": [
+                {"market_id": "m1", "status": "pending"},
+                {"market_id": "m2", "status": "in_progress"},
+            ],
+            "failed": [],
+            "events_charged": 0,
+        }
+        mock_api.get("/series/btc-daily/export").mock(
+            return_value=httpx.Response(200, json=manifest)
+        )
+        _series_404(mock_api, "btc-daily")
+
+        result = client.exports.download_series(
+            "btc-daily", path=str(tmp_path), progress=False,
+        )
+        assert result.ready == []
+        assert len(result.pending) == 2
+        assert result.events_charged == 0
+        assert not list(tmp_path.glob("*.parquet"))
+
+    def test_404_unknown_series(self, mock_api, client, tmp_path):
+        mock_api.get("/series/unknown/export").mock(
+            return_value=httpx.Response(
+                404, json={"error": {"code": "SERIES_NOT_FOUND", "message": "x"}},
+            )
+        )
+        with pytest.raises(NotFoundError):
+            client.exports.download_series("unknown", path=str(tmp_path), progress=False)
+
+    def test_404_data_not_available(self, mock_api, client, tmp_path):
         mock_api.get("/series/empty-window/export").mock(
             return_value=httpx.Response(
-                404,
-                json={"error": {"code": "NOT_FOUND", "message": "No markets in window"}},
+                404, json={"error": {"code": "DATA_NOT_AVAILABLE", "message": "no markets"}},
             )
         )
         with pytest.raises(NotFoundError):
@@ -174,28 +345,92 @@ class TestExportsResource:
                 path=str(tmp_path), progress=False,
             )
 
-    def test_series_download_skips_existing_files(self, mock_api, client, tmp_path):
-        """Resume behavior: a member already on disk is left alone."""
-        # Pre-populate one member with sentinel content (simulating partial
-        # progress from an earlier interrupted download).
-        (tmp_path / "history-m1-compact.parquet").write_bytes(b"OLD-ALREADY-ON-DISK")
 
-        buf = io.BytesIO()
-        with zipfile.ZipFile(buf, "w") as zf:
-            zf.writestr("history-m1-compact.parquet", b"WOULD-OVERWRITE")
-            zf.writestr("history-m2-compact.parquet", b"NEW-MEMBER")
-        zip_bytes = buf.getvalue()
+# ── Async mirrors ──────────────────────────────────────────────────
 
-        mock_api.get("/series/btc-daily/export").mock(
-            return_value=httpx.Response(200, content=zip_bytes)
+
+class TestAsyncExports:
+    @pytest.fixture
+    async def aclient(self):
+        c = AsyncMarketLens(api_key="mk_test_key", base_url=BASE_URL)
+        yield c
+        await c.close()
+
+    async def test_market_download_follows_302(self, mock_api, aclient, tmp_path):
+        bucket_url = f"{BUCKET_BASE}/history/m1-compact.parquet"
+        mock_api.get("/markets/m1/export").mock(
+            return_value=httpx.Response(302, headers={"Location": bucket_url})
         )
-        mock_api.get("/series/btc-daily").mock(
-            return_value=httpx.Response(404, json={"error": {"code": "NOT_FOUND", "message": "x"}})
-        )
+        mock_api.get(bucket_url).mock(return_value=httpx.Response(200, content=b"PAR1"))
+        _market_404(mock_api)
 
-        out = client.exports.download_series("btc-daily", path=str(tmp_path), progress=False)
-        # Pre-existing file untouched
-        assert (out / "history-m1-compact.parquet").read_bytes() == b"OLD-ALREADY-ON-DISK"
-        # Missing member written
-        assert (out / "history-m2-compact.parquet").read_bytes() == b"NEW-MEMBER"
-        assert not list(tmp_path.glob("*.part"))
+        out = await aclient.exports.download("m1", path=str(tmp_path), progress=False)
+        assert (out / "history-m1-compact.parquet").read_bytes() == b"PAR1"
+
+    async def test_market_download_409_raises_export_not_ready(self, mock_api, aclient, tmp_path):
+        mock_api.get("/markets/m1/export").mock(
+            return_value=httpx.Response(
+                409,
+                json={"error": {
+                    "code": "EXPORT_NOT_READY",
+                    "message": "Export not ready (status=failed): too many retries",
+                }},
+            )
+        )
+        with pytest.raises(ExportNotReadyError) as ei:
+            await aclient.exports.download("m1", path=str(tmp_path), progress=False)
+        assert ei.value.export_status == "failed"
+        assert ei.value.last_error == "too many retries"
+
+    async def test_series_download_parses_json(self, mock_api, aclient, tmp_path):
+        manifest = {
+            "ready": [
+                {"market_id": "m1",
+                 "url": f"{BUCKET_BASE}/history/m1-compact.parquet",
+                 "events": 100},
+            ],
+            "pending": [{"market_id": "m2", "status": "pending"}],
+            "failed": [],
+            "events_charged": 100,
+        }
+        mock_api.get("/series/s1/export").mock(
+            return_value=httpx.Response(200, json=manifest)
+        )
+        mock_api.get(f"{BUCKET_BASE}/history/m1-compact.parquet").mock(
+            return_value=httpx.Response(200, content=b"PAR1-m1")
+        )
+        _series_404(mock_api, "s1")
+
+        result = await aclient.exports.download_series(
+            "s1", path=str(tmp_path), progress=False,
+        )
+        assert result.ready == ["m1"]
+        assert len(result.pending) == 1
+        assert (tmp_path / "history-m1-compact.parquet").read_bytes() == b"PAR1-m1"
+
+    async def test_series_download_concurrency(self, mock_api, aclient, tmp_path):
+        ready = [f"m{i}" for i in range(4)]
+        manifest = {
+            "ready": [
+                {"market_id": mid,
+                 "url": f"{BUCKET_BASE}/history/{mid}-compact.parquet",
+                 "events": 100}
+                for mid in ready
+            ],
+            "pending": [], "failed": [], "events_charged": 400,
+        }
+        mock_api.get("/series/s1/export").mock(
+            return_value=httpx.Response(200, json=manifest)
+        )
+        for mid in ready:
+            mock_api.get(f"{BUCKET_BASE}/history/{mid}-compact.parquet").mock(
+                return_value=httpx.Response(200, content=f"P-{mid}".encode())
+            )
+        _series_404(mock_api, "s1")
+
+        result = await aclient.exports.download_series(
+            "s1", path=str(tmp_path), progress=False, concurrency=4,
+        )
+        assert sorted(result.ready) == sorted(ready)
+        for mid in ready:
+            assert (tmp_path / f"history-{mid}-compact.parquet").exists()

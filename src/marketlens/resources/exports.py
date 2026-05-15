@@ -1,18 +1,43 @@
 from __future__ import annotations
 
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
-
-from stream_unzip import async_stream_unzip, stream_unzip
 
 from marketlens._base import AsyncHTTPClient, SyncHTTPClient, _coerce_timestamp
 from marketlens._progress import make_reporter
 from marketlens.exceptions import NotFoundError
 
 
-def _extracted_name(raw: bytes | str) -> str:
-    """Decode stream-unzip's bytes name to a string."""
-    return raw.decode("utf-8") if isinstance(raw, bytes) else raw
+@dataclass(frozen=True)
+class SeriesPending:
+    market_id: str
+    status: str
+
+
+@dataclass(frozen=True)
+class SeriesFailed:
+    market_id: str
+    error: str
+
+
+@dataclass(frozen=True)
+class SeriesDownloadResult:
+    """Outcome of ``client.exports.download_series``.
+
+    Implements ``os.PathLike`` so callers can pass the result directly anywhere
+    a directory is expected (e.g. ``client.backtest(..., data_dir=result)``).
+    """
+    data_dir: Path
+    ready: list[str] = field(default_factory=list)
+    pending: list[SeriesPending] = field(default_factory=list)
+    failed: list[SeriesFailed] = field(default_factory=list)
+    events_charged: int = 0
+
+    def __fspath__(self) -> str:
+        return str(self.data_dir)
 
 
 class Exports:
@@ -46,6 +71,10 @@ class Exports:
 
         Returns:
             Path to the data directory.
+
+        Raises:
+            ExportNotReadyError: The pre-built parquet for this market is not
+                on the bucket yet. Try again later or pick a different market.
         """
         data_dir = Path(path)
         data_dir.mkdir(parents=True, exist_ok=True)
@@ -56,7 +85,7 @@ class Exports:
         with make_reporter(enabled=progress, n_markets=0) as reporter:
             dest = data_dir / f"history-{market_id}{suffix}.parquet"
             if not dest.exists():
-                self._client.download(
+                self._client.download_via_redirect(
                     f"/markets/{market_id}/export", dest,
                     params=params,
                     reporter=reporter, label=f"market {market_id[:8]}",
@@ -85,11 +114,13 @@ class Exports:
         path: str | Path = ".",
         progress: bool = True,
         coalesce: bool = True,
-    ) -> Path:
+        concurrency: int = 1,
+    ) -> SeriesDownloadResult:
         """Download all data needed to backtest a series.
 
-        Downloads order book history for every market in the series and,
-        for crypto series, tick-level reference trades for the underlying.
+        The server returns a JSON manifest partitioning markets by state. Ready
+        markets have a presigned URL we fetch; ``pending`` and ``failed`` are
+        surfaced on the result for caller inspection.
 
         Args:
             series_id: Series slug or UUID.
@@ -98,9 +129,13 @@ class Exports:
             path: Directory to save files in.
             progress: Show a rich progress bar. Auto-disables in non-TTY.
             coalesce: See :meth:`download`. Default True.
+            concurrency: Number of concurrent per-market downloads. Default 1.
 
         Returns:
-            Path to the data directory.
+            ``SeriesDownloadResult`` with ``data_dir``, ``ready``, ``pending``,
+            ``failed``, and ``events_charged``. The result is ``os.PathLike``
+            (its ``__fspath__`` returns the data directory), so it can be
+            passed directly to ``client.backtest(..., data_dir=result)``.
         """
         data_dir = Path(path)
         data_dir.mkdir(parents=True, exist_ok=True)
@@ -113,37 +148,29 @@ class Exports:
         if coalesce:
             params["coalesce"] = "true"
 
-        with make_reporter(enabled=progress, n_markets=0) as reporter:
-            chunks = self._client.stream_bytes(
-                f"/series/{series_id}/export", params=params,
-                reporter=reporter, label=f"series {series_id}",
-            )
-            # Stream-extract: each parquet lands at its final path as soon as
-            # its bytes finish flowing. Already-extracted files are skipped so
-            # a partial-then-resumed download picks up where it left off.
-            # In-progress writes go through a ``.part`` file and are renamed
-            # atomically — so a crash mid-member never leaves a half-written
-            # final file.
-            for raw_name, _size, member_chunks in stream_unzip(chunks):
-                name = _extracted_name(raw_name)
-                final = data_dir / name
-                if final.exists():
-                    # stream-unzip requires each member's chunks to be drained
-                    # before advancing to the next member.
-                    for _ in member_chunks:
-                        pass
-                    continue
-                tmp = data_dir / (name + ".part")
-                tmp.parent.mkdir(parents=True, exist_ok=True)
-                try:
-                    with tmp.open("wb") as f:
-                        for chunk in member_chunks:
-                            f.write(chunk)
-                    tmp.replace(final)
-                except BaseException:
-                    if tmp.exists():
-                        tmp.unlink()
-                    raise
+        body = self._client.get(f"/series/{series_id}/export", params=params)
+        suffix = "-compact" if coalesce else ""
+        pending = [SeriesPending(e["market_id"], e["status"]) for e in body.get("pending", [])]
+        failed = [SeriesFailed(e["market_id"], e["error"]) for e in body.get("failed", [])]
+        events_charged = int(body.get("events_charged", 0))
+        targets = [(e["market_id"], e["url"]) for e in body.get("ready", [])]
+
+        def _one(market_id: str, url: str, reporter: Any) -> str:
+            dest = data_dir / f"history-{market_id}{suffix}.parquet"
+            if not dest.exists():
+                self._client.fetch_presigned(
+                    url, dest,
+                    reporter=reporter, label=f"market {market_id[:8]}",
+                )
+            return market_id
+
+        with make_reporter(enabled=progress, n_markets=len(targets)) as reporter:
+            if concurrency <= 1 or len(targets) <= 1:
+                ready = [_one(m, u, reporter) for m, u in targets]
+            else:
+                with ThreadPoolExecutor(max_workers=concurrency) as ex:
+                    futures = [ex.submit(_one, m, u, reporter) for m, u in targets]
+                    ready = [f.result() for f in futures]
 
             if self._series is not None:
                 try:
@@ -167,7 +194,13 @@ class Exports:
                 except Exception:
                     pass
 
-        return data_dir
+        return SeriesDownloadResult(
+            data_dir=data_dir,
+            ready=ready,
+            pending=pending,
+            failed=failed,
+            events_charged=events_charged,
+        )
 
     def _ensure_reference(
         self, data_dir: Path, symbol: str, after: int, before: int,
@@ -218,7 +251,7 @@ class AsyncExports:
         with make_reporter(enabled=progress, n_markets=0) as reporter:
             dest = data_dir / f"history-{market_id}{suffix}.parquet"
             if not dest.exists():
-                await self._client.download(
+                await self._client.download_via_redirect(
                     f"/markets/{market_id}/export", dest,
                     params=params,
                     reporter=reporter, label=f"market {market_id[:8]}",
@@ -247,8 +280,9 @@ class AsyncExports:
         path: str | Path = ".",
         progress: bool = True,
         coalesce: bool = True,
-    ) -> Path:
-        """Download all data needed to backtest a series."""
+        concurrency: int = 1,
+    ) -> SeriesDownloadResult:
+        """Async equivalent of :meth:`Exports.download_series`."""
         data_dir = Path(path)
         data_dir.mkdir(parents=True, exist_ok=True)
 
@@ -260,29 +294,30 @@ class AsyncExports:
         if coalesce:
             params["coalesce"] = "true"
 
-        with make_reporter(enabled=progress, n_markets=0) as reporter:
-            chunks = self._client.stream_bytes(
-                f"/series/{series_id}/export", params=params,
-                reporter=reporter, label=f"series {series_id}",
-            )
-            async for raw_name, _size, member_chunks in async_stream_unzip(chunks):
-                name = _extracted_name(raw_name)
-                final = data_dir / name
-                if final.exists():
-                    async for _ in member_chunks:
-                        pass
-                    continue
-                tmp = data_dir / (name + ".part")
-                tmp.parent.mkdir(parents=True, exist_ok=True)
-                try:
-                    with tmp.open("wb") as f:
-                        async for chunk in member_chunks:
-                            f.write(chunk)
-                    tmp.replace(final)
-                except BaseException:
-                    if tmp.exists():
-                        tmp.unlink()
-                    raise
+        body = await self._client.get(f"/series/{series_id}/export", params=params)
+        suffix = "-compact" if coalesce else ""
+        pending = [SeriesPending(e["market_id"], e["status"]) for e in body.get("pending", [])]
+        failed = [SeriesFailed(e["market_id"], e["error"]) for e in body.get("failed", [])]
+        events_charged = int(body.get("events_charged", 0))
+        targets = [(e["market_id"], e["url"]) for e in body.get("ready", [])]
+
+        sem = asyncio.Semaphore(max(1, concurrency))
+
+        async def _one(market_id: str, url: str, reporter: Any) -> str:
+            async with sem:
+                dest = data_dir / f"history-{market_id}{suffix}.parquet"
+                if not dest.exists():
+                    await self._client.fetch_presigned(
+                        url, dest,
+                        reporter=reporter, label=f"market {market_id[:8]}",
+                    )
+                return market_id
+
+        with make_reporter(enabled=progress, n_markets=len(targets)) as reporter:
+            if targets:
+                ready = list(await asyncio.gather(*[_one(m, u, reporter) for m, u in targets]))
+            else:
+                ready = []
 
             if self._series is not None:
                 try:
@@ -306,7 +341,13 @@ class AsyncExports:
                 except Exception:
                     pass
 
-        return data_dir
+        return SeriesDownloadResult(
+            data_dir=data_dir,
+            ready=ready,
+            pending=pending,
+            failed=failed,
+            events_charged=events_charged,
+        )
 
     async def _ensure_reference(
         self, data_dir: Path, symbol: str, after: int, before: int,

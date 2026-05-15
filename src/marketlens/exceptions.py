@@ -39,6 +39,22 @@ class RateLimitError(APIError):
         self.retry_after = retry_after
 
 
+class ExportNotReadyError(APIError):
+    """409 EXPORT_NOT_READY — pre-built parquet is not on the bucket yet."""
+
+    def __init__(
+        self,
+        status_code: int,
+        code: str,
+        message: str,
+        export_status: str | None = None,
+        last_error: str | None = None,
+    ) -> None:
+        super().__init__(status_code, code, message)
+        self.export_status = export_status
+        self.last_error = last_error
+
+
 class ConnectionError(MarketLensError):
     """Network connection failure."""
 
@@ -67,4 +83,5 @@ _CODE_TO_EXCEPTION: dict[str, type[APIError]] = {
     "RANGE_TOO_LARGE": InvalidParameterError,
     "CURSOR_EXPIRED": InvalidParameterError,
     "RATE_LIMITED": RateLimitError,
+    "EXPORT_NOT_READY": ExportNotReadyError,
 }

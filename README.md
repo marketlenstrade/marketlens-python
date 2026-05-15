@@ -165,22 +165,25 @@ Download full history as Parquet — snapshots, deltas, trades, and reference pr
 # Single market (includes reference trades for the underlying)
 data_dir = client.exports.download(market_id)
 
-# All markets in a series
-data_dir = client.exports.download_series(
+# All markets in a series — returns a result with ready / pending / failed
+result = client.exports.download_series(
     "btc-up-or-down-5m", after="2026-03-01", before="2026-03-08")
+print(result.ready, result.pending, result.failed, result.events_charged)
 ```
+
+Markets are pre-built server-side. If a market isn't ready yet, `download(market_id)` raises `ExportNotReadyError`; `download_series(...)` returns it under `result.pending` and skips the file.
 
 ### Offline backtesting
 
 Download once, run many backtests without API calls:
 
 ```python
-data_dir = client.exports.download_series(
+result = client.exports.download_series(
     "btc-up-or-down-5m", after="2026-03-01", before="2026-03-08")
 
-result = client.backtest(
+backtest = client.backtest(
     strategy, "btc-up-or-down-5m",
-    data_dir=data_dir,
+    data_dir=result,                      # PathLike — passes straight through
     after="2026-03-01", before="2026-03-08",
     initial_cash="10000",
 )
