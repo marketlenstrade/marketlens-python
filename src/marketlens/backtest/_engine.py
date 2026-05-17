@@ -263,8 +263,38 @@ class _EngineCore:
         self._targets.setdefault("resolved_files", {})[market_id] = chosen.name
         return chosen
 
-    def _with_reporter(self, n_markets: int):
-        """Context manager that installs a progress reporter for the run."""
+    def _maybe_autodownload(
+        self,
+        client: Any,
+        id: str | list[str],
+        *,
+        after: Any,
+        before: Any,
+        data_dir: str | None,
+    ) -> None:
+        """Fetch the bulk export when ``data_dir`` is set but empty.
+
+        Called after each run-path's resolution log so the user sees:
+        "Resolving markets in '...'" → "Downloading M/N" → "Backtesting M/N".
+        """
+        if data_dir is None:
+            return
+        path = Path(data_dir)
+        if path.exists() and any(path.glob("history-*.parquet")):
+            return
+        client._ensure_exports_downloaded(
+            id, data_dir,
+            after=after, before=before,
+            coalesce=self._resolve_compact_mode(),
+            progress=self._config.progress,
+        )
+
+    def _with_reporter(self, n_markets: int, *, replay: bool = False):
+        """Context manager that installs a progress reporter for the run.
+
+        ``replay=True`` tells the reporter to skip the "Fetching" bar
+        since the data is already on disk and no network fetch happens.
+        """
         engine = self
         config = self._config
 
@@ -274,6 +304,8 @@ class _EngineCore:
                     enabled=config.progress, n_markets=n_markets,
                 )
                 self_inner.reporter.__enter__()
+                if replay:
+                    self_inner.reporter.set_mode("replay")
                 self_inner.prev = engine._reporter
                 engine._reporter = self_inner.reporter
                 return self_inner.reporter
@@ -307,12 +339,21 @@ class _EngineCore:
     def submit_order(
         self,
         side: OrderSide,
-        size: str,
+        size: str | float | int | Decimal,
         *,
         market_id: str | None = None,
-        limit_price: str | None = None,
+        limit_price: str | float | int | Decimal | None = None,
         cancel_after: int | None = None,
     ) -> Order:
+        # Accept any numeric input from the strategy (float/int/Decimal) and
+        # normalize to the decimal-string form the rest of the engine and the
+        # Order dataclass expect. ``str(float)`` already round-trips cleanly
+        # in CPython (``str(0.1) == "0.1"``).
+        if not isinstance(size, str):
+            size = str(size)
+        if limit_price is not None and not isinstance(limit_price, str):
+            limit_price = str(limit_price)
+
         target = market_id or self._current_market.id  # type: ignore[union-attr]
         self._order_counter += 1
         order_type = OrderType.LIMIT if limit_price is not None else OrderType.MARKET
@@ -911,12 +952,15 @@ class BacktestEngine(_EngineCore):
                 )
             return self._make_market_stream(client, markets, after=after, before=before)
 
+        replay = data_dir is not None
+
         if isinstance(id, list):
             _prep_status(f"Resolving {len(id)} target(s)…")
             streams, n_markets, _ = self._resolve_list(
                 client, id, after=after, before=before, data_dir=data_dir, **params,
             )
-            with self._with_reporter(n_markets):
+            self._maybe_autodownload(client, id, after=after, before=before, data_dir=data_dir)
+            with self._with_reporter(n_markets, replay=replay):
                 self._run_merged(streams)
             return self._build_result()
 
@@ -925,7 +969,8 @@ class BacktestEngine(_EngineCore):
             market = client.markets.get(id)
             self._market_series[market.id] = market.series_id or market.id
             self._register_market(market)
-            with self._with_reporter(1):
+            self._maybe_autodownload(client, id, after=after, before=before, data_dir=data_dir)
+            with self._with_reporter(1, replay=replay):
                 self._run_merged([_stream([market])])
             return self._build_result()
         except NotFoundError:
@@ -945,7 +990,8 @@ class BacktestEngine(_EngineCore):
                 )
                 n_markets = sum(len(lane) for lane in lanes)
                 streams = [_stream(lane) for lane in lanes]
-                with self._with_reporter(n_markets):
+                self._maybe_autodownload(client, id, after=after, before=before, data_dir=data_dir)
+                with self._with_reporter(n_markets, replay=replay):
                     self._run_merged(streams)
             elif series.is_rolling:
                 _prep_status(f"Resolving markets in '{series.title}'…")
@@ -954,7 +1000,8 @@ class BacktestEngine(_EngineCore):
                     self._market_series[m.id] = series.id
                     self._market_group[m.id] = series.id
                     self._register_market(m)
-                with self._with_reporter(len(markets)):
+                self._maybe_autodownload(client, id, after=after, before=before, data_dir=data_dir)
+                with self._with_reporter(len(markets), replay=replay):
                     self._run_merged([_stream(markets)])
             else:
                 raise ValueError(
@@ -967,7 +1014,8 @@ class BacktestEngine(_EngineCore):
         if found:
             self._market_series[found[0].id] = found[0].series_id or found[0].id
             self._register_market(found[0])
-            with self._with_reporter(1):
+            self._maybe_autodownload(client, id, after=after, before=before, data_dir=data_dir)
+            with self._with_reporter(1, replay=replay):
                 self._run_merged([_stream([found[0]])])
             return self._build_result()
 

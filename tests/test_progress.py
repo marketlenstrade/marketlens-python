@@ -93,6 +93,42 @@ class TestRichReporter:
         assert r._fetched_events == 1500
         assert r._consumed_events == 900
 
+    def test_replay_mode_skips_fetching_task(self):
+        """In replay mode the data is on disk so the Fetching bar would
+        sit at 0/N forever; it must not be created at all."""
+        r = _RichReporter(n_markets=2)
+        r.set_mode("replay")
+        with r:
+            r.market_started("m1", "m1")
+            assert r._fetch_task is None, "Fetching bar must not exist in replay mode"
+            assert r._consume_task is not None, "Backtesting bar must exist"
+            r.market_finished("m1")
+            assert r._consumed_markets == 1
+
+    def test_batch_download_suppresses_per_file_bars(self):
+        """When an aggregate batch bar is active, per-file byte bars must
+        not be created (they'd thrash the screen)."""
+        r = _RichReporter(n_markets=3)
+        with r:
+            r.batch_download_started("Downloading exports", 3)
+            assert r._batch_task is not None
+            # Per-file calls become no-ops.
+            r.download_started("market m1", 1024)
+            assert r._download_task is None
+            r.download_progress(512)  # also a no-op, must not raise
+            r.batch_download_advance()
+            r.batch_download_advance()
+            r.batch_download_advance()
+
+    def test_lazy_progress_entry(self):
+        """Progress container must not enter until the first task is added,
+        so we don't show an empty bar during the network round-trip."""
+        r = _RichReporter(n_markets=1)
+        with r:
+            assert r._started is False
+            r.batch_download_started("Downloading exports", 1)
+            assert r._started is True
+
 
 class TestEngineIntegration:
     """End-to-end: confirm the prefetch+reporter wiring doesn't deadlock or

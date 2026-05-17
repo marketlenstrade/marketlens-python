@@ -492,6 +492,38 @@ class TestStrategyContext:
         with pytest.raises(ValueError, match="Limit price must be in"):
             client.backtest(BadLimit(), "m1", after=1000, before=6000, initial_cash="10000.0000", latency_ms=0, limit_fill_rate=1.0)
 
+    def test_buy_accepts_numeric_size_and_limit_price(self, mock_api, client):
+        """size/limit_price accept float/int/Decimal so strategies don't have
+        to wrap arithmetic in ``str(...)``. The engine normalizes to its
+        canonical decimal-string form internally."""
+        from decimal import Decimal as D
+
+        m1 = _market_with({"id": "m1", "open_time": 1000, "close_time": 6000})
+        captured: list[Any] = []
+
+        class MixedTypes(Strategy):
+            def on_book(self, ctx, market, book):
+                if ctx.open_orders:
+                    return
+                # float size, no limit (market order)
+                o1 = ctx.buy_yes(size=12.5)
+                # int size + float limit_price (limit order)
+                o2 = ctx.buy_yes(size=7, limit_price=0.42)
+                # Decimal size + Decimal limit_price
+                o3 = ctx.buy_yes(size=D("3.25"), limit_price=D("0.55"))
+                captured.extend([o1, o2, o3])
+
+        mock_api.get("/markets/m1").mock(return_value=httpx.Response(200, json=m1))
+        mock_api.get("/markets/m1/orderbook/history").mock(
+            return_value=httpx.Response(200, json=_history_response(SNAPSHOT_1)))
+        client.backtest(
+            MixedTypes(), "m1", after=1000, before=6000,
+            initial_cash="10000.0000", latency_ms=0, limit_fill_rate=1.0,
+        )
+
+        assert [o.size for o in captured] == ["12.5", "7", "3.25"]
+        assert [o.limit_price for o in captured] == [None, "0.42", "0.55"]
+
     def test_cancel_order(self, mock_api, client):
         """Cancelling a limit order should set status to CANCELLED."""
         m1 = _market_with({"id": "m1", "open_time": 1000, "close_time": 6000})
@@ -1999,3 +2031,117 @@ class TestStreamingEqualsBulk:
             f"  streaming: {s_stream}\n"
             f"  bulk:      {s_bulk}"
         )
+
+    def test_data_dir_missing_triggers_auto_download(self, mock_api, tmp_path):
+        """When ``data_dir`` doesn't exist, ``backtest()`` creates it and
+        downloads the export before replaying. Re-running with the populated
+        directory must skip the download entirely."""
+        T_OPEN, T_CLOSE = 1_776_218_400_000, 1_776_218_700_000
+        AFTER_ISO = "2026-04-15T02:00:00Z"
+        BEFORE_ISO = "2026-04-15T02:05:00Z"
+
+        market = {
+            **SAMPLE_MARKET,
+            "id": "mkt-1", "platform": "polymarket",
+            "series_id": "btc-rolling",
+            "open_time": T_OPEN, "close_time": T_CLOSE,
+            "category": "Crypto",
+        }
+        rolling_series = {
+            **SAMPLE_SERIES,
+            "id": "btc-rolling", "platform_series_id": "btc-up-or-down-5m",
+            "is_rolling": True, "title": "BTC Up or Down 5m",
+        }
+
+        events = [
+            {"event_type": "snapshot", "t": T_OPEN + 10, "is_reseed": False,
+             "price": None, "size": None, "side": None, "trade_id": None,
+             "bids": json.dumps([{"price": "0.4500", "size": "100.0000"}]),
+             "asks": json.dumps([{"price": "0.4700", "size": "100.0000"}])},
+            {"event_type": "trade", "t": T_OPEN + 200,
+             "price": 0.46, "size": 5.0, "side": "BUY", "trade_id": "tr1",
+             "is_reseed": None, "bids": None, "asks": None},
+        ]
+
+        # ── Pre-build the parquet bytes the bucket will serve. ──────────
+        parquet_path = tmp_path / "_seed.parquet"
+        self._write_parquet(parquet_path, events)
+        parquet_bytes = parquet_path.read_bytes()
+        parquet_path.unlink()
+
+        # ── SDK resolution mocks (same as the streaming-vs-bulk test) ───
+        mock_api.get("/series/btc-up-or-down-5m").mock(
+            return_value=httpx.Response(200, json=rolling_series)
+        )
+        mock_api.get("/markets/btc-up-or-down-5m").mock(
+            return_value=httpx.Response(404, json={
+                "error": {"code": "MARKET_NOT_FOUND", "message": "Not found"},
+            })
+        )
+        mock_api.get("/markets").mock(
+            return_value=httpx.Response(200, json={
+                "data": [market],
+                "meta": {"cursor": None, "has_more": False},
+            })
+        )
+
+        # ── Export mocks: market-export 404 → series-export manifest. ───
+        mock_api.get("/markets/btc-up-or-down-5m/export").mock(
+            return_value=httpx.Response(404, json={
+                "error": {"code": "MARKET_NOT_FOUND", "message": "Not found"},
+            })
+        )
+        bucket_url = "https://bucket.example.com/marketlens/history/mkt-1-compact.parquet"
+        series_export = mock_api.get("/series/btc-up-or-down-5m/export").mock(
+            return_value=httpx.Response(200, json={
+                "ready": [{"market_id": "mkt-1", "url": bucket_url, "events": len(events)}],
+                "pending": [],
+                "failed": [],
+                "events_charged": len(events),
+            })
+        )
+        bucket = mock_api.get(bucket_url).mock(
+            return_value=httpx.Response(200, content=parquet_bytes)
+        )
+
+        class Noop(Strategy):
+            def on_trade(self, ctx, market, book, trade):  # noqa: D401
+                pass
+
+        data_dir = tmp_path / "auto"
+        assert not data_dir.exists()
+
+        client = MarketLens(api_key="mk_test", base_url=BASE_URL)
+        try:
+            client.backtest(
+                strategy=Noop(),
+                id="btc-up-or-down-5m",
+                initial_cash="10000",
+                after=AFTER_ISO, before=BEFORE_ISO,
+                data_dir=str(data_dir),
+                progress=False,
+            )
+
+            assert data_dir.is_dir(), "backtest must create the data_dir"
+            assert (data_dir / "history-mkt-1-compact.parquet").read_bytes() == parquet_bytes
+            assert series_export.call_count == 1
+            assert bucket.call_count == 1
+            # after/before are forwarded as ms-epoch query params, not lost
+            # somewhere in the auto-download dispatch.
+            export_qs = series_export.calls[0].request.url.params
+            assert export_qs.get("after") == str(1_776_218_400_000)
+            assert export_qs.get("before") == str(1_776_218_700_000)
+
+            # Re-run with the dir now populated: no further export traffic.
+            client.backtest(
+                strategy=Noop(),
+                id="btc-up-or-down-5m",
+                initial_cash="10000",
+                after=AFTER_ISO, before=BEFORE_ISO,
+                data_dir=str(data_dir),
+                progress=False,
+            )
+            assert series_export.call_count == 1, "second run must not re-download"
+            assert bucket.call_count == 1
+        finally:
+            client.close()

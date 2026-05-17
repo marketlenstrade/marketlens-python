@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from abc import ABC
+from decimal import Decimal
 from typing import Any
 
 from marketlens.backtest._types import (
@@ -51,10 +52,10 @@ class StrategyContext:
 
     def buy_yes(
         self,
-        size: str,
+        size: str | float | int | Decimal,
         *,
         market_id: str | None = None,
-        limit_price: str | None = None,
+        limit_price: str | float | int | Decimal | None = None,
         cancel_after: int | None = None,
     ) -> Order:
         return self._engine.submit_order(
@@ -64,10 +65,10 @@ class StrategyContext:
 
     def buy_no(
         self,
-        size: str,
+        size: str | float | int | Decimal,
         *,
         market_id: str | None = None,
-        limit_price: str | None = None,
+        limit_price: str | float | int | Decimal | None = None,
         cancel_after: int | None = None,
     ) -> Order:
         return self._engine.submit_order(
@@ -77,10 +78,10 @@ class StrategyContext:
 
     def sell_yes(
         self,
-        size: str,
+        size: str | float | int | Decimal,
         *,
         market_id: str | None = None,
-        limit_price: str | None = None,
+        limit_price: str | float | int | Decimal | None = None,
         cancel_after: int | None = None,
     ) -> Order:
         return self._engine.submit_order(
@@ -90,10 +91,10 @@ class StrategyContext:
 
     def sell_no(
         self,
-        size: str,
+        size: str | float | int | Decimal,
         *,
         market_id: str | None = None,
-        limit_price: str | None = None,
+        limit_price: str | float | int | Decimal | None = None,
         cancel_after: int | None = None,
     ) -> Order:
         return self._engine.submit_order(

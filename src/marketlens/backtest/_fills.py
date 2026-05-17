@@ -195,8 +195,14 @@ class FillSimulator:
                 fill_price -= slip  # sells fill lower
             fill_price = max(_ZERO, min(_ONE, fill_price))
 
+        # Quantize first, then bail if the rounded size is zero — a tiny
+        # last sliver below 1e-4 would otherwise emit ``size="0.0000"`` and
+        # break the engine's avg-fill-price division.
+        fill_size_q = total_filled.quantize(_FOUR)
+        if fill_size_q <= _ZERO:
+            return None
         fill_price_str = str(fill_price.quantize(_FOUR))
-        fill_size_str = str(total_filled.quantize(_FOUR))
+        fill_size_str = str(fill_size_q)
         fee = self._fee_model.calculate(fill_price, total_filled, is_maker=False)
 
         return Fill(
@@ -280,8 +286,12 @@ class FillSimulator:
         else:
             fill_price = yes_vwap
 
+        # Same sub-1e-4-sliver guard as the market path above.
+        fill_size_q = total_filled.quantize(_FOUR)
+        if fill_size_q <= _ZERO:
+            return None
         fill_price_str = str(fill_price.quantize(_FOUR))
-        fill_size_str = str(total_filled.quantize(_FOUR))
+        fill_size_str = str(fill_size_q)
         fee = self._fee_model.calculate(fill_price, total_filled, is_maker=False)
 
         return Fill(

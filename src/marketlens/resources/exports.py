@@ -50,7 +50,7 @@ class Exports:
         self,
         market_id: str,
         *,
-        path: str | Path = ".",
+        data_dir: str | Path = ".",
         progress: bool = True,
         coalesce: bool = True,
     ) -> Path:
@@ -61,10 +61,12 @@ class Exports:
 
         Args:
             market_id: Market UUID.
-            path: Directory to save files in.
+            data_dir: Directory to save files in. Created if missing. Pass
+                the same directory to ``client.backtest(data_dir=...)`` to
+                replay against it.
             progress: Show a rich progress bar. Auto-disables in non-TTY.
             coalesce: When True (default), download the trade-aligned compact
-                variant — ~4× smaller, book exact at every trade and snapshot.
+                variant, ~4x smaller, book exact at every trade and snapshot.
                 Set False for the full firehose when your strategy needs every
                 inter-trade delta (e.g. ``queue_position=True``). The two
                 variants are cached on disk separately and can coexist.
@@ -76,7 +78,7 @@ class Exports:
             ExportNotReadyError: The pre-built parquet for this market is not
                 on the bucket yet. Try again later or pick a different market.
         """
-        data_dir = Path(path)
+        data_dir = Path(data_dir)
         data_dir.mkdir(parents=True, exist_ok=True)
 
         suffix = "-compact" if coalesce else ""
@@ -111,7 +113,7 @@ class Exports:
         *,
         after: Any = None,
         before: Any = None,
-        path: str | Path = ".",
+        data_dir: str | Path = ".",
         progress: bool = True,
         coalesce: bool = True,
         concurrency: int = 1,
@@ -126,7 +128,9 @@ class Exports:
             series_id: Series slug or UUID.
             after: Start time filter (ms epoch or datetime).
             before: End time filter (ms epoch or datetime).
-            path: Directory to save files in.
+            data_dir: Directory to save files in. Created if missing. Pass
+                the same directory to ``client.backtest(data_dir=...)`` to
+                replay against it.
             progress: Show a rich progress bar. Auto-disables in non-TTY.
             coalesce: See :meth:`download`. Default True.
             concurrency: Number of concurrent per-market downloads. Default 1.
@@ -137,7 +141,7 @@ class Exports:
             (its ``__fspath__`` returns the data directory), so it can be
             passed directly to ``client.backtest(..., data_dir=result)``.
         """
-        data_dir = Path(path)
+        data_dir = Path(data_dir)
         data_dir.mkdir(parents=True, exist_ok=True)
 
         params: dict[str, Any] = {}
@@ -162,9 +166,12 @@ class Exports:
                     url, dest,
                     reporter=reporter, label=f"market {market_id[:8]}",
                 )
+            reporter.batch_download_advance()
             return market_id
 
         with make_reporter(enabled=progress, n_markets=len(targets)) as reporter:
+            if targets:
+                reporter.batch_download_started("Downloading", len(targets))
             if concurrency <= 1 or len(targets) <= 1:
                 ready = [_one(m, u, reporter) for m, u in targets]
             else:
@@ -234,7 +241,7 @@ class AsyncExports:
         self,
         market_id: str,
         *,
-        path: str | Path = ".",
+        data_dir: str | Path = ".",
         progress: bool = True,
         coalesce: bool = True,
     ) -> Path:
@@ -242,7 +249,7 @@ class AsyncExports:
 
         See :meth:`Exports.download` for argument semantics.
         """
-        data_dir = Path(path)
+        data_dir = Path(data_dir)
         data_dir.mkdir(parents=True, exist_ok=True)
 
         suffix = "-compact" if coalesce else ""
@@ -277,13 +284,13 @@ class AsyncExports:
         *,
         after: Any = None,
         before: Any = None,
-        path: str | Path = ".",
+        data_dir: str | Path = ".",
         progress: bool = True,
         coalesce: bool = True,
         concurrency: int = 1,
     ) -> SeriesDownloadResult:
         """Async equivalent of :meth:`Exports.download_series`."""
-        data_dir = Path(path)
+        data_dir = Path(data_dir)
         data_dir.mkdir(parents=True, exist_ok=True)
 
         params: dict[str, Any] = {}
@@ -311,10 +318,12 @@ class AsyncExports:
                         url, dest,
                         reporter=reporter, label=f"market {market_id[:8]}",
                     )
+                reporter.batch_download_advance()
                 return market_id
 
         with make_reporter(enabled=progress, n_markets=len(targets)) as reporter:
             if targets:
+                reporter.batch_download_started("Downloading", len(targets))
                 ready = list(await asyncio.gather(*[_one(m, u, reporter) for m, u in targets]))
             else:
                 ready = []

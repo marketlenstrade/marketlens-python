@@ -39,6 +39,9 @@ class _ProgressReporter(Protocol):
     def download_progress(self, n_bytes: int) -> None: ...
     def download_finished(self) -> None: ...
     def status(self, message: str) -> None: ...
+    def set_mode(self, mode: str) -> None: ...
+    def batch_download_started(self, label: str, total: int) -> None: ...
+    def batch_download_advance(self) -> None: ...
 
 
 class _NullReporter:
@@ -59,20 +62,24 @@ class _NullReporter:
     def download_progress(self, n_bytes: int) -> None: pass
     def download_finished(self) -> None: pass
     def status(self, message: str) -> None: pass
+    def set_mode(self, mode: str) -> None: pass
+    def batch_download_started(self, label: str, total: int) -> None: pass
+    def batch_download_advance(self) -> None: pass
 
 
 class _RichReporter:
     """Multi-bar reporter backed by rich.progress.Progress.
 
     Bars are denominated in markets:
-      - "Fetching"     — markets whose data has been fully fetched / N
+      - "Downloading"  — markets whose data has been pulled / N
+                         (skipped in ``replay`` mode where data is on disk;
+                         also drives the bulk-export aggregate bar)
       - "Backtesting"  — markets whose events have been fully consumed / N
-      - "Downloading {label}" — one-off byte/event download bars.
+      - per-file byte bar — single-file download when no aggregate is set.
 
-    Markets is the unit because the count is known instantly after
-    resolution (no per-market HTTP) and is consistent across every
-    backtest shape. Single-market runs go 0/1 → 1/1; multi-market
-    runs are granular by market.
+    The underlying ``Progress`` container is entered lazily on first
+    task creation so the user doesn't see an empty bar during the
+    HTTP round-trip that precedes the first byte.
     """
 
     def __init__(self, *, n_markets: int) -> None:
@@ -96,6 +103,8 @@ class _RichReporter:
             console=Console(stderr=True),
             transient=False,
         )
+        self._started = False
+        self._mode = "stream"
         self._fetched_markets = 0
         self._consumed_markets = 0
         self._fetched_events = 0
@@ -103,25 +112,37 @@ class _RichReporter:
         self._fetch_task: int | None = None
         self._consume_task: int | None = None
         self._download_task: int | None = None
+        self._batch_task: int | None = None
 
     def __enter__(self) -> "_RichReporter":
-        self._progress.__enter__()
         return self
 
     def __exit__(self, *args: object) -> None:
-        self._progress.__exit__(*args)
+        if self._started:
+            self._progress.__exit__(*args)
+
+    def _start(self) -> None:
+        if not self._started:
+            self._progress.__enter__()
+            self._started = True
+
+    def set_mode(self, mode: str) -> None:
+        self._mode = mode
 
     def _ensure_event_tasks(self) -> None:
-        if self._fetch_task is None:
+        if self._consume_task is not None:
+            return
+        self._start()
+        if self._mode != "replay":
             self._fetch_task = self._progress.add_task(
-                "Fetching", total=self._n_markets,
+                "Downloading", total=self._n_markets,
             )
-            self._consume_task = self._progress.add_task(
-                "Backtesting", total=self._n_markets,
-            )
+        self._consume_task = self._progress.add_task(
+            "Backtesting", total=self._n_markets,
+        )
 
     def fetched(self, market_id: str, n: int) -> None:
-        # Tally only — bars advance on ``market_fetch_done`` / ``market_finished``.
+        # Tally only; bars advance on ``market_fetch_done`` / ``market_finished``.
         self._fetched_events += n
 
     def consumed(self, market_id: str, n: int) -> None:
@@ -133,9 +154,10 @@ class _RichReporter:
     def market_fetch_done(self, market_id: str) -> None:
         self._ensure_event_tasks()
         self._fetched_markets += 1
-        self._progress.update(
-            self._fetch_task, completed=self._fetched_markets,
-        )
+        if self._fetch_task is not None:
+            self._progress.update(
+                self._fetch_task, completed=self._fetched_markets,
+            )
 
     def market_finished(self, market_id: str) -> None:
         self._ensure_event_tasks()
@@ -144,7 +166,22 @@ class _RichReporter:
             self._consume_task, completed=self._consumed_markets,
         )
 
+    def batch_download_started(self, label: str, total: int) -> None:
+        if total <= 0:
+            return
+        self._start()
+        self._batch_task = self._progress.add_task(label, total=total)
+
+    def batch_download_advance(self) -> None:
+        if self._batch_task is not None:
+            self._progress.advance(self._batch_task, 1)
+
     def download_started(self, label: str, total_bytes: int | None) -> None:
+        # When an aggregate batch bar is active, per-file byte bars would
+        # just churn underneath it; suppress them.
+        if self._batch_task is not None:
+            return
+        self._start()
         if self._download_task is not None:
             self._progress.remove_task(self._download_task)
         self._download_task = self._progress.add_task(
@@ -152,8 +189,9 @@ class _RichReporter:
         )
 
     def download_progress(self, n_bytes: int) -> None:
-        if self._download_task is not None:
-            self._progress.update(self._download_task, completed=n_bytes)
+        if self._batch_task is not None or self._download_task is None:
+            return
+        self._progress.update(self._download_task, completed=n_bytes)
 
     def download_finished(self) -> None:
         # Final byte count update is the caller's responsibility; rich will
@@ -163,7 +201,10 @@ class _RichReporter:
     def status(self, message: str) -> None:
         """Print a status line above the bars during prep phases."""
         try:
-            self._progress.console.print(f"[dim]· {message}[/]")
+            if self._started:
+                self._progress.console.print(f"[dim]· {message}[/]")
+            else:
+                print(f"· {message}", file=sys.stderr)
         except Exception:
             pass
 

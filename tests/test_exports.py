@@ -68,7 +68,7 @@ class TestMarketDownload:
         _market_404(mock_api)
 
         out = client.exports.download(
-            "m1", path=str(tmp_path), progress=False, coalesce=False,
+            "m1", data_dir=str(tmp_path), progress=False, coalesce=False,
         )
 
         assert (out / "history-m1.parquet").read_bytes() == body
@@ -82,7 +82,7 @@ class TestMarketDownload:
         mock_api.get(bucket_url).mock(return_value=httpx.Response(200, content=b"OK"))
         _market_404(mock_api)
 
-        out = client.exports.download("m1", path=str(tmp_path), progress=False)
+        out = client.exports.download("m1", data_dir=str(tmp_path), progress=False)
         assert (out / "history-m1-compact.parquet").exists()
 
         export_calls = [
@@ -100,7 +100,7 @@ class TestMarketDownload:
         _market_404(mock_api)
 
         out = client.exports.download(
-            "m1", path=str(tmp_path), progress=False, coalesce=False,
+            "m1", data_dir=str(tmp_path), progress=False, coalesce=False,
         )
         assert (out / "history-m1.parquet").exists()
 
@@ -117,7 +117,7 @@ class TestMarketDownload:
             )
         )
         with pytest.raises(NotFoundError):
-            client.exports.download("missing", path=str(tmp_path), progress=False)
+            client.exports.download("missing", data_dir=str(tmp_path), progress=False)
 
     def test_409_raises_export_not_ready_with_fields(self, mock_api, client, tmp_path):
         mock_api.get("/markets/m1/export").mock(
@@ -130,7 +130,7 @@ class TestMarketDownload:
             )
         )
         with pytest.raises(ExportNotReadyError) as ei:
-            client.exports.download("m1", path=str(tmp_path), progress=False)
+            client.exports.download("m1", data_dir=str(tmp_path), progress=False)
         assert ei.value.code == "EXPORT_NOT_READY"
         assert ei.value.export_status == "pending"
         assert ei.value.last_error == "worker crashed at step 3"
@@ -146,7 +146,7 @@ class TestMarketDownload:
             )
         )
         with pytest.raises(ExportNotReadyError) as ei:
-            client.exports.download("m1", path=str(tmp_path), progress=False)
+            client.exports.download("m1", data_dir=str(tmp_path), progress=False)
         assert ei.value.export_status == "in_progress"
         assert ei.value.last_error is None
 
@@ -162,7 +162,7 @@ class TestMarketDownload:
                 )
             )
             with pytest.raises(RateLimitError) as ei:
-                client.exports.download("m1", path=str(tmp_path), progress=False)
+                client.exports.download("m1", data_dir=str(tmp_path), progress=False)
             assert ei.value.retry_after == 60
         finally:
             client.close()
@@ -171,7 +171,7 @@ class TestMarketDownload:
         (tmp_path / "history-m1-compact.parquet").write_bytes(b"PRE-EXISTING")
         _market_404(mock_api)
 
-        out = client.exports.download("m1", path=str(tmp_path), progress=False)
+        out = client.exports.download("m1", data_dir=str(tmp_path), progress=False)
 
         # Bytes untouched and no /export call was made.
         assert (out / "history-m1-compact.parquet").read_bytes() == b"PRE-EXISTING"
@@ -191,7 +191,7 @@ class TestMarketDownload:
         )
         _market_404(mock_api)
 
-        client.exports.download("m1", path=str(tmp_path), progress=False)
+        client.exports.download("m1", data_dir=str(tmp_path), progress=False)
 
         bucket_calls = bucket_route.calls
         assert len(bucket_calls) == 1
@@ -236,7 +236,7 @@ class TestSeriesDownload:
         _series_404(mock_api, "btc-daily")
 
         result = client.exports.download_series(
-            "btc-daily", path=str(tmp_path), progress=False,
+            "btc-daily", data_dir=str(tmp_path), progress=False,
         )
 
         assert isinstance(result, SeriesDownloadResult)
@@ -255,7 +255,7 @@ class TestSeriesDownload:
         _series_404(mock_api, "btc-daily")
 
         result = client.exports.download_series(
-            "btc-daily", path=str(tmp_path), progress=False,
+            "btc-daily", data_dir=str(tmp_path), progress=False,
         )
         assert os.fspath(result) == str(tmp_path)
         assert Path(result) == tmp_path
@@ -272,7 +272,7 @@ class TestSeriesDownload:
         _series_404(mock_api, "btc-daily")
 
         result = client.exports.download_series(
-            "btc-daily", path=str(tmp_path), progress=False, concurrency=4,
+            "btc-daily", data_dir=str(tmp_path), progress=False, concurrency=4,
         )
         assert sorted(result.ready) == sorted(ready)
         for mid in ready:
@@ -292,7 +292,7 @@ class TestSeriesDownload:
         _series_404(mock_api, "btc-daily")
 
         result = client.exports.download_series(
-            "btc-daily", path=str(tmp_path), progress=False,
+            "btc-daily", data_dir=str(tmp_path), progress=False,
         )
 
         assert (tmp_path / "history-m1-compact.parquet").read_bytes() == b"OLD"
@@ -316,7 +316,7 @@ class TestSeriesDownload:
         _series_404(mock_api, "btc-daily")
 
         result = client.exports.download_series(
-            "btc-daily", path=str(tmp_path), progress=False,
+            "btc-daily", data_dir=str(tmp_path), progress=False,
         )
         assert result.ready == []
         assert len(result.pending) == 2
@@ -330,7 +330,7 @@ class TestSeriesDownload:
             )
         )
         with pytest.raises(NotFoundError):
-            client.exports.download_series("unknown", path=str(tmp_path), progress=False)
+            client.exports.download_series("unknown", data_dir=str(tmp_path), progress=False)
 
     def test_404_data_not_available(self, mock_api, client, tmp_path):
         mock_api.get("/series/empty-window/export").mock(
@@ -342,7 +342,7 @@ class TestSeriesDownload:
             client.exports.download_series(
                 "empty-window",
                 after="2026-04-12T00:00:00Z", before="2026-04-11T00:00:00Z",
-                path=str(tmp_path), progress=False,
+                data_dir=str(tmp_path), progress=False,
             )
 
 
@@ -364,7 +364,7 @@ class TestAsyncExports:
         mock_api.get(bucket_url).mock(return_value=httpx.Response(200, content=b"PAR1"))
         _market_404(mock_api)
 
-        out = await aclient.exports.download("m1", path=str(tmp_path), progress=False)
+        out = await aclient.exports.download("m1", data_dir=str(tmp_path), progress=False)
         assert (out / "history-m1-compact.parquet").read_bytes() == b"PAR1"
 
     async def test_market_download_409_raises_export_not_ready(self, mock_api, aclient, tmp_path):
@@ -378,7 +378,7 @@ class TestAsyncExports:
             )
         )
         with pytest.raises(ExportNotReadyError) as ei:
-            await aclient.exports.download("m1", path=str(tmp_path), progress=False)
+            await aclient.exports.download("m1", data_dir=str(tmp_path), progress=False)
         assert ei.value.export_status == "failed"
         assert ei.value.last_error == "too many retries"
 
@@ -402,7 +402,7 @@ class TestAsyncExports:
         _series_404(mock_api, "s1")
 
         result = await aclient.exports.download_series(
-            "s1", path=str(tmp_path), progress=False,
+            "s1", data_dir=str(tmp_path), progress=False,
         )
         assert result.ready == ["m1"]
         assert len(result.pending) == 1
@@ -429,7 +429,7 @@ class TestAsyncExports:
         _series_404(mock_api, "s1")
 
         result = await aclient.exports.download_series(
-            "s1", path=str(tmp_path), progress=False, concurrency=4,
+            "s1", data_dir=str(tmp_path), progress=False, concurrency=4,
         )
         assert sorted(result.ready) == sorted(ready)
         for mid in ready:
