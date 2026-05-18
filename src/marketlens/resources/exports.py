@@ -24,6 +24,12 @@ class SeriesFailed:
 
 
 @dataclass(frozen=True)
+class SeriesRateLimited:
+    market_id: str
+    events: int
+
+
+@dataclass(frozen=True)
 class SeriesDownloadResult:
     """Outcome of ``client.exports.download_series``.
 
@@ -34,6 +40,7 @@ class SeriesDownloadResult:
     ready: list[str] = field(default_factory=list)
     pending: list[SeriesPending] = field(default_factory=list)
     failed: list[SeriesFailed] = field(default_factory=list)
+    rate_limited: list[SeriesRateLimited] = field(default_factory=list)
     events_charged: int = 0
 
     def __fspath__(self) -> str:
@@ -137,9 +144,13 @@ class Exports:
 
         Returns:
             ``SeriesDownloadResult`` with ``data_dir``, ``ready``, ``pending``,
-            ``failed``, and ``events_charged``. The result is ``os.PathLike``
-            (its ``__fspath__`` returns the data directory), so it can be
-            passed directly to ``client.backtest(..., data_dir=result)``.
+            ``failed``, ``rate_limited``, and ``events_charged``.
+            ``rate_limited`` lists markets that were skipped because including
+            them would have exceeded the caller's daily event budget; retry
+            after the budget resets or with a narrower ``after``/``before``
+            window. The result is ``os.PathLike`` (its ``__fspath__`` returns
+            the data directory), so it can be passed directly to
+            ``client.backtest(..., data_dir=result)``.
         """
         data_dir = Path(data_dir)
         data_dir.mkdir(parents=True, exist_ok=True)
@@ -156,6 +167,10 @@ class Exports:
         suffix = "-compact" if coalesce else ""
         pending = [SeriesPending(e["market_id"], e["status"]) for e in body.get("pending", [])]
         failed = [SeriesFailed(e["market_id"], e["error"]) for e in body.get("failed", [])]
+        rate_limited = [
+            SeriesRateLimited(e["market_id"], int(e.get("events", 0)))
+            for e in body.get("rate_limited", [])
+        ]
         events_charged = int(body.get("events_charged", 0))
         targets = [(e["market_id"], e["url"]) for e in body.get("ready", [])]
 
@@ -206,6 +221,7 @@ class Exports:
             ready=ready,
             pending=pending,
             failed=failed,
+            rate_limited=rate_limited,
             events_charged=events_charged,
         )
 
@@ -305,6 +321,10 @@ class AsyncExports:
         suffix = "-compact" if coalesce else ""
         pending = [SeriesPending(e["market_id"], e["status"]) for e in body.get("pending", [])]
         failed = [SeriesFailed(e["market_id"], e["error"]) for e in body.get("failed", [])]
+        rate_limited = [
+            SeriesRateLimited(e["market_id"], int(e.get("events", 0)))
+            for e in body.get("rate_limited", [])
+        ]
         events_charged = int(body.get("events_charged", 0))
         targets = [(e["market_id"], e["url"]) for e in body.get("ready", [])]
 
@@ -355,6 +375,7 @@ class AsyncExports:
             ready=ready,
             pending=pending,
             failed=failed,
+            rate_limited=rate_limited,
             events_charged=events_charged,
         )
 

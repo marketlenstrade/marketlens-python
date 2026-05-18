@@ -22,6 +22,7 @@ from marketlens import (
     NotFoundError,
     RateLimitError,
     SeriesDownloadResult,
+    SeriesRateLimited,
 )
 
 
@@ -322,6 +323,59 @@ class TestSeriesDownload:
         assert len(result.pending) == 2
         assert result.events_charged == 0
         assert not list(tmp_path.glob("*.parquet"))
+
+    def test_parses_rate_limited_bucket(self, mock_api, client, tmp_path):
+        manifest = {
+            "ready": [
+                {"market_id": "m1",
+                 "url": f"{BUCKET_BASE}/history/m1-compact.parquet",
+                 "events": 100},
+            ],
+            "pending": [],
+            "failed": [],
+            "rate_limited": [
+                {"market_id": "m9", "events": 500},
+                {"market_id": "m10", "events": 250},
+            ],
+            "events_charged": 100,
+        }
+        mock_api.get("/series/btc-daily/export").mock(
+            return_value=httpx.Response(200, json=manifest)
+        )
+        mock_api.get(f"{BUCKET_BASE}/history/m1-compact.parquet").mock(
+            return_value=httpx.Response(200, content=b"PAR1-m1")
+        )
+        _series_404(mock_api, "btc-daily")
+
+        result = client.exports.download_series(
+            "btc-daily", data_dir=str(tmp_path), progress=False,
+        )
+
+        assert result.ready == ["m1"]
+        assert result.events_charged == 100
+        assert [r.market_id for r in result.rate_limited] == ["m9", "m10"]
+        assert isinstance(result.rate_limited[0], SeriesRateLimited)
+        assert result.rate_limited[0].events == 500
+
+    def test_missing_rate_limited_key_defaults_empty(self, mock_api, client, tmp_path):
+        # Older API servers may not emit the ``rate_limited`` field at all;
+        # the SDK should default it to an empty list.
+        manifest = {
+            "ready": [],
+            "pending": [],
+            "failed": [],
+            "events_charged": 0,
+        }
+        mock_api.get("/series/btc-daily/export").mock(
+            return_value=httpx.Response(200, json=manifest)
+        )
+        _series_404(mock_api, "btc-daily")
+
+        result = client.exports.download_series(
+            "btc-daily", data_dir=str(tmp_path), progress=False,
+        )
+
+        assert result.rate_limited == []
 
     def test_404_unknown_series(self, mock_api, client, tmp_path):
         mock_api.get("/series/unknown/export").mock(
