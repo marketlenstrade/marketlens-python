@@ -88,7 +88,7 @@ The portfolio automatically handles **CTF merge** (opposite-side netting): buyin
 | `on_market_start(ctx, market, book)` | A new market begins |
 | `on_market_end(ctx, market)` | A market ends, before settlement |
 
-`ctx` provides: `buy_yes()`, `sell_yes()`, `buy_no()`, `sell_no()`, `cancel_order()`, `cancel_all_orders()`, `position()`, `open_orders`, `books` (all active order books), and `reference_price()` (Binance spot for crypto underlyings).
+`ctx` provides: `buy_yes()`, `sell_yes()`, `buy_no()`, `sell_no()`, `cancel()`, `cancel_all()`, `position()`, `open_orders`, `books` (all active order books), and `reference_price()` (Binance spot for crypto underlyings).
 
 ### Results
 
