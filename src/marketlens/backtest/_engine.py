@@ -786,12 +786,15 @@ class _EngineCore:
         """
         reporter = self._reporter
         dir_path = Path(data_dir)
-        for market in markets:
-            path = self._resolve_history_file(dir_path, market.id)
+        resolved = [(m, self._resolve_history_file(dir_path, m.id)) for m in markets]
+        missing = [m for m, p in resolved if p is None]
+        if missing:
+            warnings.warn(
+                f"Skipping {len(missing)} of {len(markets)} markets: "
+                f"no history file in {dir_path} (first: {missing[0].id})"
+            )
+        for market, path in resolved:
             if path is None:
-                warnings.warn(
-                    f"Skipping market {market.id}: no history file in {dir_path}"
-                )
                 continue
             events = _iter_history_parquet(path)
             reporter.market_started(market.id, market.id)

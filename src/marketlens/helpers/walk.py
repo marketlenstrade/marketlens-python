@@ -120,20 +120,31 @@ class OrderBookWalk:
     def __iter__(self) -> Iterator[tuple[Market, OrderBook]]:
         from pathlib import Path
 
+        suffix = "-compact" if self._coalesce else ""
+        if self._data_dir:
+            base = Path(self._data_dir)
+            missing = [
+                m for m in self._markets_list
+                if not (base / f"history-{m.id}{suffix}.parquet").exists()
+            ]
+            if missing:
+                import warnings
+                warnings.warn(
+                    f"Skipping {len(missing)} of {len(self._markets_list)} markets: "
+                    f"no parquet history in {self._data_dir} (first: {missing[0].id})"
+                )
+
         for market in self._markets_list:
             self._current_markets = {market.id: market}
             self._books = {}
             self._current_event = self._resolve_event(market)
 
             if self._data_dir:
-                suffix = "-compact" if self._coalesce else ""
                 path = Path(self._data_dir) / f"history-{market.id}{suffix}.parquet"
                 if path.exists():
                     from marketlens.backtest._engine import _iter_history_parquet
                     events = _iter_history_parquet(path)
                 else:
-                    import warnings
-                    warnings.warn(f"Skipping {market.id}: {path} not found")
                     continue
             else:
                 events = self._orderbook.history(
