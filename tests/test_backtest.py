@@ -1319,9 +1319,10 @@ class TestLatencySimulation:
         result = client.backtest(BuyFirst(), "m1", after=1000, before=6000,
                                  initial_cash="10000.0000", latency_ms=50, limit_fill_rate=1.0)
         assert result.total_trades == 1
-        # Order submitted at t=1000 (SNAPSHOT_1), activates at t=1050
-        # First event after that is DELTA_1 at t=1500
-        assert fill_times[0] == 1500
+        # Order submitted at t=1000, activates at t=1050. The next event in
+        # the stream (DELTA_1 at t=1500) drains the pending queue and fires
+        # the activation at its own activate_at — not at the event's time.
+        assert fill_times[0] == 1050
 
     def test_no_latency_fills_immediately(self, mock_api, client):
         """With latency_ms=0, market order fills on the same event."""
@@ -1349,9 +1350,12 @@ class TestLatencySimulation:
         assert result.total_trades == 1
         assert fill_times[0] == 1000
 
-    def test_latency_fills_against_submission_book(self, mock_api, client):
-        """Order fills against the book at submission time, not activation
-        time, even when latency_ms shifts activation to a later event."""
+    def test_latency_no_intervening_events_preserves_submission_book(
+        self, mock_api, client,
+    ):
+        """When nothing happened during the latency window, the live book at
+        activation is unchanged from submission, so the fill price matches
+        the strategy's view at submission."""
         m1 = _market_with({
             "id": "m1", "status": "resolved",
             "winning_outcome": "Yes", "winning_outcome_index": 0,
@@ -1364,9 +1368,9 @@ class TestLatencySimulation:
                     ctx.buy_yes(size="100.0000")
 
         mock_api.get("/markets/m1").mock(return_value=httpx.Response(200, json=m1))
-        # SNAPSHOT_1 asks: 0.67/100, 0.68/250  (submission book)
-        # SNAPSHOT_2 asks: 0.68/300            (later book — what the OLD
-        #                                       behaviour would have used)
+        # SNAPSHOT_1 asks: 0.67/100, 0.68/250. SNAPSHOT_2 is the next event,
+        # far in the future — nothing happened in [1000, 1050]. Activation at
+        # 1050 sees the same book the strategy saw at 1000, so we fill at 0.67.
         mock_api.get("/markets/m1/orderbook/history").mock(
             return_value=httpx.Response(200, json=_history_response(
                 SNAPSHOT_1, SNAPSHOT_2)))
@@ -1374,9 +1378,159 @@ class TestLatencySimulation:
         result = client.backtest(BuyFirst(), "m1", after=1000, before=6000,
                                  initial_cash="10000.0000", latency_ms=50, limit_fill_rate=1.0)
         assert result.total_trades == 1
-        # Fills against SNAPSHOT_1 (submission book) — best ask 0.67.
         fill_price = result.trades_df()["price"].iloc[0]
         assert abs(fill_price - 0.67) < 0.0001
+        # Fill is stamped at the order's activate_at, not the next event.
+        assert result._fills[0].timestamp == 1050
+
+    def test_latency_book_moves_against_market_buy(self, mock_api, client):
+        """Adverse selection on price: book moves up between submission and
+        activation. The market buy pays the worse, activation-time ask."""
+        m1 = _market_with({
+            "id": "m1", "status": "resolved",
+            "winning_outcome": "Yes", "winning_outcome_index": 0,
+            "open_time": 1000, "close_time": 6000, "resolved_at": 6000,
+        })
+
+        # Submission book: best ask 0.67 (cheap).
+        snap_cheap = {
+            "type": "snapshot", "t": 1000, "is_reseed": False,
+            "bids": [{"price": "0.6500", "size": "200.0000"}],
+            "asks": [{"price": "0.6700", "size": "100.0000"}],
+        }
+        # Mid-latency event at t=1025: asks lift to 0.72 (book moved up).
+        snap_expensive = {
+            "type": "snapshot", "t": 1025, "is_reseed": False,
+            "bids": [{"price": "0.6800", "size": "200.0000"}],
+            "asks": [{"price": "0.7200", "size": "100.0000"}],
+        }
+        snap_end = {
+            "type": "snapshot", "t": 5000, "is_reseed": False,
+            "bids": [{"price": "0.7000", "size": "100.0000"}],
+            "asks": [{"price": "0.7200", "size": "100.0000"}],
+        }
+
+        class BuyFirst(Strategy):
+            done = False
+            def on_book(self, ctx, market, book):
+                if not self.done:
+                    ctx.buy_yes(size="50.0000")
+                    self.done = True
+
+        mock_api.get("/markets/m1").mock(return_value=httpx.Response(200, json=m1))
+        mock_api.get("/markets/m1/orderbook/history").mock(
+            return_value=httpx.Response(200, json=_history_response(
+                snap_cheap, snap_expensive, snap_end)))
+
+        result = client.backtest(
+            BuyFirst(), "m1", after=1000, before=6000,
+            initial_cash="10000.0000", latency_ms=50, limit_fill_rate=1.0,
+            fees=None,
+        )
+        assert result.total_trades == 1
+        # Activation at t=1050, after snap_expensive (t=1025) updated the book
+        # → pays the new ask 0.72, not the submission-time 0.67.
+        fill_price = result.trades_df()["price"].iloc[0]
+        assert abs(fill_price - 0.72) < 0.0001
+        # Fill stamped at the true activation time.
+        assert result._fills[0].timestamp == 1050
+
+    def test_latency_book_moves_favourably_for_market_buy(self, mock_api, client):
+        """Symmetric case: book drops between submission and activation → the
+        market buy gets a better price than the strategy saw."""
+        m1 = _market_with({
+            "id": "m1", "status": "resolved",
+            "winning_outcome": "Yes", "winning_outcome_index": 0,
+            "open_time": 1000, "close_time": 6000, "resolved_at": 6000,
+        })
+        snap_high = {
+            "type": "snapshot", "t": 1000, "is_reseed": False,
+            "bids": [{"price": "0.6500", "size": "200.0000"}],
+            "asks": [{"price": "0.6700", "size": "100.0000"}],
+        }
+        snap_low = {
+            "type": "snapshot", "t": 1025, "is_reseed": False,
+            "bids": [{"price": "0.5800", "size": "200.0000"}],
+            "asks": [{"price": "0.6000", "size": "100.0000"}],
+        }
+        snap_end = {
+            "type": "snapshot", "t": 5000, "is_reseed": False,
+            "bids": [{"price": "0.5800", "size": "100.0000"}],
+            "asks": [{"price": "0.6000", "size": "100.0000"}],
+        }
+
+        class BuyFirst(Strategy):
+            done = False
+            def on_book(self, ctx, market, book):
+                if not self.done:
+                    ctx.buy_yes(size="50.0000")
+                    self.done = True
+
+        mock_api.get("/markets/m1").mock(return_value=httpx.Response(200, json=m1))
+        mock_api.get("/markets/m1/orderbook/history").mock(
+            return_value=httpx.Response(200, json=_history_response(
+                snap_high, snap_low, snap_end)))
+
+        result = client.backtest(
+            BuyFirst(), "m1", after=1000, before=6000,
+            initial_cash="10000.0000", latency_ms=50, limit_fill_rate=1.0,
+            fees=None,
+        )
+        fill_price = result.trades_df()["price"].iloc[0]
+        assert abs(fill_price - 0.60) < 0.0001
+
+    def test_latency_limit_no_longer_crosses_at_activation(self, mock_api, client):
+        """A limit submitted when it would have crossed must not auto-fill if
+        by activation the spread has moved against it; instead it should rest
+        as a maker against the activation-time book."""
+        m1 = _market_with({
+            "id": "m1", "status": "resolved",
+            "winning_outcome": "Yes", "winning_outcome_index": 0,
+            "open_time": 1000, "close_time": 6000, "resolved_at": 6000,
+        })
+
+        # At t=1000, best ask = 0.50: a BUY_YES limit at 0.51 would cross.
+        snap_cross = {
+            "type": "snapshot", "t": 1000, "is_reseed": False,
+            "bids": [{"price": "0.4900", "size": "100.0000"}],
+            "asks": [{"price": "0.5000", "size": "100.0000"}],
+        }
+        # By t=1025, the ask has lifted to 0.55: the same limit no longer crosses.
+        snap_no_cross = {
+            "type": "snapshot", "t": 1025, "is_reseed": False,
+            "bids": [{"price": "0.4900", "size": "100.0000"}],
+            "asks": [{"price": "0.5500", "size": "100.0000"}],
+        }
+        snap_end = {
+            "type": "snapshot", "t": 5000, "is_reseed": False,
+            "bids": [{"price": "0.4900", "size": "100.0000"}],
+            "asks": [{"price": "0.5500", "size": "100.0000"}],
+        }
+
+        class LimitBuyer(Strategy):
+            done = False
+            def on_book(self, ctx, market, book):
+                if not self.done:
+                    ctx.buy_yes(size="50.0000", limit_price="0.5100")
+                    self.done = True
+
+        mock_api.get("/markets/m1").mock(return_value=httpx.Response(200, json=m1))
+        mock_api.get("/markets/m1/orderbook/history").mock(
+            return_value=httpx.Response(200, json=_history_response(
+                snap_cross, snap_no_cross, snap_end)))
+
+        result = client.backtest(
+            LimitBuyer(), "m1", after=1000, before=6000,
+            initial_cash="10000.0000", latency_ms=50, limit_fill_rate=1.0,
+            fees=None,
+        )
+        # No fill at activation (limit 0.51 < ask 0.55). Order rests, then
+        # gets cancelled at market finalisation (no trades to trigger it).
+        # The important assertion is: zero crossing fills despite the
+        # submission book having crossed.
+        assert result.total_trades == 0
+        orders = result.orders_df()
+        assert float(orders.iloc[0]["filled_size"]) == 0.0
 
     def test_latency_no_fill_if_only_one_event(self, mock_api, client):
         """With latency and only one event, order stays pending → cancelled."""
@@ -1417,6 +1571,51 @@ class TestLatencySimulation:
         result = client.backtest(LimitBuyer(), "m1", after=1000, before=6000,
                                  initial_cash="10000.0000", latency_ms=50, limit_fill_rate=1.0)
         assert result.total_trades == 1
+
+    def test_pending_orders_drain_in_chronological_order(self, mock_api, client):
+        """Two pending buys activating before the same event must fire in the
+        order of their ``activate_at`` so cash-draining sequencing is correct."""
+        m1 = _market_with({
+            "id": "m1", "status": "resolved",
+            "winning_outcome": "Yes", "winning_outcome_index": 0,
+            "open_time": 1000, "close_time": 6000, "resolved_at": 6000,
+        })
+
+        snap1 = {
+            "type": "snapshot", "t": 1000, "is_reseed": False,
+            "bids": [{"price": "0.5000", "size": "1000.0000"}],
+            "asks": [{"price": "0.5000", "size": "1000.0000"}],
+        }
+        snap2 = {
+            "type": "snapshot", "t": 5000, "is_reseed": False,
+            "bids": [{"price": "0.5000", "size": "1000.0000"}],
+            "asks": [{"price": "0.5000", "size": "1000.0000"}],
+        }
+
+        fills_in_order = []
+
+        class TwoBuys(Strategy):
+            placed = False
+            def on_book(self, ctx, market, book):
+                if not self.placed:
+                    # Both pending; first activates at ~1100, second at ~1200.
+                    ctx.buy_yes(size="10.0000")
+                    self.placed = True
+            def on_fill(self, ctx, market, fill):
+                fills_in_order.append(fill.timestamp)
+
+        mock_api.get("/markets/m1").mock(return_value=httpx.Response(200, json=m1))
+        mock_api.get("/markets/m1/orderbook/history").mock(
+            return_value=httpx.Response(200, json=_history_response(snap1, snap2)))
+
+        # latency 100ms — order submitted at t=1000 activates at t=1100.
+        client.backtest(
+            TwoBuys(), "m1", after=1000, before=6000,
+            initial_cash="10000.0000", latency_ms=100, limit_fill_rate=1.0,
+            fees=None,
+        )
+        # Single order in this scenario; the drain fires it at its own time.
+        assert fills_in_order == [1100]
 
     def test_cancel_pending_order(self, mock_api, client):
         """Cancelling a pending (not yet activated) order should work."""

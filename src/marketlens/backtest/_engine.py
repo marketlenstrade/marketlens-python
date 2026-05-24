@@ -142,8 +142,6 @@ class BacktestConfig:
     progress: bool = True  # show rich progress bars for fetch/backtest
     # None=auto, True=force compact, False=force full. Auto picks compact
     # when on_book isn't overridden and queue_position/include_trades allow it.
-    # Fill prices are mode-independent (book pinned at submission); the mode
-    # only changes event density between trades.
     coalesce: bool | None = None
 
 
@@ -171,10 +169,6 @@ class _EngineCore:
         self._orders: list[Order] = []
         self._open_orders: list[Order] = []
         self._pending_orders: list[tuple[int, Order]] = []  # (activate_at, order)
-        # order.id → book the strategy saw at submission. Fills always price
-        # against this book, decoupling fill price from latency / settlement
-        # / event density. Cleared on fill.
-        self._book_at_submission: dict[str, OrderBook] = {}
         # Per-market settlement: earliest time a SELL can activate after a BUY fill
         self._settled_at: dict[str, int] = {}  # market_id → timestamp_ms
         self._settlements: list[SettlementRecord] = []
@@ -187,6 +181,10 @@ class _EngineCore:
         self._current_book: OrderBook | None = None
         self._current_time: int = 0
         self._books: dict[str, OrderBook] = {}
+        # Latest Market object per id — needed when pending orders activate
+        # between events (their fill is stamped against their own market, not
+        # the market whose event triggered the drain).
+        self._market_objs: dict[str, Market] = {}
         self._market_series: dict[str, str] = {}  # market_id → series_id (for settlement attribution)
         self._market_group: dict[str, str] = {}    # market_id → group key (for sequential slot tracking)
         self._ref_prices: dict[str, list[tuple[int, str]]] = {}  # symbol → sorted (timestamp, price)
@@ -388,14 +386,10 @@ class _EngineCore:
         )
         self._orders.append(order)
 
-        # Pin the book the strategy is looking at; fill price is anchored
-        # here regardless of latency / settlement delay / activation timing.
-        submission_book = self._books.get(target, self._current_book)
-        if submission_book is not None:
-            self._book_at_submission[order.id] = submission_book
-
-        # latency / settlement delays gate _when_ the fill is recorded, not
-        # the price it fills at.
+        # Latency / settlement gate _when_ the fill is recorded. The price is
+        # determined at activation against the live book at that moment, so
+        # an order in flight is exposed to the book moves that happen during
+        # the latency window (the standard adverse-selection modelling).
         activate_at = self._current_time + self._latency_ms
         if side in (OrderSide.SELL_YES, OrderSide.SELL_NO):
             activate_at = max(activate_at, self._settled_at.get(target, 0))
@@ -446,20 +440,21 @@ class _EngineCore:
         """
         order.status = OrderStatus.CANCELLED
         self._fill_sim.unregister_order(order.id)
-        self._book_at_submission.pop(order.id, None)
         self._open_orders = [o for o in self._open_orders if o.id != order.id]
-        if self._current_market is not None:
-            self._strategy.on_reject(self._ctx, self._current_market, order)
+        market = self._market_objs.get(order.market_id) or self._current_market
+        if market is not None:
+            self._strategy.on_reject(self._ctx, market, order)
 
     def _activate_pending_orders(self, *, market_id: str | None = None) -> None:
-        """Activate orders whose latency delay has elapsed.
+        """Activate orders whose latency delay has elapsed at this event's time.
+
+        Called from :meth:`_process_event` for orders with ``activate_at`` equal
+        to the event timestamp — they activate against the just-updated
+        post-event book. Orders with ``activate_at`` strictly before the event
+        are handled by :meth:`_drain_pending_before`.
 
         When *market_id* is given, only orders for that market are considered.
         This prevents cross-market fills in event (multi-market) mode.
-
-        Limit orders that cross the spread at activation time are filled
-        immediately as taker orders (with taker fees), matching exchange
-        behaviour where an aggressive limit price is treated as a market order.
         """
         still_pending: list[tuple[int, Order]] = []
         for activate_at, order in self._pending_orders:
@@ -480,16 +475,75 @@ class _EngineCore:
                 still_pending.append((activate_at, order))
         self._pending_orders = still_pending
 
-    def _fill_book(self, order: Order) -> OrderBook:
-        """Submission-pinned book for pricing ``order``; falls back to the
-        live per-market book if the pin is missing."""
-        return self._book_at_submission.get(order.id) or self._books.get(
+    def _drain_pending_before(self, event_t: int) -> None:
+        """Activate pending orders scheduled strictly before ``event_t``.
+
+        Each order activates at its own ``activate_at`` timestamp, against the
+        live per-market book as it stands right now (the post-state of the
+        previous event for that market, unchanged since). This is the standard
+        event-driven-simulator semantics: between events the book is a step
+        function held flat, so "live book at activate_at" is exactly the most-
+        recently-emitted per-market book.
+
+        Pending orders whose market has not yet produced any event (no entry
+        in ``self._books``) stay pending — they need at least one book before
+        they can be priced.
+        """
+        if not self._pending_orders:
+            return
+
+        ready: list[tuple[int, Order]] = []
+        still: list[tuple[int, Order]] = []
+        for activate_at, order in self._pending_orders:
+            if (
+                order.status == OrderStatus.PENDING
+                and activate_at < event_t
+                and order.market_id in self._books
+                and order.market_id in self._market_objs
+            ):
+                ready.append((activate_at, order))
+            else:
+                still.append((activate_at, order))
+
+        if not ready:
+            return
+
+        # Fire in chronological order so cash-draining buys take effect before
+        # subsequent activations see them.
+        ready.sort(key=lambda x: x[0])
+
+        for activate_at, order in ready:
+            market = self._market_objs[order.market_id]
+            self._current_time = activate_at
+            self._current_market = market
+            self._current_book = self._books[order.market_id]
+            if self._auto_fees:
+                self._fill_sim._fee_model = PolymarketFeeModel.for_category(market.category)
+            try:
+                if order.order_type == OrderType.MARKET:
+                    self._fill_market_order(order)
+                else:
+                    self._activate_limit_order(order)
+            except ValueError:
+                self._reject_order(order)
+
+        self._pending_orders = still
+
+    def _live_book(self, order: Order) -> OrderBook:
+        """Most recent per-market book for pricing ``order``.
+
+        Always reflects the live state — there is no submission-time pin. An
+        order that activates after a latency delay sees the book as it exists
+        at activation, not at submission, which models price drift / depth
+        loss while the order was in flight.
+        """
+        return self._books.get(
             order.market_id, self._current_book,  # type: ignore[arg-type]
         )
 
     def _activate_limit_order(self, order: Order) -> None:
         """Activate a limit order: fill crossing portion as taker, rest as maker."""
-        book = self._fill_book(order)
+        book = self._live_book(order)
         crossing_fill = self._fill_sim.try_fill_crossing_limit_order(
             order, book, self._current_time,
         )
@@ -499,17 +553,15 @@ class _EngineCore:
         if Decimal(order.size) - Decimal(order.filled_size) <= Decimal("0.0001"):
             return
 
-        # Rest the remainder. Register against the LIVE book so trade-driven
-        # queue-position tracking reflects state at activation.
+        # Rest the remainder. Register against the same live book so the
+        # crossing-fill side and the queue-position side share one book state.
         order.status = OrderStatus.OPEN
         self._open_orders.append(order)
-        self._fill_sim.register_limit_order(
-            order, self._books.get(order.market_id, self._current_book),  # type: ignore[arg-type]
-        )
+        self._fill_sim.register_limit_order(order, book)
 
     def _fill_market_order(self, order: Order) -> None:
         fill = self._fill_sim.try_fill_market_order(
-            order, self._fill_book(order), self._current_time,
+            order, self._live_book(order), self._current_time,
         )
         if fill is None:
             self._reject_order(order)
@@ -585,7 +637,6 @@ class _EngineCore:
             order.status = OrderStatus.FILLED
             self._open_orders = [o for o in self._open_orders if o.id != order.id]
             self._fill_sim.unregister_order(order.id)
-            self._book_at_submission.pop(order.id, None)
         else:
             order.status = OrderStatus.PARTIALLY_FILLED
 
@@ -610,6 +661,7 @@ class _EngineCore:
         self._current_book = book
         self._current_time = event.t
         self._books[market.id] = book
+        self._market_objs[market.id] = market
         is_first = False
 
         self._activate_pending_orders(market_id=market.id)
@@ -669,6 +721,12 @@ class _EngineCore:
             # Skip events for markets already finalized (past close_time)
             if market.id in finalized:
                 continue
+
+            # Fire any pending orders whose activate_at falls strictly before
+            # this event. They price against the live book at their own
+            # activate_at — which, between events, is the most-recently-emitted
+            # per-market book.
+            self._drain_pending_before(event.t)
 
             key = self._market_group.get(market.id, market.id)
 
@@ -1383,6 +1441,11 @@ class AsyncBacktestEngine(_EngineCore):
 
         async for market, event, book in async_merge_streams(streams):
             self._reporter.consumed(market.id, 1)
+
+            # Fire any pending orders scheduled before this event — see the
+            # sync ``_run_merged`` for rationale.
+            self._drain_pending_before(event.t)
+
             key = self._market_group.get(market.id, market.id)
             prev = active.get(key)
             if prev is not None and prev.id != market.id:

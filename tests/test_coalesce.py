@@ -115,17 +115,22 @@ class TestEngineCompactMode:
             BacktestEngine(Strategy(), cfg)
 
 
-class TestSubmissionBookPinning:
-    """The fill price is anchored to the book the strategy saw at submission,
-    regardless of mode or latency_ms. Latency only defers when the fill is
-    recorded; it never sees a different book."""
+class TestActivationTimeFilling:
+    """The fill price is read from the live per-market book at the moment
+    the order activates. There is no submission-time pin; an order in flight
+    is exposed to whatever the book does during the latency window. When the
+    activation lands between events (no intervening updates) the live book
+    is unchanged from submission by construction, so coalesce-mode strategies
+    where activation falls between sparse trades see the submission book."""
 
     def _engine(self, strategy_cls, **cfg_kwargs):
         cfg = BacktestConfig(latency_ms=50, **cfg_kwargs)
         e = BacktestEngine(strategy_cls(), cfg)
         from marketlens.types.market import Market
         from marketlens.types.orderbook import OrderBook, PriceLevel
-        e._current_market = Market.model_validate({**SAMPLE_MARKET, "id": "m1"})
+        m = Market.model_validate({**SAMPLE_MARKET, "id": "m1"})
+        e._current_market = m
+        e._market_objs["m1"] = m
         e._current_book = OrderBook(
             market_id="m1", platform="polymarket", as_of=1000,
             bids=[PriceLevel(price="0.4900", size="100.0000")],
@@ -139,23 +144,29 @@ class TestSubmissionBookPinning:
         e._books["m1"] = e._current_book
         return e
 
-    def test_submit_order_pins_book_per_order(self):
+    def test_no_submission_pin_state(self):
+        """The pin dict is gone; the engine reads the live book per market."""
+        e = self._engine(Strategy)
+        assert not hasattr(e, "_book_at_submission")
+
+    def test_live_book_returns_current_per_market_book(self):
         e = self._engine(Strategy)
         order = e.submit_order(OrderSide.BUY_YES, "10.0000")
-        # Order is pending (latency_ms=50) but the book is already pinned.
+        # Pending under latency_ms=50.
         assert order.status == OrderStatus.PENDING
-        assert order.id in e._book_at_submission
-        # And the pinned reference is the engine's current book at submission.
-        assert e._book_at_submission[order.id] is e._current_book
+        # _live_book reads the per-market book — same as the current snapshot
+        # while nothing has advanced.
+        assert e._live_book(order) is e._books["m1"]
 
-    def test_pinned_book_survives_engine_book_mutation(self):
+    def test_live_book_tracks_engine_mutation(self):
+        """If the per-market book moves between submission and activation,
+        ``_live_book`` returns the new book — this is the adverse-selection
+        path that the old submission-pin actively suppressed."""
         e = self._engine(Strategy)
-        original_book = e._current_book
         order = e.submit_order(OrderSide.BUY_YES, "10.0000")
 
-        # Now simulate the engine moving forward — replace current_book.
         from marketlens.types.orderbook import OrderBook, PriceLevel
-        e._current_book = OrderBook(
+        new_book = OrderBook(
             market_id="m1", platform="polymarket", as_of=2000,
             bids=[PriceLevel(price="0.4000", size="100.0000")],
             asks=[PriceLevel(price="0.4100", size="100.0000")],
@@ -164,18 +175,17 @@ class TestSubmissionBookPinning:
             bid_depth="100.0000", ask_depth="100.0000",
             bid_levels=1, ask_levels=1,
         )
-        e._books["m1"] = e._current_book
-        # The pinned book is unchanged — fill must still price against it.
-        assert e._book_at_submission[order.id] is original_book
-        assert e._fill_book(order) is original_book
+        e._current_book = new_book
+        e._books["m1"] = new_book
+        assert e._live_book(order) is new_book
 
-    def test_book_pin_cleared_on_fill(self):
+    def test_immediate_fill_unchanged_under_zero_latency(self):
+        """At latency_ms=0 the activation and submission books are the same
+        event — no behavioural change vs the previous model."""
         e = self._engine(Strategy)
-        # latency_ms=0 forces immediate fill via _fill_market_order.
         e._latency_ms = 0
         order = e.submit_order(OrderSide.BUY_YES, "10.0000")
         assert order.status == OrderStatus.FILLED
-        assert order.id not in e._book_at_submission
 
 
 # ── Engine streaming routes coalesce=true to history endpoint ─────
