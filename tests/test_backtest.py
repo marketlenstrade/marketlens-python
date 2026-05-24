@@ -258,18 +258,27 @@ class TestFillSimulatorLimit:
         assert fill.price == "0.6700"
 
     def test_buy_no_fills_on_buy_trade(self):
-        # BUY_NO at q=0.35 → YES threshold = 1 - 0.35 = 0.65
-        # Fills when BUY trade price >= 0.65
-        book = _book([("0.6500", "200.0000")], [("0.6700", "100.0000")])
+        # BUY_NO at 0.35 rests as a YES ask at 0.65 (1 - 0.35). A taker who
+        # BUYs YES at exactly 0.65 hits that level — earlier same-side resting
+        # quotes at higher YES prices would have been hit first by the sweep.
+        book = _book([("0.6300", "200.0000")], [("0.6500", "100.0000")])
         order = self._order(OrderSide.BUY_NO, "50.0000", "0.3500")
-        trade = self._trade("BUY", "0.6700")
+        trade = self._trade("BUY", "0.6500")
         fill = self._sim().try_fill_limit_order(order, book, trade, 2000)
         assert fill is not None
         assert fill.price == "0.3500"
 
+    def test_buy_no_no_fill_when_trade_above_level(self):
+        # Taker BUYs YES at 0.67 — hits some other ask, not your 0.65.
+        book = _book([("0.6300", "200.0000")], [("0.6500", "100.0000")])
+        order = self._order(OrderSide.BUY_NO, "50.0000", "0.3500")
+        trade = self._trade("BUY", "0.6700")
+        fill = self._sim().try_fill_limit_order(order, book, trade, 2000)
+        assert fill is None
+
     def test_sell_no_fills_on_sell_trade(self):
-        # SELL_NO at q=0.35 → YES threshold = 1 - 0.35 = 0.65
-        # Fills when SELL trade price <= 0.65
+        # SELL_NO at 0.35 rests as a YES bid at 0.65. A SELL taker print at
+        # exactly 0.65 hits that level.
         book = _book([("0.6500", "200.0000")], [("0.6700", "100.0000")])
         order = self._order(OrderSide.SELL_NO, "50.0000", "0.3500")
         trade = self._trade("SELL", "0.6500")
@@ -861,6 +870,203 @@ class TestEngineIntegration:
         assert result.cash_rejected == 1
         assert result.orders_df()["status"].iloc[0] == "CANCELLED"
         assert result.summary()["cash_rejected"] == 1
+
+    def test_ctf_merge_buy_funded_by_existing_position(self, mock_api, client):
+        """Buying the opposite side should net cash against the CTF-merge credit.
+
+        Holding 100 NO (paid 30) then buying 100 YES at 0.30 nets out to a CTF
+        merge that credits $100. Net cash impact for the BUY_YES is -30 + 100
+        = +70, so a wallet with only $20 of free cash must still allow the
+        hedge — the gross-cost check that ignores the merge would falsely
+        reject it.
+        """
+        m1 = _market_with({"id": "m1", "open_time": 1000, "close_time": 6000,
+                           "status": "resolved", "winning_outcome": "Yes",
+                           "winning_outcome_index": 0, "resolved_at": 6000})
+
+        # Phase 1: deep YES bid at 0.70 → BUY_NO fills at NO price 0.30.
+        snap_no = {
+            "type": "snapshot", "t": 1000, "is_reseed": False,
+            "bids": [{"price": "0.7000", "size": "500.0000"}],
+            "asks": [{"price": "0.7100", "size": "500.0000"}],
+        }
+        # Phase 2: YES tanks; ask drops to 0.30 → BUY_YES fills at 0.30.
+        snap_yes = {
+            "type": "snapshot", "t": 3000, "is_reseed": False,
+            "bids": [{"price": "0.2900", "size": "500.0000"}],
+            "asks": [{"price": "0.3000", "size": "500.0000"}],
+        }
+        snap_end = {
+            "type": "snapshot", "t": 5000, "is_reseed": False,
+            "bids": [{"price": "0.5000", "size": "100.0000"}],
+            "asks": [{"price": "0.5100", "size": "100.0000"}],
+        }
+
+        class HedgeWithThinCash(Strategy):
+            steps = 0
+            def on_book(self, ctx, market, book):
+                if self.steps == 0:
+                    ctx.buy_no(size="100.0000")  # 30 cash out
+                elif self.steps == 1:
+                    # 30 cash needed gross, but matched 100 NO → CTF credit
+                    # of 100. Net cash impact is +70.
+                    ctx.buy_yes(size="100.0000")
+                self.steps += 1
+
+        mock_api.get("/markets/m1").mock(return_value=httpx.Response(200, json=m1))
+        mock_api.get("/markets/m1/orderbook/history").mock(
+            return_value=httpx.Response(200, json=_history_response(snap_no, snap_yes, snap_end)))
+
+        result = client.backtest(
+            HedgeWithThinCash(), "m1", after=1000, before=6000,
+            initial_cash="50.0000", latency_ms=0, limit_fill_rate=1.0,
+            settlement_delay_ms=0, fees=None,
+        )
+        assert result.total_trades == 2, "hedge buy must succeed despite thin cash"
+        assert result.cash_rejected == 0
+
+    def test_on_reject_called_on_empty_book_market_order(self, mock_api, client):
+        """A market order against an empty book side should fire on_reject."""
+        m1 = _market_with({"id": "m1", "open_time": 1000, "close_time": 6000})
+
+        # YES asks are empty → BUY_YES market cannot fill.
+        empty_asks = {
+            "type": "snapshot", "t": 1000, "is_reseed": False,
+            "bids": [{"price": "0.5000", "size": "100.0000"}],
+            "asks": [],
+        }
+        snap2 = {
+            "type": "snapshot", "t": 5000, "is_reseed": False,
+            "bids": [{"price": "0.5000", "size": "100.0000"}],
+            "asks": [{"price": "0.5500", "size": "100.0000"}],
+        }
+
+        rejects: list[Order] = []
+
+        class TryBuyNoLiquidity(Strategy):
+            tried = False
+            def on_book(self, ctx, market, book):
+                if not self.tried:
+                    ctx.buy_yes(size="10.0000")
+                    self.tried = True
+            def on_reject(self, ctx, market, order):
+                rejects.append(order)
+
+        mock_api.get("/markets/m1").mock(return_value=httpx.Response(200, json=m1))
+        mock_api.get("/markets/m1/orderbook/history").mock(
+            return_value=httpx.Response(200, json=_history_response(empty_asks, snap2)))
+
+        result = client.backtest(
+            TryBuyNoLiquidity(), "m1", after=1000, before=6000,
+            initial_cash="10000.0000", latency_ms=0, limit_fill_rate=1.0,
+        )
+        assert result.total_trades == 0
+        assert len(rejects) == 1
+        assert rejects[0].status == OrderStatus.CANCELLED
+
+    def test_on_reject_called_on_insufficient_cash(self, mock_api, client):
+        m1 = _market_with({"id": "m1", "open_time": 1000, "close_time": 6000})
+
+        rejects: list[Order] = []
+
+        class OverBuy(Strategy):
+            tried = False
+            def on_book(self, ctx, market, book):
+                if not self.tried:
+                    ctx.buy_yes(size="100000.0000")
+                    self.tried = True
+            def on_reject(self, ctx, market, order):
+                rejects.append(order)
+
+        mock_api.get("/markets/m1").mock(return_value=httpx.Response(200, json=m1))
+        mock_api.get("/markets/m1/orderbook/history").mock(
+            return_value=httpx.Response(200, json=_history_response(SNAPSHOT_1)))
+
+        client.backtest(
+            OverBuy(), "m1", after=1000, before=6000,
+            initial_cash="100.0000", latency_ms=0, limit_fill_rate=1.0,
+        )
+        assert len(rejects) == 1
+        assert rejects[0].status == OrderStatus.CANCELLED
+
+    def test_limit_order_no_fill_on_price_distant_sweep(self, mock_api, client):
+        """A resting BUY_YES at 0.50 must not fill on a SELL print at 0.45.
+
+        In a real CLOB, a SELL taker hitting 0.45 means the bid book starts
+        no higher than 0.45 — any earlier 0.50 bid would have been hit first.
+        The engine's exact-level trigger guards against this over-fill.
+        """
+        m1 = _market_with({"id": "m1", "open_time": 1000, "close_time": 6000})
+
+        # Book has bids at 0.50 (ours after registration) and 0.45; trades
+        # at 0.45 should not fill our 0.50 resting order.
+        snap = {
+            "type": "snapshot", "t": 1000, "is_reseed": False,
+            "bids": [{"price": "0.4500", "size": "100.0000"}],
+            "asks": [{"price": "0.6000", "size": "100.0000"}],
+        }
+        far_trade = {
+            "type": "trade", "t": 1500, "id": "tx",
+            "price": "0.4500", "size": "50.0000", "side": "SELL",
+        }
+        snap2 = {
+            "type": "snapshot", "t": 5000, "is_reseed": False,
+            "bids": [{"price": "0.4500", "size": "100.0000"}],
+            "asks": [{"price": "0.6000", "size": "100.0000"}],
+        }
+
+        class RestAt50(Strategy):
+            placed = False
+            def on_book(self, ctx, market, book):
+                if not self.placed:
+                    ctx.buy_yes(size="20.0000", limit_price="0.5000")
+                    self.placed = True
+
+        mock_api.get("/markets/m1").mock(return_value=httpx.Response(200, json=m1))
+        mock_api.get("/markets/m1/orderbook/history").mock(
+            return_value=httpx.Response(200, json=_history_response(snap, far_trade, snap2)))
+
+        result = client.backtest(
+            RestAt50(), "m1", after=1000, before=6000,
+            initial_cash="10000.0000", latency_ms=0, limit_fill_rate=1.0,
+        )
+        assert result.total_trades == 0, "trade below resting price must not fill"
+
+    def test_limit_order_fills_on_exact_level_trade(self, mock_api, client):
+        """Same setup, but the trade prints exactly at the resting price."""
+        m1 = _market_with({"id": "m1", "open_time": 1000, "close_time": 6000})
+
+        snap = {
+            "type": "snapshot", "t": 1000, "is_reseed": False,
+            "bids": [{"price": "0.4500", "size": "100.0000"}],
+            "asks": [{"price": "0.6000", "size": "100.0000"}],
+        }
+        at_level = {
+            "type": "trade", "t": 1500, "id": "tx",
+            "price": "0.5000", "size": "50.0000", "side": "SELL",
+        }
+        snap2 = {
+            "type": "snapshot", "t": 5000, "is_reseed": False,
+            "bids": [{"price": "0.4500", "size": "100.0000"}],
+            "asks": [{"price": "0.6000", "size": "100.0000"}],
+        }
+
+        class RestAt50(Strategy):
+            placed = False
+            def on_book(self, ctx, market, book):
+                if not self.placed:
+                    ctx.buy_yes(size="20.0000", limit_price="0.5000")
+                    self.placed = True
+
+        mock_api.get("/markets/m1").mock(return_value=httpx.Response(200, json=m1))
+        mock_api.get("/markets/m1/orderbook/history").mock(
+            return_value=httpx.Response(200, json=_history_response(snap, at_level, snap2)))
+
+        result = client.backtest(
+            RestAt50(), "m1", after=1000, before=6000,
+            initial_cash="10000.0000", latency_ms=0, limit_fill_rate=1.0,
+        )
+        assert result.total_trades == 1
 
 
 # ── Results Tests ────────────────────────────────────────────────

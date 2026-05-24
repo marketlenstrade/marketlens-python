@@ -437,6 +437,20 @@ class _EngineCore:
                 remaining_pending.append((t, o))
         self._pending_orders = remaining_pending
 
+    def _reject_order(self, order: Order) -> None:
+        """Mark an engine-side rejection, clean up, fire ``on_reject``.
+
+        Distinct from user-initiated ``cancel_order``: this fires when the
+        engine itself decides the order cannot proceed (empty book, insufficient
+        cash/shares at activation, etc.) so strategies can react.
+        """
+        order.status = OrderStatus.CANCELLED
+        self._fill_sim.unregister_order(order.id)
+        self._book_at_submission.pop(order.id, None)
+        self._open_orders = [o for o in self._open_orders if o.id != order.id]
+        if self._current_market is not None:
+            self._strategy.on_reject(self._ctx, self._current_market, order)
+
     def _activate_pending_orders(self, *, market_id: str | None = None) -> None:
         """Activate orders whose latency delay has elapsed.
 
@@ -461,7 +475,7 @@ class _EngineCore:
                         self._activate_limit_order(order)
                 except ValueError:
                     # Position no longer sufficient (e.g. duplicate sell from latency)
-                    order.status = OrderStatus.CANCELLED
+                    self._reject_order(order)
             else:
                 still_pending.append((activate_at, order))
         self._pending_orders = still_pending
@@ -498,12 +512,12 @@ class _EngineCore:
             order, self._fill_book(order), self._current_time,
         )
         if fill is None:
-            order.status = OrderStatus.CANCELLED
+            self._reject_order(order)
             return
         try:
             self._apply_fill(order, fill)
         except ValueError:
-            order.status = OrderStatus.CANCELLED
+            self._reject_order(order)
 
     def _try_fill_limit_orders(self, trade: TradeEvent) -> list[Fill]:
         fills: list[Fill] = []
@@ -521,15 +535,32 @@ class _EngineCore:
                 self._apply_fill(order, fill)
                 fills.append(fill)
             except ValueError:
-                order.status = OrderStatus.CANCELLED
-                self._open_orders = [o for o in self._open_orders if o.id != order.id]
-                self._fill_sim.unregister_order(order.id)
+                self._reject_order(order)
         return fills
 
     def _apply_fill(self, order: Order, fill: Fill) -> None:
-        # Check cash sufficiency for buy orders
+        # Check cash sufficiency for buy orders. Net the CTF-merge credit
+        # against the cost: buying the opposite side of an existing position
+        # nets matched YES+NO pairs back to $1 each (Portfolio.apply_fill).
+        # Without this credit, a fully-funded hedge can be falsely rejected
+        # purely because the gross buy notional exceeds free cash.
         if fill.side in (OrderSide.BUY_YES, OrderSide.BUY_NO):
-            cost = Decimal(fill.price) * Decimal(fill.size) + Decimal(fill.fee)
+            target_side = (
+                PositionSide.YES if fill.side == OrderSide.BUY_YES else PositionSide.NO
+            )
+            opposite = (
+                PositionSide.NO if target_side == PositionSide.YES else PositionSide.YES
+            )
+            pos = self._portfolio.position(fill.market_id)
+            matched = (
+                min(Decimal(pos.shares), Decimal(fill.size))
+                if pos.side == opposite else Decimal("0")
+            )
+            cost = (
+                Decimal(fill.price) * Decimal(fill.size)
+                + Decimal(fill.fee)
+                - matched
+            )
             if self._portfolio._cash < cost:
                 self._cash_rejected += 1
                 raise ValueError("Insufficient cash")

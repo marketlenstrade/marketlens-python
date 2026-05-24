@@ -323,17 +323,24 @@ class FillSimulator:
         trade_price = Decimal(trade.price)
         trade_size = Decimal(trade.size)
 
+        # A resting limit fills only when a taker reaches *its* level. Sweeps
+        # at better levels prints land on resting orders at those levels; your
+        # order only fills when its own level prints. Match on exact price
+        # (4dp quantize), not <=/>=, which over-fills on price-distant sweeps.
+        limit_q = limit_price.quantize(_FOUR)
+        trade_q = trade_price.quantize(_FOUR)
+
         triggered = False
         if order.side == OrderSide.BUY_YES:
-            triggered = trade.side == "SELL" and trade_price <= limit_price
+            triggered = trade.side == "SELL" and trade_q == limit_q
         elif order.side == OrderSide.SELL_YES:
-            triggered = trade.side == "BUY" and trade_price >= limit_price
+            triggered = trade.side == "BUY" and trade_q == limit_q
         elif order.side == OrderSide.BUY_NO:
-            yes_threshold = _ONE - limit_price
-            triggered = trade.side == "BUY" and trade_price >= yes_threshold
+            yes_level = (_ONE - limit_price).quantize(_FOUR)
+            triggered = trade.side == "BUY" and trade_q == yes_level
         elif order.side == OrderSide.SELL_NO:
-            yes_threshold = _ONE - limit_price
-            triggered = trade.side == "SELL" and trade_price <= yes_threshold
+            yes_level = (_ONE - limit_price).quantize(_FOUR)
+            triggered = trade.side == "SELL" and trade_q == yes_level
 
         if not triggered:
             return None
