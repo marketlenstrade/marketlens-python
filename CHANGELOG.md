@@ -2,6 +2,12 @@
 
 All notable changes to the `marketlens` Python SDK, version by version.
 
+## [1.3.0] 2026-05-26
+
+* New `DailyBudgetExceededError` exception for 429 responses with error code `DAILY_BUDGET_EXCEEDED`. Raised when the caller's daily event budget is exhausted (resets at midnight UTC). Unlike `RateLimitError`, this is NOT auto-retried by the SDK since the budget won't reset for hours.
+* RPM-based `RateLimitError` (429, code `RATE_LIMITED`) continues to be auto-retried with exponential backoff as before.
+* Rate limit and budget exhaustion error messages now include upgrade information for free-tier users.
+
 ## [1.2.2] 2026-05-18
 
 * Series export responses now include a `rate_limited` list of markets skipped because including them would exceed the caller's daily event budget. A new `SeriesRateLimited` dataclass carries the market id and event count; retry after budget reset or with a narrower `after`/`before` window.

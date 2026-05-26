@@ -39,6 +39,17 @@ class RateLimitError(APIError):
         self.retry_after = retry_after
 
 
+class DailyBudgetExceededError(APIError):
+    """429 Daily event budget exhausted. Resets at midnight UTC.
+
+    Not auto-retried by the SDK (unlike :class:`RateLimitError`).
+    """
+
+    def __init__(self, status_code: int, code: str, message: str, retry_after: int | None = None) -> None:
+        super().__init__(status_code, code, message)
+        self.retry_after = retry_after
+
+
 class ExportNotReadyError(APIError):
     """409 EXPORT_NOT_READY — pre-built parquet is not on the bucket yet."""
 
@@ -83,5 +94,6 @@ _CODE_TO_EXCEPTION: dict[str, type[APIError]] = {
     "RANGE_TOO_LARGE": InvalidParameterError,
     "CURSOR_EXPIRED": InvalidParameterError,
     "RATE_LIMITED": RateLimitError,
+    "DAILY_BUDGET_EXCEEDED": DailyBudgetExceededError,
     "EXPORT_NOT_READY": ExportNotReadyError,
 }
