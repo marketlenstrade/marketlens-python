@@ -7,6 +7,8 @@ All notable changes to the `marketlens` Python SDK, version by version.
 * New `DailyBudgetExceededError` exception for 429 responses with error code `DAILY_BUDGET_EXCEEDED`. Raised when the caller's daily event budget is exhausted (resets at midnight UTC). Unlike `RateLimitError`, this is NOT auto-retried by the SDK since the budget won't reset for hours.
 * RPM-based `RateLimitError` (429, code `RATE_LIMITED`) continues to be auto-retried with exponential backoff as before.
 * Rate limit and budget exhaustion error messages now include upgrade information for free-tier users.
+* New `on_reject(ctx, market, order)` strategy hook fires when the engine rejects an order (empty book, insufficient cash at activation, duplicate sell from latency). Distinct from user initiated cancellations so strategies can react to adverse fills.
+* Orders now fill against the live book at activation time, not the book at submission. An order in flight during the latency window sees price drift and depth changes, modeling real world adverse selection.
 
 ## [1.2.2] 2026-05-18
 
