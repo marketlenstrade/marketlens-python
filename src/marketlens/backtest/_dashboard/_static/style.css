@@ -1,0 +1,386 @@
+:root {
+    --bg: #F9F6F1;
+    --bg-contrast: #1B1915;
+    --surface: #FFFFFF;
+    --surface-warm: #FDFBF7;
+    --border: #DBD5C9;
+    --border-light: #EDE9E0;
+    --text: #1B1915;
+    --text-secondary: #635C52;
+    --text-tertiary: #9A9288;
+    --vermillion: #C44B28;
+    --vermillion-deep: #A33A1C;
+    --vermillion-soft: #FBF0EB;
+    --teal: #2A7A7A;
+    --teal-dark: #1D5C5C;
+    --teal-soft: #EAF3F3;
+
+    --font-body: 'Inter', system-ui, sans-serif;
+    --font-display: 'Newsreader', Georgia, serif;
+    --font-mono: 'JetBrains Mono', Menlo, monospace;
+
+    --run-0: #2A7A7A;
+    --run-1: #C44B28;
+    --run-2: #5B6ABF;
+    --run-3: #B8860B;
+    --run-4: #6B4C8A;
+}
+
+*, *::before, *::after {
+    box-sizing: border-box;
+    border-radius: 0 !important;
+}
+
+body {
+    margin: 0;
+    padding: 32px;
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--font-body);
+    font-size: 14px;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+}
+
+body::before {
+    content: '';
+    position: fixed;
+    inset: 0;
+    z-index: 9999;
+    pointer-events: none;
+    opacity: 0.028;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='300' height='300'%3E%3Cfilter id='g'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.65' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='300' height='300' filter='url(%23g)' opacity='1'/%3E%3C/svg%3E");
+}
+
+#app {
+    max-width: 1280px;
+    margin: 0 auto;
+}
+
+/* ── Header ─────────────────────────────────── */
+
+#header {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    margin-bottom: 32px;
+    padding-bottom: 16px;
+    border-bottom: 1px solid var(--border);
+}
+
+.header-title {
+    font-family: var(--font-display);
+    font-size: 28px;
+    font-weight: 400;
+    margin: 0;
+    letter-spacing: -0.01em;
+}
+
+.header-subtitle {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--text-tertiary);
+    margin-left: 16px;
+}
+
+#run-selector {
+    display: flex;
+    gap: 12px;
+    align-items: center;
+}
+
+.run-toggle {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    cursor: pointer;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--text-secondary);
+    user-select: none;
+}
+
+.run-toggle input { display: none; }
+
+.run-dot {
+    width: 8px;
+    height: 8px;
+    display: inline-block;
+    flex-shrink: 0;
+}
+
+.run-toggle.muted { opacity: 0.35; }
+
+/* ── Section label ──────────────────────────── */
+
+.section-label {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    font-weight: 500;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--vermillion);
+    margin-bottom: 12px;
+}
+
+/* ── KPI Groups ─────────────────────────────── */
+
+#kpi-section {
+    margin-bottom: 32px;
+}
+
+.kpi-groups {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 1px;
+    background: var(--border);
+    border: 1px solid var(--border);
+}
+
+.kpi-group {
+    background: var(--surface);
+    padding: 16px 20px;
+}
+
+.kpi-group-title {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    font-weight: 500;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--vermillion);
+    margin-bottom: 10px;
+}
+
+.kpi-row {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    padding: 3px 0;
+}
+
+.kpi-row-label {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--text-tertiary);
+}
+
+.kpi-row-value {
+    font-family: var(--font-display);
+    font-size: 20px;
+    font-weight: 400;
+    font-variant-numeric: tabular-nums;
+}
+
+.kpi-row-value.positive { color: var(--teal); }
+.kpi-row-value.negative { color: var(--vermillion); }
+
+/* Comparison: stacked run values */
+.kpi-row-values {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 1px;
+}
+
+.kpi-run-line {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+}
+
+.kpi-run-line .run-dot { width: 5px; height: 5px; }
+
+.kpi-run-line .value {
+    font-family: var(--font-display);
+    font-size: 16px;
+    font-weight: 400;
+    font-variant-numeric: tabular-nums;
+}
+
+.kpi-run-line .value.best {
+    color: var(--teal);
+    font-weight: 600;
+}
+
+/* ── Chart cards ────────────────────────────── */
+
+#charts-section {
+    display: flex;
+    flex-direction: column;
+    gap: 24px;
+    margin-bottom: 32px;
+}
+
+.chart-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 24px;
+}
+
+.chart-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    padding: 24px;
+}
+
+.chart-container {
+    width: 100%;
+    min-height: 280px;
+}
+
+.chart-container-sm {
+    width: 100%;
+    min-height: 200px;
+}
+
+.no-data {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 200px;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    color: var(--text-tertiary);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+}
+
+/* ── Settlements table ──────────────────────── */
+
+#settlements-section {
+    margin-bottom: 32px;
+}
+
+.table-wrapper {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    overflow-x: auto;
+}
+
+.table-wrapper table {
+    width: 100%;
+    border-collapse: collapse;
+    font-family: var(--font-mono);
+    font-size: 11px;
+}
+
+.table-wrapper th {
+    background: var(--surface-warm);
+    padding: 10px 12px;
+    text-align: left;
+    font-weight: 500;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--text-secondary);
+    border-bottom: 1px solid var(--border);
+    cursor: pointer;
+    white-space: nowrap;
+    user-select: none;
+}
+
+.table-wrapper th:hover { color: var(--text); }
+
+.table-wrapper th .sort-arrow {
+    margin-left: 4px;
+    opacity: 0.4;
+}
+
+.table-wrapper th.sorted .sort-arrow {
+    opacity: 1;
+    color: var(--vermillion);
+}
+
+.table-wrapper td {
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--border-light);
+    white-space: nowrap;
+}
+
+.table-wrapper tr:last-child td { border-bottom: none; }
+.table-wrapper tr:hover td { background: var(--surface-warm); }
+
+.cell-positive { color: var(--teal); }
+.cell-negative { color: var(--vermillion); }
+
+.show-more-row td {
+    text-align: center;
+    padding: 12px;
+    background: var(--surface-warm);
+}
+
+.show-more-btn {
+    background: none;
+    border: 1px solid var(--border);
+    padding: 6px 20px;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--text-secondary);
+    cursor: pointer;
+}
+
+.show-more-btn:hover {
+    color: var(--text);
+    border-color: var(--text-tertiary);
+}
+
+/* ── Config (inline) ────────────────────────── */
+
+#config-section {
+    margin-bottom: 64px;
+}
+
+.config-inline {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    padding: 12px 20px;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--text-secondary);
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 16px;
+}
+
+.config-inline .cfg-pair {
+    white-space: nowrap;
+}
+
+.config-inline .cfg-key {
+    color: var(--text-tertiary);
+}
+
+.config-inline .cfg-val {
+    color: var(--text);
+}
+
+/* ── Loading ────────────────────────────────── */
+
+#loading {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 60vh;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    color: var(--text-tertiary);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+}
+
+/* ── Responsive ─────────────────────────────── */
+
+@media (max-width: 768px) {
+    body { padding: 20px; }
+    .chart-row { grid-template-columns: 1fr; }
+    .kpi-grid { grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); }
+    .kpi-value { font-size: 22px; }
+    #header { flex-direction: column; gap: 8px; }
+    #run-selector { flex-wrap: wrap; }
+}

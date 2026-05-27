@@ -50,6 +50,7 @@ class BacktestResult:
         *,
         config: "BacktestConfig | None" = None,
         targets: dict | None = None,
+        market_names: dict[str, str] | None = None,
     ) -> None:
         self._portfolio = portfolio
         self._orders = orders
@@ -59,6 +60,7 @@ class BacktestResult:
         self.cash_rejected = cash_rejected
         self.config = config
         self.targets = dict(targets) if targets else {}
+        self.market_names: dict[str, str] = dict(market_names) if market_names else {}
         self.initial_cash = portfolio.initial_cash
 
         initial = Decimal(portfolio.initial_cash)
@@ -396,6 +398,37 @@ class BacktestResult:
         """Alias for ``settlements_df()`` (SDK convention)."""
         return self.settlements_df()
 
+    # ── Visualization ─────────────────────────────────────────────
+
+    def show(
+        self,
+        *others: "BacktestResult",
+        labels: list[str] | None = None,
+        title: str | None = None,
+        open_browser: bool = True,
+    ) -> None:
+        """Open a local browser dashboard for this result.
+
+        Pass additional results as positional args to compare runs side by side.
+        The server blocks on the main thread until Ctrl+C.
+        """
+        from marketlens.backtest._dashboard import show as _show
+
+        _show(self, *others, labels=labels, title=title, open_browser=open_browser)
+
+    @classmethod
+    def dashboard(
+        cls,
+        *paths: str | Path,
+        labels: list[str] | None = None,
+        title: str | None = None,
+        open_browser: bool = True,
+    ) -> None:
+        """Load saved results and open a browser dashboard."""
+        from marketlens.backtest._dashboard import dashboard as _dashboard
+
+        _dashboard(*paths, labels=labels, title=title, open_browser=open_browser)
+
     # ── Persistence ───────────────────────────────────────────────
 
     def save(self, path: str | Path, *, overwrite: bool = False) -> Path:
@@ -435,6 +468,7 @@ class BacktestResult:
             "metrics": self._metrics_dict(),
             "cash_rejected": self.cash_rejected,
             "initial_cash": self.initial_cash,
+            "market_names": self.market_names,
         }
         with open(out / "manifest.json", "w") as f:
             json.dump(manifest, f, indent=2)
@@ -473,6 +507,7 @@ class BacktestResult:
         obj.initial_cash = manifest.get("initial_cash", "0.0000")
         obj.config = _deserialize_config(manifest.get("config"))
         obj.targets = manifest.get("targets") or {}
+        obj.market_names = manifest.get("market_names") or {}
 
         obj._orders, obj._fills = _read_orders_and_fills(src)
         obj._settlements = _read_settlements(src)

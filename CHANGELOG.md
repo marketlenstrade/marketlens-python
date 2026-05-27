@@ -2,6 +2,12 @@
 
 All notable changes to the `marketlens` Python SDK, version by version.
 
+## [1.3.1] 2026-05-27
+
+* Interactive backtest dashboard. Call `result.show()` to open a local browser dashboard with equity curve, drawdown, PnL by market, PnL distribution, trade timeline, order analysis, and a sortable settlements table. Zero new dependencies — uses plotly.js via CDN and Python's stdlib HTTP server.
+* Multi-run comparison. Pass additional results to `result.show(other)` or load from disk with `BacktestResult.dashboard("path1", "path2")`. Charts overlay runs, metrics highlight the best value per row, and toggle checkboxes control visibility.
+* Market names stored in backtest results. The engine now persists `Market.question` text alongside market IDs so the dashboard, charts, and tables display human-readable names instead of UUIDs. Backward compatible — older saved results fall back to truncated IDs.
+
 ## [1.3.0] 2026-05-26
 
 * New `DailyBudgetExceededError` exception for 429 responses with error code `DAILY_BUDGET_EXCEEDED`. Raised when the caller's daily event budget is exhausted (resets at midnight UTC). Unlike `RateLimitError`, this is NOT auto-retried by the SDK since the budget won't reset for hours.

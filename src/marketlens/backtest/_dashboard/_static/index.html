@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Backtest Dashboard — MarketLens</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Newsreader:opsz,wght@6..72,400;6..72,600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <script src="https://cdn.plot.ly/plotly-2.35.2.min.js" charset="utf-8"></script>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div id="app">
+        <div id="loading">Loading dashboard…</div>
+    </div>
+    <template id="tpl-main">
+        <header id="header">
+            <div>
+                <h1 class="header-title">Backtest Dashboard</h1>
+                <span class="header-subtitle" id="run-info"></span>
+            </div>
+            <div id="run-selector"></div>
+        </header>
+
+        <section id="kpi-section">
+            <div class="kpi-groups" id="kpi-groups"></div>
+        </section>
+
+        <section id="charts-section">
+            <div class="chart-card">
+                <div class="section-label">Equity Curve</div>
+                <div id="chart-equity" class="chart-container"></div>
+            </div>
+            <div class="chart-card">
+                <div class="section-label">Drawdown</div>
+                <div id="chart-drawdown" class="chart-container-sm"></div>
+            </div>
+            <div class="chart-row">
+                <div class="chart-card">
+                    <div class="section-label">PnL by Market</div>
+                    <div id="chart-pnl-market" class="chart-container"></div>
+                </div>
+                <div class="chart-card">
+                    <div class="section-label">PnL Distribution</div>
+                    <div id="chart-pnl-dist" class="chart-container"></div>
+                </div>
+            </div>
+            <div class="chart-row">
+                <div class="chart-card">
+                    <div class="section-label">Trade Timeline</div>
+                    <div id="chart-trades" class="chart-container"></div>
+                </div>
+                <div class="chart-card">
+                    <div class="section-label">Order Analysis</div>
+                    <div id="chart-orders" class="chart-container"></div>
+                </div>
+            </div>
+        </section>
+
+        <section id="settlements-section">
+            <div class="section-label">Settlements</div>
+            <div class="table-wrapper" id="settlements-table"></div>
+        </section>
+
+        <section id="config-section">
+            <div class="section-label">Configuration</div>
+            <div class="config-inline" id="config-inline"></div>
+        </section>
+    </template>
+    <script src="dashboard.js"></script>
+</body>
+</html>

@@ -991,6 +991,7 @@ class _EngineCore:
             cash_rejected=self._cash_rejected,
             config=self._config,
             targets=dict(self._targets),
+            market_names={mid: m.question for mid, m in self._market_objs.items()},
         )
 
     def _capture_targets(
