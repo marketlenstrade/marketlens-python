@@ -43,14 +43,14 @@ class Surface(BaseModel):
     computed_at: int
     expiry_ms: int
     n_strikes: int
-    implied_mean: str | None = None
-    implied_cv: str | None = None
-    implied_skew: str | None = None
+    implied_mean: float | None = None
+    implied_cv: float | None = None
+    implied_skew: float | None = None
     # Barrier-specific: expected peak/trough from reach/dip curves
-    implied_peak: str | None = None
-    implied_peak_cv: str | None = None
-    implied_trough: str | None = None
-    implied_trough_cv: str | None = None
+    implied_peak: float | None = None
+    implied_peak_cv: float | None = None
+    implied_trough: float | None = None
+    implied_trough_cv: float | None = None
     strikes: list[dict]
 
     def survival_strikes(self) -> list[SurvivalStrike]:

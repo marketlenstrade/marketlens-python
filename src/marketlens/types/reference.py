@@ -2,17 +2,21 @@ from __future__ import annotations
 
 from pydantic import BaseModel, ConfigDict
 
+from marketlens.types._validators import none_to_zero
+
 
 class ReferenceCandle(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     symbol: str
     timestamp: int
-    open: str
-    high: str
-    low: str
-    close: str
-    volume: str | None = None
+    open: float
+    high: float
+    low: float
+    close: float
+    volume: float = 0.0
+
+    _coerce = none_to_zero("volume")
 
 
 class ReferenceTrade(BaseModel):
@@ -20,6 +24,6 @@ class ReferenceTrade(BaseModel):
 
     symbol: str
     timestamp: int
-    price: str
-    quantity: str
+    price: float
+    quantity: float
     is_buyer_maker: bool

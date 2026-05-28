@@ -160,7 +160,7 @@ class TestOrderbookWalk:
         market, book = results[0]
         assert isinstance(market, Market)
         assert market.id == "m1"
-        assert book.best_bid == "0.6000"
+        assert book.best_bid == pytest.approx(0.60)
 
     def test_orderbook_walk_multiple_markets(self, mock_api, client):
         """walk() should cross market boundaries with fresh replay per market."""
@@ -194,7 +194,7 @@ class TestOrderbookWalk:
         assert results[1][0].id == "m1"
         # m2 event — fresh replay, different book
         assert results[2][0].id == "m2"
-        assert results[2][1].best_bid == "0.5500"
+        assert results[2][1].best_bid == pytest.approx(0.55)
 
     def test_orderbook_walk_params_passthrough(self, mock_api, client):
         """status and other params should be forwarded to series.walk."""
@@ -286,7 +286,7 @@ class TestOrderbookWalk:
         market, book = results[0]
         assert isinstance(market, Market)
         assert market.id == "m1"
-        assert book.best_bid == "0.6000"
+        assert book.best_bid == pytest.approx(0.60)
 
     def test_orderbook_walk_single_market_to_dataframe(self, mock_api, client):
         """walk() with a market ID supports to_dataframe()."""

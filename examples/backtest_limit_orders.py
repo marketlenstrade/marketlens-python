@@ -14,13 +14,12 @@ from marketlens.backtest import Strategy
 
 class LimitTrader(Strategy):
     def on_market_start(self, ctx, market, book):
-        if book.midpoint:
-            mid = float(book.midpoint)
-            ctx.buy_yes(size="50", limit_price=f"{mid - 0.02:.4f}")
+        if book.bid_levels and book.ask_levels:
+            ctx.buy_yes(size=50, limit_price=book.midpoint - 0.02)
 
     def on_fill(self, ctx, market, fill):
         if fill.side.value.startswith("BUY"):
-            ctx.sell_yes(size=fill.size, limit_price=f"{float(fill.price) + 0.04:.4f}")
+            ctx.sell_yes(size=fill.size, limit_price=fill.price + 0.04)
 
 
 client = MarketLens()
@@ -28,7 +27,7 @@ result = client.backtest(
     LimitTrader(), "eth-up-or-down-5m",
     after=datetime(2026, 3, 5, 10, 0, tzinfo=timezone.utc),
     before=datetime(2026, 3, 5, 10, 5, tzinfo=timezone.utc),
-    initial_cash="10000.0000",
+    initial_cash=10_000,
     include_trades=True,
     queue_position=True,
 )

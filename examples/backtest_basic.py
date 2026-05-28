@@ -18,14 +18,14 @@ class SpreadTimer(Strategy):
         if self._entered:
             return
         if (s := book.spread_bps()) and s < 300 and book.imbalance(levels=3) > 0.1:
-            ctx.buy_yes(size="200")
+            ctx.buy_yes(size=200)
             self._entered = True
 
 
 client = MarketLens()
 result = client.backtest(
     SpreadTimer(), "solana-up-or-down-hourly",
-    initial_cash="10000.0000",
+    initial_cash=10_000,
     after=datetime(2026, 3, 5, 10, 0, tzinfo=timezone.utc),
     before=datetime(2026, 3, 5, 10, 5, tzinfo=timezone.utc),
 )

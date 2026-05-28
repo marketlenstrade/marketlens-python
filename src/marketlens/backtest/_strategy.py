@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from abc import ABC
-from decimal import Decimal
 from typing import Any
 
 from marketlens.backtest._types import (
@@ -52,10 +51,10 @@ class StrategyContext:
 
     def buy_yes(
         self,
-        size: str | float | int | Decimal,
+        size: float | int | str,
         *,
         market_id: str | None = None,
-        limit_price: str | float | int | Decimal | None = None,
+        limit_price: float | int | str | None = None,
         cancel_after: int | None = None,
     ) -> Order:
         return self._engine.submit_order(
@@ -65,10 +64,10 @@ class StrategyContext:
 
     def buy_no(
         self,
-        size: str | float | int | Decimal,
+        size: float | int | str,
         *,
         market_id: str | None = None,
-        limit_price: str | float | int | Decimal | None = None,
+        limit_price: float | int | str | None = None,
         cancel_after: int | None = None,
     ) -> Order:
         return self._engine.submit_order(
@@ -78,10 +77,10 @@ class StrategyContext:
 
     def sell_yes(
         self,
-        size: str | float | int | Decimal,
+        size: float | int | str,
         *,
         market_id: str | None = None,
-        limit_price: str | float | int | Decimal | None = None,
+        limit_price: float | int | str | None = None,
         cancel_after: int | None = None,
     ) -> Order:
         return self._engine.submit_order(
@@ -91,10 +90,10 @@ class StrategyContext:
 
     def sell_no(
         self,
-        size: str | float | int | Decimal,
+        size: float | int | str,
         *,
         market_id: str | None = None,
-        limit_price: str | float | int | Decimal | None = None,
+        limit_price: float | int | str | None = None,
         cancel_after: int | None = None,
     ) -> Order:
         return self._engine.submit_order(
@@ -148,11 +147,11 @@ class StrategyContext:
         return self._engine.portfolio.position(mid)
 
     @property
-    def cash(self) -> str:
+    def cash(self) -> float:
         return self._engine.portfolio.cash
 
     @property
-    def equity(self) -> str:
+    def equity(self) -> float:
         return self._engine.portfolio.equity
 
     @property
@@ -175,14 +174,14 @@ class StrategyContext:
     def books(self) -> dict[str, OrderBook]:
         return dict(self._engine._books)
 
-    def reference_price(self, market_id: str | None = None) -> str | None:
+    def reference_price(self, market_id: str | None = None) -> float | None:
         """Return the latest reference price for the market's underlying at the current time."""
         mid = market_id or self._engine.current_market.id
         underlying = self._engine._market_underlying.get(mid)
         return self._engine.get_reference_price(underlying, self._engine.current_time)
 
-    def reference_prices(self, market_id: str | None = None) -> list[tuple[int, str]]:
-        """Return the full reference price history as [(timestamp_ms, price_str), ...].
+    def reference_prices(self, market_id: str | None = None) -> list[tuple[int, float]]:
+        """Return the full reference price history as ``[(timestamp_ms, price), ...]``.
 
         Only includes prices up to the current backtest time.
         """
@@ -193,7 +192,7 @@ class StrategyContext:
         all_prices = self._engine._ref_prices[underlying]
         # Only return prices up to current time to prevent lookahead
         import bisect
-        end = bisect.bisect_right(all_prices, (self._engine.current_time, "~"))
+        end = bisect.bisect_right(all_prices, (self._engine.current_time, float("inf")))
         return all_prices[:end]
 
     # ── Signal logging ──────────────────────────────────────────

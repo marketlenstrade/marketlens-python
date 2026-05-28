@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from decimal import Decimal
 from typing import TYPE_CHECKING
 
 from marketlens.backtest._fees import FeeModel
@@ -11,40 +10,52 @@ if TYPE_CHECKING:
     from marketlens.types.history import TradeEvent
     from marketlens.types.orderbook import OrderBook
 
-_FOUR = Decimal("0.0001")
-_ZERO = Decimal("0")
-_ONE = Decimal("1")
+
+# Price levels are stored as NUMERIC(6,4); round to match when comparing or
+# keying by price so floating-point representation drift never produces false
+# misses against API-supplied values.
+_PRICE_DP = 4
+_SHARE_DP = 4
+_PRICE_EPS = 5e-5  # half a tick at 4 d.p.
+
+
+def _qp(value) -> float:
+    return round(float(value), _PRICE_DP)
+
+
+def _qs(value) -> float:
+    return round(float(value), _SHARE_DP)
 
 
 @dataclass
 class _QueueState:
     market_id: str       # which market this order belongs to
-    price: str           # YES-normalized price where order rests
+    price: float         # YES-normalized price where order rests (4 d.p.)
     book_side: str       # "BUY" or "SELL" — side of book the order rests on
-    queue_ahead: Decimal  # shares ahead in queue
-    level_size: Decimal   # last known total size at this price level
+    queue_ahead: float   # shares ahead in queue
+    level_size: float    # last known total size at this price level
 
 
-def _order_resting_level(order: Order) -> tuple[str, str]:
+def _order_resting_level(order: Order) -> tuple[float, str]:
     """Return (yes_price, book_side) for where a limit order rests."""
-    price = Decimal(order.limit_price)
+    price = order.limit_price
     if order.side == OrderSide.BUY_YES:
-        return str(price.quantize(_FOUR)), "BUY"
+        return _qp(price), "BUY"
     elif order.side == OrderSide.SELL_YES:
-        return str(price.quantize(_FOUR)), "SELL"
+        return _qp(price), "SELL"
     elif order.side == OrderSide.BUY_NO:
-        return str((_ONE - price).quantize(_FOUR)), "SELL"
+        return _qp(1.0 - price), "SELL"
     else:  # SELL_NO
-        return str((_ONE - price).quantize(_FOUR)), "BUY"
+        return _qp(1.0 - price), "BUY"
 
 
-def _depth_at_price(book: OrderBook, price: str, side: str) -> Decimal:
+def _depth_at_price(book: OrderBook, price: float, side: str) -> float:
     """Look up total size at a specific price level."""
     levels = book.bids if side == "BUY" else book.asks
     for level in levels:
-        if level.price == price:
-            return Decimal(level.size)
-    return _ZERO
+        if abs(level.price - price) < _PRICE_EPS:
+            return level.size
+    return 0.0
 
 
 class QueuePositionTracker:
@@ -65,26 +76,29 @@ class QueuePositionTracker:
     def unregister(self, order_id: str) -> None:
         self._states.pop(order_id, None)
 
-    def on_trade(self, order_id: str, trade_size: Decimal, trade_price: str, trade_side: str) -> Decimal:
+    def on_trade(self, order_id: str, trade_size: float, trade_price: float, trade_side: str) -> float:
         """Drain queue for a specific order on a matching trade.
         Returns fill-available size (0 if still queued)."""
         state = self._states.get(order_id)
         if state is None:
-            return _ZERO
+            return 0.0
+
+        trade_price_f = float(trade_price)
+        trade_size_f = float(trade_size)
 
         # Trade side is taker side. SELL taker consumes BUY book side, and vice versa.
         consumed_side = "BUY" if trade_side == "SELL" else "SELL"
-        if state.book_side != consumed_side or state.price != trade_price:
-            return _ZERO
+        if state.book_side != consumed_side or abs(state.price - trade_price_f) >= _PRICE_EPS:
+            return 0.0
 
-        state.queue_ahead -= trade_size
-        if state.queue_ahead < _ZERO:
-            available = min(-state.queue_ahead, trade_size)
-            state.queue_ahead = _ZERO
+        state.queue_ahead -= trade_size_f
+        if state.queue_ahead < 0.0:
+            available = min(-state.queue_ahead, trade_size_f)
+            state.queue_ahead = 0.0
             return available
-        return _ZERO
+        return 0.0
 
-    def on_delta(self, market_id: str, price: str, new_size: Decimal, side: str) -> None:
+    def on_delta(self, market_id: str, price: float, new_size: float, side: str) -> None:
         """Update queue positions on book level change.
 
         Any decrease is proportionally attributed to queue positions — we
@@ -92,16 +106,17 @@ class QueuePositionTracker:
         because delta events typically arrive before their corresponding
         trade events (~65-75% of the time, median ~7-28ms ahead).
         """
-        norm_price = str(Decimal(price).quantize(_FOUR))
+        norm_price = _qp(price)
+        new_size = float(new_size)
         for state in self._states.values():
-            if state.market_id != market_id or state.price != norm_price or state.book_side != side:
+            if state.market_id != market_id or abs(state.price - norm_price) >= _PRICE_EPS or state.book_side != side:
                 continue
 
             old_size = state.level_size
-            if new_size < old_size and old_size > _ZERO:
+            if new_size < old_size and old_size > 0.0:
                 decrease = old_size - new_size
                 proportion = state.queue_ahead / old_size
-                state.queue_ahead = max(_ZERO, state.queue_ahead - decrease * proportion)
+                state.queue_ahead = max(0.0, state.queue_ahead - decrease * proportion)
 
             state.level_size = new_size
 
@@ -127,9 +142,9 @@ class FillSimulator:
     ) -> None:
         self._fee_model = fee_model
         self._taker_only = taker_only
-        self._max_fill_fraction = Decimal(str(max_fill_fraction))
-        self._slippage_bps = Decimal(str(slippage_bps))
-        self._limit_fill_rate = Decimal(str(limit_fill_rate))
+        self._max_fill_fraction = float(max_fill_fraction)
+        self._slippage_bps = float(slippage_bps)
+        self._limit_fill_rate = float(limit_fill_rate)
         self._tracker = QueuePositionTracker() if queue_position else None
 
     def register_limit_order(self, order: Order, book: OrderBook) -> None:
@@ -140,9 +155,9 @@ class FillSimulator:
         if self._tracker is not None:
             self._tracker.unregister(order_id)
 
-    def notify_delta(self, market_id: str, price: str, new_size: str, side: str) -> None:
+    def notify_delta(self, market_id: str, price: float, new_size: float, side: str) -> None:
         if self._tracker is not None:
-            self._tracker.on_delta(market_id, price, Decimal(new_size), side)
+            self._tracker.on_delta(market_id, price, new_size, side)
 
     def notify_snapshot(self, market_id: str, book: OrderBook) -> None:
         if self._tracker is not None:
@@ -151,7 +166,7 @@ class FillSimulator:
     def try_fill_market_order(
         self, order: Order, book: OrderBook, timestamp: int,
     ) -> Fill | None:
-        remaining = Decimal(order.size) - Decimal(order.filled_size)
+        remaining = order.size - order.filled_size
         if remaining <= 0:
             return None
 
@@ -161,16 +176,15 @@ class FillSimulator:
         else:
             levels = book.bids
 
-        total_filled = _ZERO
-        total_cost = _ZERO  # in YES-price space
+        total_filled = 0.0
+        total_cost = 0.0  # in YES-price space
 
         for level in levels:
-            available = Decimal(level.size) * self._max_fill_fraction
-            level_price = Decimal(level.price)
+            available = level.size * self._max_fill_fraction
             fill = min(remaining - total_filled, available)
             if fill <= 0:
                 break
-            total_cost += fill * level_price
+            total_cost += fill * level.price
             total_filled += fill
             if total_filled >= remaining:
                 break
@@ -182,36 +196,35 @@ class FillSimulator:
 
         # Convert to the order's price space
         if order.side in (OrderSide.BUY_NO, OrderSide.SELL_NO):
-            fill_price = _ONE - yes_vwap
+            fill_price = 1.0 - yes_vwap
         else:
             fill_price = yes_vwap
 
         # Apply slippage: worse price for the trader
-        if self._slippage_bps != _ZERO:
-            slip = fill_price * self._slippage_bps / Decimal("10000")
+        if self._slippage_bps != 0.0:
+            slip = fill_price * self._slippage_bps / 10_000.0
             if order.side in (OrderSide.BUY_YES, OrderSide.BUY_NO):
                 fill_price += slip  # buys fill higher
             else:
                 fill_price -= slip  # sells fill lower
-            fill_price = max(_ZERO, min(_ONE, fill_price))
+            fill_price = max(0.0, min(1.0, fill_price))
 
         # Quantize first, then bail if the rounded size is zero — a tiny
-        # last sliver below 1e-4 would otherwise emit ``size="0.0000"`` and
+        # last sliver below 1e-4 would otherwise emit ``size=0.0`` and
         # break the engine's avg-fill-price division.
-        fill_size_q = total_filled.quantize(_FOUR)
-        if fill_size_q <= _ZERO:
+        fill_size_q = _qs(total_filled)
+        if fill_size_q <= 0.0:
             return None
-        fill_price_str = str(fill_price.quantize(_FOUR))
-        fill_size_str = str(fill_size_q)
+        fill_price_q = _qp(fill_price)
         fee = self._fee_model.calculate(fill_price, total_filled, is_maker=False)
 
         return Fill(
             order_id=order.id,
             market_id=order.market_id,
             side=order.side,
-            price=fill_price_str,
-            size=fill_size_str,
-            fee=str(fee.quantize(_FOUR)),
+            price=fill_price_q,
+            size=fill_size_q,
+            fee=_qs(fee),
             timestamp=timestamp,
             is_maker=False,
         )
@@ -229,11 +242,12 @@ class FillSimulator:
 
         Returns None if the order does not cross the spread.
         """
-        remaining = Decimal(order.size) - Decimal(order.filled_size)
+        remaining = order.size - order.filled_size
         if remaining <= 0:
             return None
 
-        limit_price = Decimal(order.limit_price)  # type: ignore[arg-type]
+        limit_price = order.limit_price  # type: ignore[assignment]
+        assert limit_price is not None
 
         # Determine which side of the book to walk and the price constraint.
         # YES-denominated book: asks sorted ascending, bids sorted descending.
@@ -248,29 +262,27 @@ class FillSimulator:
         elif order.side == OrderSide.BUY_NO:
             # BUY_NO at p ≡ SELL_YES at (1-p): walk bids, accept bid >= (1-p)
             levels = book.bids
-            yes_limit = _ONE - limit_price
+            yes_limit = 1.0 - limit_price
             accept = lambda lp: lp >= yes_limit  # noqa: E731
         elif order.side == OrderSide.SELL_NO:
             # SELL_NO at p ≡ BUY_YES at (1-p): walk asks, accept ask <= (1-p)
             levels = book.asks
-            yes_limit = _ONE - limit_price
+            yes_limit = 1.0 - limit_price
             accept = lambda lp: lp <= yes_limit  # noqa: E731
         else:
             return None
 
-        # Walk levels up to the limit price
-        total_filled = _ZERO
-        total_cost = _ZERO  # in YES-price space
+        total_filled = 0.0
+        total_cost = 0.0
 
         for level in levels:
-            level_price = Decimal(level.price)
-            if not accept(level_price):
+            if not accept(level.price):
                 break
-            available = Decimal(level.size) * self._max_fill_fraction
+            available = level.size * self._max_fill_fraction
             fill = min(remaining - total_filled, available)
             if fill <= 0:
                 break
-            total_cost += fill * level_price
+            total_cost += fill * level.price
             total_filled += fill
             if total_filled >= remaining:
                 break
@@ -280,27 +292,24 @@ class FillSimulator:
 
         yes_vwap = total_cost / total_filled
 
-        # Convert to the order's price space
         if order.side in (OrderSide.BUY_NO, OrderSide.SELL_NO):
-            fill_price = _ONE - yes_vwap
+            fill_price = 1.0 - yes_vwap
         else:
             fill_price = yes_vwap
 
-        # Same sub-1e-4-sliver guard as the market path above.
-        fill_size_q = total_filled.quantize(_FOUR)
-        if fill_size_q <= _ZERO:
+        fill_size_q = _qs(total_filled)
+        if fill_size_q <= 0.0:
             return None
-        fill_price_str = str(fill_price.quantize(_FOUR))
-        fill_size_str = str(fill_size_q)
+        fill_price_q = _qp(fill_price)
         fee = self._fee_model.calculate(fill_price, total_filled, is_maker=False)
 
         return Fill(
             order_id=order.id,
             market_id=order.market_id,
             side=order.side,
-            price=fill_price_str,
-            size=fill_size_str,
-            fee=str(fee.quantize(_FOUR)),
+            price=fill_price_q,
+            size=fill_size_q,
+            fee=_qs(fee),
             timestamp=timestamp,
             is_maker=False,
         )
@@ -315,45 +324,45 @@ class FillSimulator:
         if trade is None:
             return None
 
-        remaining = Decimal(order.size) - Decimal(order.filled_size)
+        remaining = order.size - order.filled_size
         if remaining <= 0:
             return None
 
-        limit_price = Decimal(order.limit_price)  # type: ignore[arg-type]
-        trade_price = Decimal(trade.price)
-        trade_size = Decimal(trade.size)
+        limit_price = order.limit_price  # type: ignore[assignment]
+        assert limit_price is not None
+        trade_price = trade.price
+        trade_size = trade.size
 
         # A resting limit fills only when a taker reaches *its* level. Sweeps
         # at better levels prints land on resting orders at those levels; your
         # order only fills when its own level prints. Match on exact price
         # (4dp quantize), not <=/>=, which over-fills on price-distant sweeps.
-        limit_q = limit_price.quantize(_FOUR)
-        trade_q = trade_price.quantize(_FOUR)
+        limit_q = _qp(limit_price)
+        trade_q = _qp(trade_price)
 
         triggered = False
         if order.side == OrderSide.BUY_YES:
-            triggered = trade.side == "SELL" and trade_q == limit_q
+            triggered = trade.side == "SELL" and abs(trade_q - limit_q) < _PRICE_EPS
         elif order.side == OrderSide.SELL_YES:
-            triggered = trade.side == "BUY" and trade_q == limit_q
+            triggered = trade.side == "BUY" and abs(trade_q - limit_q) < _PRICE_EPS
         elif order.side == OrderSide.BUY_NO:
-            yes_level = (_ONE - limit_price).quantize(_FOUR)
-            triggered = trade.side == "BUY" and trade_q == yes_level
+            yes_level = _qp(1.0 - limit_price)
+            triggered = trade.side == "BUY" and abs(trade_q - yes_level) < _PRICE_EPS
         elif order.side == OrderSide.SELL_NO:
-            yes_level = (_ONE - limit_price).quantize(_FOUR)
-            triggered = trade.side == "SELL" and trade_q == yes_level
+            yes_level = _qp(1.0 - limit_price)
+            triggered = trade.side == "SELL" and abs(trade_q - yes_level) < _PRICE_EPS
 
         if not triggered:
             return None
 
         if self._tracker is not None:
-            trade_price_norm = str(trade_price.quantize(_FOUR))
-            available = self._tracker.on_trade(order.id, trade_size, trade_price_norm, trade.side)
-            if available <= _ZERO:
+            available = self._tracker.on_trade(order.id, trade_size, _qp(trade_price), trade.side)
+            if available <= 0.0:
                 return None
         else:
             available = trade_size * self._limit_fill_rate
-        fill_size = min(remaining, available).quantize(_FOUR)
-        if fill_size <= _ZERO:
+        fill_size = _qs(min(remaining, available))
+        if fill_size <= 0.0:
             return None
         fee = self._fee_model.calculate(limit_price, fill_size, is_maker=True)
 
@@ -361,9 +370,9 @@ class FillSimulator:
             order_id=order.id,
             market_id=order.market_id,
             side=order.side,
-            price=str(limit_price.quantize(_FOUR)),
-            size=str(fill_size.quantize(_FOUR)),
-            fee=str(fee.quantize(_FOUR)),
+            price=_qp(limit_price),
+            size=fill_size,
+            fee=_qs(fee),
             timestamp=timestamp,
             is_maker=True,
         )

@@ -38,9 +38,9 @@ class Fill(BaseModel):
     order_id: str
     market_id: str
     side: OrderSide
-    price: str
-    size: str
-    fee: str
+    price: float
+    size: float
+    fee: float
     timestamp: int
     is_maker: bool
 
@@ -50,13 +50,13 @@ class Order(BaseModel):
     market_id: str
     side: OrderSide
     order_type: OrderType
-    size: str
-    limit_price: str | None = None
+    size: float
+    limit_price: float | None = None
     submitted_at: int
     status: OrderStatus = OrderStatus.PENDING
-    filled_size: str = "0.0000"
-    avg_fill_price: str | None = None
-    total_fees: str = "0.0000"
+    filled_size: float = 0.0
+    avg_fill_price: float | None = None
+    total_fees: float = 0.0
     fills: list[Fill] = Field(default_factory=list)
     cancel_after: int | None = None
 
@@ -66,12 +66,12 @@ class Position(BaseModel):
 
     market_id: str
     side: PositionSide
-    shares: str
-    avg_entry_price: str
-    cost_basis: str
-    unrealized_pnl: str
-    realized_pnl: str
-    total_fees: str
+    shares: float
+    avg_entry_price: float
+    cost_basis: float
+    unrealized_pnl: float
+    realized_pnl: float
+    total_fees: float
 
 
 class SettlementRecord(BaseModel):
@@ -80,10 +80,10 @@ class SettlementRecord(BaseModel):
     market_id: str
     series_id: str | None = None
     side: PositionSide
-    shares: str
-    avg_entry_price: str
-    settlement_price: str
-    pnl: str
-    fees: str
+    shares: float
+    avg_entry_price: float
+    settlement_price: float
+    pnl: float
+    fees: float
     winning_outcome: str | None
     resolved_at: int

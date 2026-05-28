@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pydantic import BaseModel, ConfigDict
 
+from marketlens.types._validators import none_to_half, none_to_zero
+
 
 class Outcome(BaseModel):
     model_config = ConfigDict(frozen=True)
@@ -9,7 +11,9 @@ class Outcome(BaseModel):
     name: str
     index: int
     platform_token_id: str
-    last_price: str | None = None
+    last_price: float = 0.5
+
+    _coerce = none_to_half("last_price")
 
 
 class Market(BaseModel):
@@ -30,16 +34,18 @@ class Market(BaseModel):
     outcomes: list[Outcome]
     winning_outcome: str | None = None
     winning_outcome_index: int | None = None
-    tick_size: str | None = None
-    volume: str | None = None
-    liquidity: str | None = None
+    tick_size: float
+    volume: float = 0.0
+    liquidity: float = 0.0
     open_time: int | None = None
     close_time: int | None = None
     resolved_at: int | None = None
     platform_resolved_at: int | None = None
-    strike: str | None = None
-    strike_upper: str | None = None
+    strike: float | None = None
+    strike_upper: float | None = None
     strike_direction: str | None = None
     underlying: str | None = None
-    created_at: int | None = None
-    updated_at: int | None = None
+    created_at: int
+    updated_at: int
+
+    _coerce = none_to_zero("volume", "liquidity")

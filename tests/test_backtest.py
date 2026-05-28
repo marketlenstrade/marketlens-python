@@ -35,17 +35,14 @@ from marketlens.types.orderbook import OrderBook
 
 def _book(bids, asks, market_id="m1", as_of=1000):
     """Build an OrderBook from (price, size) tuples."""
-    bid_levels = [PriceLevel(price=p, size=s) for p, s in bids]
-    ask_levels = [PriceLevel(price=p, size=s) for p, s in asks]
-    best_bid = bid_levels[0].price if bid_levels else None
-    best_ask = ask_levels[0].price if ask_levels else None
-    spread = None
-    midpoint = None
-    if best_bid and best_ask:
-        spread = str((Decimal(best_ask) - Decimal(best_bid)).quantize(Decimal("0.0001")))
-        midpoint = str(((Decimal(best_bid) + Decimal(best_ask)) / 2).quantize(Decimal("0.0001")))
-    bd = str(sum((Decimal(s) for _, s in bids), Decimal("0")).quantize(Decimal("0.0001")))
-    ad = str(sum((Decimal(s) for _, s in asks), Decimal("0")).quantize(Decimal("0.0001")))
+    bid_levels = [PriceLevel(price=float(p), size=float(s)) for p, s in bids]
+    ask_levels = [PriceLevel(price=float(p), size=float(s)) for p, s in asks]
+    best_bid = bid_levels[0].price if bid_levels else 0.0
+    best_ask = ask_levels[0].price if ask_levels else 0.0
+    spread = round(best_ask - best_bid, 4) if best_bid and best_ask else 0.0
+    midpoint = round((best_bid + best_ask) / 2, 4) if best_bid and best_ask else 0.0
+    bd = round(sum(float(s) for _, s in bids), 4)
+    ad = round(sum(float(s) for _, s in asks), 4)
     return OrderBook(
         market_id=market_id, platform="polymarket", as_of=as_of,
         bids=bid_levels, asks=ask_levels,
@@ -85,50 +82,50 @@ class TestFeeModels:
     def test_crypto_fee_at_midpoint(self):
         fm = PolymarketFeeModel.crypto()
         # fee = 100 * 0.50 * 0.25 * (0.50 * 0.50)^2 = 100 * 0.0078125 = 0.78125
-        fee = fm.calculate(Decimal("0.5000"), Decimal("100"), is_maker=False)
-        assert fee == Decimal("0.7812")
+        fee = fm.calculate(0.5000, 100, is_maker=False)
+        assert fee == pytest.approx(0.78125)
 
     def test_crypto_fee_at_extreme(self):
         fm = PolymarketFeeModel.crypto()
         # fee = 100 * 0.99 * 0.25 * (0.99 * 0.01)^2 = 100 * 0.99 * 0.25 * 0.000098 ≈ 0.002426
-        fee = fm.calculate(Decimal("0.9900"), Decimal("100"), is_maker=False)
-        assert fee == Decimal("0.0024")
+        fee = fm.calculate(0.9900, 100, is_maker=False)
+        assert fee == pytest.approx(0.002426, abs=1e-5)
 
     def test_sports_fee_at_midpoint(self):
         fm = PolymarketFeeModel.sports()
         # fee = 100 * 0.50 * 0.0175 * (0.50 * 0.50)^1 = 100 * 0.0021875 = 0.21875
-        fee = fm.calculate(Decimal("0.5000"), Decimal("100"), is_maker=False)
-        assert fee == Decimal("0.2188")
+        fee = fm.calculate(0.5000, 100, is_maker=False)
+        assert fee == pytest.approx(0.21875)
 
     def test_polymarket_maker_zero(self):
         fm = PolymarketFeeModel.crypto()
-        fee = fm.calculate(Decimal("0.5000"), Decimal("100"), is_maker=True)
-        assert fee == Decimal("0")
+        fee = fm.calculate(0.5000, 100, is_maker=True)
+        assert fee == 0
 
     def test_for_category_crypto(self):
         fm = PolymarketFeeModel.for_category("Crypto")
-        fee = fm.calculate(Decimal("0.5000"), Decimal("100"), is_maker=False)
-        assert fee == Decimal("0.7812")
+        fee = fm.calculate(0.5000, 100, is_maker=False)
+        assert fee == pytest.approx(0.78125)
 
     def test_for_category_other_returns_zero(self):
         fm = PolymarketFeeModel.for_category("Weather")
-        fee = fm.calculate(Decimal("0.5000"), Decimal("100"), is_maker=False)
-        assert fee == Decimal("0")
+        fee = fm.calculate(0.5000, 100, is_maker=False)
+        assert fee == 0
 
     def test_for_category_none_returns_zero(self):
         fm = PolymarketFeeModel.for_category(None)
-        fee = fm.calculate(Decimal("0.5000"), Decimal("100"), is_maker=False)
-        assert fee == Decimal("0")
+        fee = fm.calculate(0.5000, 100, is_maker=False)
+        assert fee == 0
 
     def test_zero_fee_model(self):
         fm = ZeroFeeModel()
-        fee = fm.calculate(Decimal("0.5"), Decimal("1000"), is_maker=False)
-        assert fee == Decimal("0")
+        fee = fm.calculate(0.5, 1000, is_maker=False)
+        assert fee == 0
 
     def test_flat_fee_model(self):
-        fm = FlatFeeModel(Decimal("0.01"))
-        fee = fm.calculate(Decimal("0.5"), Decimal("100"), is_maker=False)
-        assert fee == Decimal("1.0000")
+        fm = FlatFeeModel(0.01)
+        fee = fm.calculate(0.5, 100, is_maker=False)
+        assert fee == 1.0000
 
 
 # ── Fill Simulator Tests ─────────────────────────────────────────
@@ -151,10 +148,10 @@ class TestFillSimulatorMarket:
         order = self._order(OrderSide.BUY_YES, "150.0000")
         fill = self._sim().try_fill_market_order(order, book, 1000)
         assert fill is not None
-        assert fill.size == "150.0000"
+        assert fill.size == 150.0
         # VWAP: (100*0.67 + 50*0.68) / 150 = (67 + 34) / 150 = 0.6733...
-        expected = (Decimal("100") * Decimal("0.67") + Decimal("50") * Decimal("0.68")) / Decimal("150")
-        assert fill.price == str(expected.quantize(Decimal("0.0001")))
+        expected = (100 * 0.67 + 50 * 0.68) / 150
+        assert fill.price == pytest.approx(expected, abs=1e-4)
 
     def test_sell_yes_walks_bids(self):
         book = _book(
@@ -164,8 +161,8 @@ class TestFillSimulatorMarket:
         order = self._order(OrderSide.SELL_YES, "100.0000")
         fill = self._sim().try_fill_market_order(order, book, 1000)
         assert fill is not None
-        assert fill.price == "0.6500"
-        assert fill.size == "100.0000"
+        assert fill.price == 0.65
+        assert fill.size == 100.0
 
     def test_buy_no_walks_bids_inverts(self):
         book = _book(
@@ -176,8 +173,8 @@ class TestFillSimulatorMarket:
         fill = self._sim().try_fill_market_order(order, book, 1000)
         assert fill is not None
         # YES VWAP from bids = 0.65, NO price = 1 - 0.65 = 0.35
-        assert fill.price == "0.3500"
-        assert fill.size == "100.0000"
+        assert fill.price == 0.35
+        assert fill.size == 100.0
 
     def test_sell_no_walks_asks_inverts(self):
         book = _book(
@@ -188,7 +185,7 @@ class TestFillSimulatorMarket:
         fill = self._sim().try_fill_market_order(order, book, 1000)
         assert fill is not None
         # YES VWAP from asks = 0.67, NO price = 1 - 0.67 = 0.33
-        assert fill.price == "0.3300"
+        assert fill.price == 0.33
 
     def test_empty_book_returns_none(self):
         book = _book([], [])
@@ -201,14 +198,14 @@ class TestFillSimulatorMarket:
         order = self._order(OrderSide.BUY_YES, "100.0000")
         fill = self._sim().try_fill_market_order(order, book, 1000)
         assert fill is not None
-        assert fill.size == "30.0000"
+        assert fill.size == 30.0
 
     def test_max_fill_fraction(self):
         book = _book([], [("0.7000", "100.0000")])
         order = self._order(OrderSide.BUY_YES, "100.0000")
         fill = self._sim(max_fill_fraction=0.5).try_fill_market_order(order, book, 1000)
         assert fill is not None
-        assert fill.size == "50.0000"
+        assert fill.size == 50.0
 
 
 class TestFillSimulatorLimit:
@@ -231,8 +228,8 @@ class TestFillSimulatorLimit:
         trade = self._trade("SELL", "0.6500")
         fill = self._sim().try_fill_limit_order(order, book, trade, 2000)
         assert fill is not None
-        assert fill.price == "0.6500"
-        assert fill.size == "50.0000"
+        assert fill.price == 0.65
+        assert fill.size == 50.0
         assert fill.is_maker is True
 
     def test_buy_yes_no_fill_on_buy_trade(self):
@@ -255,7 +252,7 @@ class TestFillSimulatorLimit:
         trade = self._trade("BUY", "0.6700")
         fill = self._sim().try_fill_limit_order(order, book, trade, 2000)
         assert fill is not None
-        assert fill.price == "0.6700"
+        assert fill.price == 0.67
 
     def test_buy_no_fills_on_buy_trade(self):
         # BUY_NO at 0.35 rests as a YES ask at 0.65 (1 - 0.35). A taker who
@@ -266,7 +263,7 @@ class TestFillSimulatorLimit:
         trade = self._trade("BUY", "0.6500")
         fill = self._sim().try_fill_limit_order(order, book, trade, 2000)
         assert fill is not None
-        assert fill.price == "0.3500"
+        assert fill.price == 0.35
 
     def test_buy_no_no_fill_when_trade_above_level(self):
         # Taker BUYs YES at 0.67 — hits some other ask, not your 0.65.
@@ -284,7 +281,7 @@ class TestFillSimulatorLimit:
         trade = self._trade("SELL", "0.6500")
         fill = self._sim().try_fill_limit_order(order, book, trade, 2000)
         assert fill is not None
-        assert fill.price == "0.3500"
+        assert fill.price == 0.35
 
     def test_fill_size_capped_by_trade(self):
         book = _book([("0.6500", "200.0000")], [("0.6700", "100.0000")])
@@ -292,7 +289,7 @@ class TestFillSimulatorLimit:
         trade = self._trade("SELL", "0.6500", size="30.0000")
         fill = self._sim().try_fill_limit_order(order, book, trade, 2000)
         assert fill is not None
-        assert fill.size == "30.0000"
+        assert fill.size == 30.0
 
     def test_no_fill_without_trade(self):
         book = _book([("0.6500", "200.0000")], [("0.6700", "100.0000")])
@@ -306,11 +303,11 @@ class TestFillSimulatorLimit:
 class TestPortfolio:
     def test_initial_state(self):
         p = Portfolio("10000.0000")
-        assert p.cash == "10000.0000"
-        assert p.equity == "10000.0000"
+        assert p.cash == 10000.0
+        assert p.equity == 10000.0
         pos = p.position("m1")
         assert pos.side == PositionSide.FLAT
-        assert pos.shares == "0.0000"
+        assert pos.shares == 0.0
 
     def test_buy_yes_updates_cash_and_position(self):
         p = Portfolio("10000.0000")
@@ -319,11 +316,11 @@ class TestPortfolio:
             price="0.6500", size="100.0000", fee="0.0000", timestamp=1000, is_maker=False,
         )
         p.apply_fill(fill)
-        assert p.cash == "9935.0000"  # 10000 - 65
+        assert p.cash == 9935.0  # 10000 - 65
         pos = p.position("m1")
         assert pos.side == PositionSide.YES
-        assert pos.shares == "100.0000"
-        assert pos.avg_entry_price == "0.6500"
+        assert pos.shares == 100.0
+        assert pos.avg_entry_price == 0.65
 
     def test_sell_yes_realizes_pnl(self):
         p = Portfolio("10000.0000")
@@ -336,10 +333,10 @@ class TestPortfolio:
             price="0.7000", size="100.0000", fee="0.0000", timestamp=2000, is_maker=False,
         ))
         # cash: 10000 - 65 + 70 = 10005
-        assert p.cash == "10005.0000"
+        assert p.cash == pytest.approx(10005.0)
         pos = p.position("m1")
         assert pos.side == PositionSide.FLAT
-        assert pos.realized_pnl == "5.0000"
+        assert pos.realized_pnl == pytest.approx(5.0)
 
     def test_buy_no_updates_position(self):
         p = Portfolio("10000.0000")
@@ -348,11 +345,11 @@ class TestPortfolio:
             price="0.3500", size="100.0000", fee="0.0000", timestamp=1000, is_maker=False,
         )
         p.apply_fill(fill)
-        assert p.cash == "9965.0000"  # 10000 - 35
+        assert p.cash == 9965.0  # 10000 - 35
         pos = p.position("m1")
         assert pos.side == PositionSide.NO
-        assert pos.shares == "100.0000"
-        assert pos.avg_entry_price == "0.3500"
+        assert pos.shares == 100.0
+        assert pos.avg_entry_price == 0.35
 
     def test_fees_deducted(self):
         p = Portfolio("10000.0000")
@@ -361,8 +358,8 @@ class TestPortfolio:
             price="0.6500", size="100.0000", fee="0.5000", timestamp=1000, is_maker=False,
         )
         p.apply_fill(fill)
-        assert p.cash == "9934.5000"  # 10000 - 65 - 0.5
-        assert p.total_fees == "0.5000"
+        assert p.cash == 9934.5  # 10000 - 65 - 0.5
+        assert p.total_fees == 0.5
 
     def test_settle_yes_win(self):
         from marketlens.types.market import Market
@@ -378,10 +375,10 @@ class TestPortfolio:
         }))
         record = p.settle_market(market, 5000)
         assert record is not None
-        assert record.settlement_price == "1.0000"
-        assert record.pnl == "35.0000"  # (1.0 - 0.65) * 100
+        assert record.settlement_price == 1.0
+        assert record.pnl == 35.0  # (1.0 - 0.65) * 100
         # Cash: 9935 + 100 = 10035
-        assert p.cash == "10035.0000"
+        assert p.cash == 10035.0
 
     def test_settle_yes_loss(self):
         from marketlens.types.market import Market
@@ -397,9 +394,9 @@ class TestPortfolio:
         }))
         record = p.settle_market(market, 5000)
         assert record is not None
-        assert record.settlement_price == "0.0000"
-        assert record.pnl == "-65.0000"
-        assert p.cash == "9935.0000"  # unchanged from after buy
+        assert record.settlement_price == 0.0
+        assert record.pnl == -65.0
+        assert p.cash == 9935.0  # unchanged from after buy
 
     def test_settle_no_win(self):
         from marketlens.types.market import Market
@@ -415,9 +412,9 @@ class TestPortfolio:
         }))
         record = p.settle_market(market, 5000)
         assert record is not None
-        assert record.settlement_price == "1.0000"
-        assert record.pnl == "65.0000"
-        assert p.cash == "10065.0000"  # 9965 + 100
+        assert record.settlement_price == 1.0
+        assert record.pnl == 65.0
+        assert p.cash == 10065.0  # 9965 + 100
 
     def test_settle_flat_returns_none(self):
         from marketlens.types.market import Market
@@ -438,7 +435,7 @@ class TestPortfolio:
         book = _book([("0.7000", "200.0000")], [("0.7200", "100.0000")])
         p.mark_to_market("m1", book)
         pos = p.position("m1")
-        assert pos.unrealized_pnl == "5.0000"  # (0.70 - 0.65) * 100
+        assert pos.unrealized_pnl == pytest.approx(5.0)  # (0.70 - 0.65) * 100
 
     def test_can_sell(self):
         p = Portfolio("10000.0000")
@@ -446,9 +443,9 @@ class TestPortfolio:
             order_id="o1", market_id="m1", side=OrderSide.BUY_YES,
             price="0.6500", size="100.0000", fee="0.0000", timestamp=1000, is_maker=False,
         ))
-        assert p.can_sell("m1", OrderSide.SELL_YES, Decimal("100")) is True
-        assert p.can_sell("m1", OrderSide.SELL_YES, Decimal("101")) is False
-        assert p.can_sell("m1", OrderSide.SELL_NO, Decimal("1")) is False
+        assert p.can_sell("m1", OrderSide.SELL_YES, 100) is True
+        assert p.can_sell("m1", OrderSide.SELL_YES, 101) is False
+        assert p.can_sell("m1", OrderSide.SELL_NO, 1) is False
 
 
 # ── Strategy Context Tests ───────────────────────────────────────
@@ -530,8 +527,8 @@ class TestStrategyContext:
             initial_cash="10000.0000", latency_ms=0, limit_fill_rate=1.0,
         )
 
-        assert [o.size for o in captured] == ["12.5", "7", "3.25"]
-        assert [o.limit_price for o in captured] == [None, "0.42", "0.55"]
+        assert [o.size for o in captured] == [12.5, 7.0, 3.25]
+        assert [o.limit_price for o in captured] == [None, pytest.approx(0.42), pytest.approx(0.55)]
 
     def test_cancel_order(self, mock_api, client):
         """Cancelling a limit order should set status to CANCELLED."""
@@ -845,7 +842,7 @@ class TestEngineIntegration:
             return_value=httpx.Response(200, json=_history_response(SNAPSHOT_1)))
 
         result = client.backtest(Noop(), "m1", after=1000, before=6000, initial_cash="50000.0000", latency_ms=0, limit_fill_rate=1.0)
-        assert result.total_pnl == "0.0000"
+        assert result.total_pnl == 0.0
         assert result.total_return == 0.0
 
     def test_insufficient_cash_cancels_order(self, mock_api, client):
@@ -1196,12 +1193,13 @@ class TestBacktestResultPersistence:
 
     def test_config_and_targets_attached(self, mock_api, client):
         result = self._run_simple(mock_api, client)
-        assert result.config.initial_cash == "10000.0000"
+        # _run_simple passes a string for back-compat; Portfolio coerces it.
+        assert float(result.config.initial_cash) == pytest.approx(10000.0)
         assert result.config.latency_ms == 0
         assert result.targets == {
             "id": "m1", "after": 1000, "before": 6000, "data_dir": None,
         }
-        assert result.initial_cash == "10000.0000"
+        assert result.initial_cash == pytest.approx(10000.0)
 
     def test_save_overwrite_behavior(self, mock_api, client, tmp_path):
         result = self._run_simple(mock_api, client)
@@ -1279,7 +1277,7 @@ class TestBacktestResultPersistence:
     def test_custom_fee_model_serializes_as_null(self):
         class CustomFee(FeeModel):
             def calculate(self, price, size, is_maker):
-                return Decimal("0")
+                return 0
 
         cfg = BacktestConfig(initial_cash="100.0000", fee_model=CustomFee())
         out = _serialize_config(cfg)
@@ -1655,7 +1653,7 @@ class TestSlippageBuffer:
         fill = self._sim(slippage_bps=100).try_fill_market_order(order, book, 1000)
         assert fill is not None
         # Base price = 0.67, slippage = 0.67 * 100/10000 = 0.0067 → 0.6767
-        assert Decimal(fill.price) == Decimal("0.6767")
+        assert Decimal(fill.price) == 0.6767
 
     def test_sell_yes_slippage_decreases_price(self):
         book = _book([("0.6500", "200.0000")], [("0.6700", "100.0000")])
@@ -1663,7 +1661,7 @@ class TestSlippageBuffer:
         fill = self._sim(slippage_bps=100).try_fill_market_order(order, book, 1000)
         assert fill is not None
         # Base price = 0.65, slippage = 0.65 * 100/10000 = 0.0065 → 0.6435
-        assert Decimal(fill.price) == Decimal("0.6435")
+        assert Decimal(fill.price) == 0.6435
 
     def test_buy_no_slippage_increases_price(self):
         book = _book([("0.6500", "200.0000")], [("0.6700", "100.0000")])
@@ -1671,14 +1669,14 @@ class TestSlippageBuffer:
         fill = self._sim(slippage_bps=100).try_fill_market_order(order, book, 1000)
         assert fill is not None
         # NO price = 1 - 0.65 = 0.35, slippage = 0.35 * 100/10000 = 0.0035 → 0.3535
-        assert Decimal(fill.price) == Decimal("0.3535")
+        assert Decimal(fill.price) == 0.3535
 
     def test_zero_slippage_no_change(self):
         book = _book([("0.6500", "200.0000")], [("0.6700", "100.0000")])
         order = self._order(OrderSide.BUY_YES, "50.0000")
         fill = self._sim(slippage_bps=0).try_fill_market_order(order, book, 1000)
         assert fill is not None
-        assert Decimal(fill.price) == Decimal("0.6700")
+        assert Decimal(fill.price) == 0.6700
 
     def test_slippage_in_engine(self, mock_api, client):
         """Slippage applied through the engine."""
@@ -1701,7 +1699,7 @@ class TestSlippageBuffer:
                                  initial_cash="10000.0000", latency_ms=0, limit_fill_rate=1.0, slippage_bps=100)
         fill_price = Decimal(result.trades_df()["price"].iloc[0])
         # Asks: 0.67/100, 0.68/250 → VWAP = 0.6733... + slippage
-        assert fill_price > Decimal("0.6700")
+        assert fill_price > 0.6700
 
 
 # ── Limit Fill Rate Tests ──────────────────────────────────────
@@ -1727,7 +1725,7 @@ class TestLimitFillRate:
         trade = self._trade("SELL", "0.6500", size="100.0000")
         fill = self._sim(limit_fill_rate=0.1).try_fill_limit_order(order, book, trade, 2000)
         assert fill is not None
-        assert fill.size == "10.0000"  # 100 * 0.1 = 10
+        assert fill.size == 10.0  # 100 * 0.1 = 10
 
     def test_fill_rate_one_gives_full_trade(self):
         """With fill_rate=1.0, full trade size fills (original behavior)."""
@@ -1736,7 +1734,7 @@ class TestLimitFillRate:
         trade = self._trade("SELL", "0.6500", size="50.0000")
         fill = self._sim(limit_fill_rate=1.0).try_fill_limit_order(order, book, trade, 2000)
         assert fill is not None
-        assert fill.size == "50.0000"
+        assert fill.size == 50.0
 
     def test_fill_rate_caps_at_remaining(self):
         """Fill size capped by remaining order size even with fill_rate."""
@@ -1745,7 +1743,7 @@ class TestLimitFillRate:
         trade = self._trade("SELL", "0.6500", size="100.0000")
         fill = self._sim(limit_fill_rate=0.5).try_fill_limit_order(order, book, trade, 2000)
         assert fill is not None
-        assert fill.size == "5.0000"  # remaining < trade*rate (50), so fill = remaining
+        assert fill.size == 5.0  # remaining < trade*rate (50), so fill = remaining
 
     def test_very_small_fill_rate_rounds_to_zero(self):
         """Tiny fill_rate * small trade → rounds to zero → no fill."""
@@ -1778,7 +1776,7 @@ class TestLimitFillRate:
         assert result.total_trades == 1
         # TRADE_SELL size=50, fill_rate=0.5 → 25 shares filled
         fill_size = Decimal(result.trades_df()["size"].iloc[0])
-        assert fill_size == Decimal("25.0000")
+        assert fill_size == 25.0000
 
 
 # ── Queue Position Tracker Tests ─────────────────────────────
@@ -1798,8 +1796,8 @@ class TestQueuePositionTracker:
         order = self._order(OrderSide.BUY_YES, "50.0000", "0.6500")
         tracker.register(order, book)
         state = tracker._states["ord-1"]
-        assert state.queue_ahead == Decimal("200")
-        assert state.price == "0.6500"
+        assert state.queue_ahead == 200
+        assert state.price == 0.65
         assert state.book_side == "BUY"
 
     def test_trade_drains_queue(self):
@@ -1809,9 +1807,9 @@ class TestQueuePositionTracker:
         order = self._order(OrderSide.BUY_YES, "50.0000", "0.6500")
         tracker.register(order, book)
 
-        available = tracker.on_trade("ord-1", Decimal("50"), "0.6500", "SELL")
-        assert available == Decimal("0")
-        assert tracker._states["ord-1"].queue_ahead == Decimal("150")
+        available = tracker.on_trade("ord-1", 50, "0.6500", "SELL")
+        assert available == 0
+        assert tracker._states["ord-1"].queue_ahead == 150
 
     def test_trade_fills_when_queue_exhausted(self):
         """Queue=50, trade=100 → fill_available=50, queue=0."""
@@ -1820,9 +1818,9 @@ class TestQueuePositionTracker:
         order = self._order(OrderSide.BUY_YES, "100.0000", "0.6500")
         tracker.register(order, book)
 
-        available = tracker.on_trade("ord-1", Decimal("100"), "0.6500", "SELL")
-        assert available == Decimal("50")
-        assert tracker._states["ord-1"].queue_ahead == Decimal("0")
+        available = tracker.on_trade("ord-1", 100, "0.6500", "SELL")
+        assert available == 50
+        assert tracker._states["ord-1"].queue_ahead == 0
 
     def test_cancel_proportional_drain(self):
         """queue=200, level=1000, delta decreases to 800, cancel_portion=200, proportion=0.2, drain=40."""
@@ -1831,12 +1829,12 @@ class TestQueuePositionTracker:
         order = self._order(OrderSide.BUY_YES, "50.0000", "0.6500")
         tracker.register(order, book)
         # Manually set queue_ahead to 200 (as if we're 200 deep in a 1000-size level)
-        tracker._states["ord-1"].queue_ahead = Decimal("200")
+        tracker._states["ord-1"].queue_ahead = 200
 
-        tracker.on_delta("m1", "0.6500", Decimal("800"), "BUY")
+        tracker.on_delta("m1", "0.6500", 800, "BUY")
         # decrease = 200, proportion = 200/1000 = 0.2
         # queue_ahead -= 200 * 0.2 = 40 → 200 - 40 = 160
-        assert tracker._states["ord-1"].queue_ahead == Decimal("160")
+        assert tracker._states["ord-1"].queue_ahead == 160
 
     def test_trade_then_delta_both_drain(self):
         """Trade front-drains, then delta proportionally drains the full decrease."""
@@ -1846,14 +1844,14 @@ class TestQueuePositionTracker:
         tracker.register(order, book)
 
         # Trade drains 50 from front
-        tracker.on_trade("ord-1", Decimal("50"), "0.6500", "SELL")
-        assert tracker._states["ord-1"].queue_ahead == Decimal("950")
+        tracker.on_trade("ord-1", 50, "0.6500", "SELL")
+        assert tracker._states["ord-1"].queue_ahead == 950
 
         # Delta: level goes from 1000 to 920 (decrease of 80)
         # proportion = 950/1000 = 0.95
         # queue_ahead -= 80 * 0.95 = 76 → 950 - 76 = 874
-        tracker.on_delta("m1", "0.6500", Decimal("920"), "BUY")
-        assert tracker._states["ord-1"].queue_ahead == Decimal("874")
+        tracker.on_delta("m1", "0.6500", 920, "BUY")
+        assert tracker._states["ord-1"].queue_ahead == 874
 
     def test_level_empties_queue_zeroes(self):
         """Level goes to 0 → queue_ahead → 0."""
@@ -1862,8 +1860,8 @@ class TestQueuePositionTracker:
         order = self._order(OrderSide.BUY_YES, "50.0000", "0.6500")
         tracker.register(order, book)
 
-        tracker.on_delta("m1", "0.6500", Decimal("0"), "BUY")
-        assert tracker._states["ord-1"].queue_ahead == Decimal("0")
+        tracker.on_delta("m1", "0.6500", 0, "BUY")
+        assert tracker._states["ord-1"].queue_ahead == 0
 
     def test_level_increase_no_change(self):
         """New orders behind you, queue unchanged."""
@@ -1872,9 +1870,9 @@ class TestQueuePositionTracker:
         order = self._order(OrderSide.BUY_YES, "50.0000", "0.6500")
         tracker.register(order, book)
 
-        tracker.on_delta("m1", "0.6500", Decimal("500"), "BUY")
-        assert tracker._states["ord-1"].queue_ahead == Decimal("200")
-        assert tracker._states["ord-1"].level_size == Decimal("500")
+        tracker.on_delta("m1", "0.6500", 500, "BUY")
+        assert tracker._states["ord-1"].queue_ahead == 200
+        assert tracker._states["ord-1"].level_size == 500
 
     def test_snapshot_resyncs(self):
         """Snapshot clamps queue_ahead to level_size."""
@@ -1886,8 +1884,8 @@ class TestQueuePositionTracker:
         # Simulate a book where the level shrank
         new_book = _book([("0.6500", "50.0000")], [("0.6700", "100.0000")])
         tracker.on_snapshot("m1", new_book)
-        assert tracker._states["ord-1"].queue_ahead == Decimal("50")
-        assert tracker._states["ord-1"].level_size == Decimal("50")
+        assert tracker._states["ord-1"].queue_ahead == 50
+        assert tracker._states["ord-1"].level_size == 50
 
     def test_unregister_stops_tracking(self):
         """After unregister, on_trade returns 0."""
@@ -1897,22 +1895,22 @@ class TestQueuePositionTracker:
         tracker.register(order, book)
         tracker.unregister("ord-1")
 
-        available = tracker.on_trade("ord-1", Decimal("300"), "0.6500", "SELL")
-        assert available == Decimal("0")
+        available = tracker.on_trade("ord-1", 300, "0.6500", "SELL")
+        assert available == 0
         assert "ord-1" not in tracker._states
 
     def test_buy_no_resting_level(self):
         """BUY_NO at 0.35 → rests SELL side at 0.65."""
         order = self._order(OrderSide.BUY_NO, "50.0000", "0.3500")
         price, side = _order_resting_level(order)
-        assert price == "0.6500"
+        assert price == pytest.approx(0.65)
         assert side == "SELL"
 
     def test_sell_no_resting_level(self):
         """SELL_NO at 0.35 → rests BUY side at 0.65."""
         order = self._order(OrderSide.SELL_NO, "50.0000", "0.3500")
         price, side = _order_resting_level(order)
-        assert price == "0.6500"
+        assert price == pytest.approx(0.65)
         assert side == "BUY"
 
     def test_trade_wrong_price_no_drain(self):
@@ -1922,9 +1920,9 @@ class TestQueuePositionTracker:
         order = self._order(OrderSide.BUY_YES, "50.0000", "0.6500")
         tracker.register(order, book)
 
-        available = tracker.on_trade("ord-1", Decimal("100"), "0.6400", "SELL")
-        assert available == Decimal("0")
-        assert tracker._states["ord-1"].queue_ahead == Decimal("200")
+        available = tracker.on_trade("ord-1", 100, "0.6400", "SELL")
+        assert available == 0
+        assert tracker._states["ord-1"].queue_ahead == 200
 
 
 # ── Queue Position Fill Integration Tests ─────────────────────
@@ -1951,7 +1949,7 @@ class TestQueuePositionFills:
         trade = self._trade("SELL", "0.6500", size="100.0000")
         fill = sim.try_fill_limit_order(order, book, trade, 2000)
         assert fill is not None
-        assert fill.size == "50.0000"  # 100 * 0.5
+        assert fill.size == 50.0  # 100 * 0.5
 
     def test_queue_fills_after_drain(self):
         """Order placed with queue 200, trades drain to 0, next trade fills."""
@@ -1969,7 +1967,7 @@ class TestQueuePositionFills:
         trade2 = TradeEvent(type="trade", t=3000, id="t2", price="0.6500", size="100.0000", side="SELL")
         fill2 = sim.try_fill_limit_order(order, book, trade2, 3000)
         assert fill2 is not None
-        assert fill2.size == "50.0000"  # capped by remaining order size
+        assert fill2.size == 50.0  # capped by remaining order size
 
     def test_queue_no_fill_while_queued(self):
         """Trades not enough to drain queue → no fill."""
@@ -2243,10 +2241,10 @@ class TestFileStreamWindow:
         # First yielded event's book reflects the anchor + pre-window delta:
         # ask side is 0.65 @ 50 (from t=1501), bid side is 0.60 @ 100 (anchor).
         _, _, first_book = yielded[0]
-        assert first_book.best_ask == "0.6500", (
+        assert first_book.best_ask == 0.65, (
             f"silent replay must apply pre-window delta; got best_ask={first_book.best_ask}"
         )
-        assert first_book.best_bid == "0.6000"
+        assert first_book.best_bid == 0.6
 
 
 class TestStreamingEqualsBulk:
@@ -2399,7 +2397,7 @@ class TestStreamingEqualsBulk:
             def on_trade(self, ctx, market, book, trade):
                 if self._entered or book.midpoint is None:
                     return
-                if Decimal(book.midpoint) < Decimal("0.35"):
+                if Decimal(book.midpoint) < 0.35:
                     ctx.buy_yes(size="10")
                     self._entered = True
 

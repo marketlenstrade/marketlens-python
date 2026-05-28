@@ -297,9 +297,14 @@ def _scan_books(
     computed_at = 0
     for market_id, book in books.items():
         market = markets.get(market_id)
-        if not market or market.strike is None or book.midpoint is None:
+        if not market or market.strike is None:
             continue
-        mp = float(book.midpoint)
+        # Empty book → ``midpoint`` falls back to the 0.5 neutral prior,
+        # which would silently pollute the surface fit. Skip until both
+        # sides have at least one level.
+        if not book.bids or not book.asks:
+            continue
+        mp = book.midpoint
         if mp < 0.005 or mp > 0.995:
             continue
         entries.append((market, mp))

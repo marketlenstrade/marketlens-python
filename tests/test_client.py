@@ -1,4 +1,5 @@
 import httpx
+import pytest
 import respx
 
 from conftest import (
@@ -131,7 +132,7 @@ class TestOrderbook:
         )
         book = client.orderbook.get("abc-123")
         assert isinstance(book, OrderBook)
-        assert book.best_bid == "0.6500"
+        assert book.best_bid == pytest.approx(0.65)
         assert len(book.bids) == 3
 
     def test_orderbook_metrics(self, mock_api, client):

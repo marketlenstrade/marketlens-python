@@ -21,7 +21,7 @@ class BuyOnImbalance(Strategy):
             return
         imb = book.imbalance(levels=3)
         if imb is not None and imb > 0.2 and book.spread_bps() and book.spread_bps() < 500:
-            ctx.buy_yes(size="100")
+            ctx.buy_yes(size=100)
             self._entered = True
 
 
@@ -29,7 +29,7 @@ client = MarketLens()
 result = client.backtest(
     BuyOnImbalance(),
     ["eth-up-or-down-5m", "sol-up-or-down-5m"],
-    initial_cash="10000.0000",
+    initial_cash=10_000,
     after=datetime(2026, 3, 5, 10, 0, tzinfo=timezone.utc),
     before=datetime(2026, 3, 5, 10, 5, tzinfo=timezone.utc),
 )

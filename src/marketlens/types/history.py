@@ -22,8 +22,8 @@ class DeltaEvent(BaseModel):
 
     type: Literal["delta"] = "delta"
     t: int
-    price: str
-    size: str
+    price: float
+    size: float
     side: str
 
 
@@ -33,8 +33,8 @@ class TradeEvent(BaseModel):
     type: Literal["trade"] = "trade"
     t: int
     id: str
-    price: str
-    size: str
+    price: float
+    size: float
     side: str
 
 

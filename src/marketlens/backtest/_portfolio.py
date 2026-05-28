@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from decimal import Decimal
-
 from marketlens.backtest._types import (
     Fill,
     OrderSide,
@@ -12,25 +10,21 @@ from marketlens.backtest._types import (
 from marketlens.types.market import Market
 from marketlens.types.orderbook import OrderBook
 
-_FOUR = Decimal("0.0001")
-_ZERO = Decimal("0")
-_ONE = Decimal("1")
-
 
 class _MutablePosition:
     def __init__(self, market_id: str) -> None:
         self.market_id = market_id
         self.side = PositionSide.FLAT
-        self.shares = _ZERO
-        self.avg_entry_price = _ZERO
-        self.cost_basis = _ZERO
-        self.unrealized_pnl = _ZERO
-        self.realized_pnl = _ZERO
-        self.total_fees = _ZERO
+        self.shares = 0.0
+        self.avg_entry_price = 0.0
+        self.cost_basis = 0.0
+        self.unrealized_pnl = 0.0
+        self.realized_pnl = 0.0
+        self.total_fees = 0.0
 
     def add_shares(
-        self, side: PositionSide, size: Decimal, price: Decimal, fee: Decimal,
-    ) -> Decimal:
+        self, side: PositionSide, size: float, price: float, fee: float,
+    ) -> float:
         """Add shares, returning the number netted against the opposite side.
 
         When buying the opposite side, matched YES+NO pairs are netted and
@@ -43,40 +37,40 @@ class _MutablePosition:
             self.avg_entry_price = price
             self.cost_basis = price * size
             self.total_fees += fee
-            return _ZERO
+            return 0.0
         elif self.side == side:
             total_cost = self.avg_entry_price * self.shares + price * size
             self.shares += size
             self.avg_entry_price = total_cost / self.shares
             self.cost_basis = self.avg_entry_price * self.shares
             self.total_fees += fee
-            return _ZERO
+            return 0.0
         else:
             # Opposite side — net down.  Matched YES+NO shares settle at $1
             # guaranteed, so buying the opposite side locks in settlement value.
             matched = min(self.shares, size)
             excess = size - matched
 
-            settlement_value = _ONE - price
+            settlement_value = 1.0 - price
             self.realized_pnl += (settlement_value - self.avg_entry_price) * matched
 
             self.shares -= matched
-            if excess > _ZERO:
+            if excess > 0.0:
                 self.side = side
                 self.shares = excess
                 self.avg_entry_price = price
                 self.cost_basis = excess * price
-            elif self.shares == _ZERO:
+            elif self.shares == 0.0:
                 self.side = PositionSide.FLAT
-                self.avg_entry_price = _ZERO
-                self.cost_basis = _ZERO
-                self.unrealized_pnl = _ZERO
+                self.avg_entry_price = 0.0
+                self.cost_basis = 0.0
+                self.unrealized_pnl = 0.0
             else:
                 self.cost_basis = self.avg_entry_price * self.shares
             self.total_fees += fee
             return matched
 
-    def remove_shares(self, size: Decimal, price: Decimal, fee: Decimal) -> None:
+    def remove_shares(self, size: float, price: float, fee: float) -> None:
         if self.shares < size:
             raise ValueError(
                 f"Cannot sell {size} shares: only holding {self.shares}"
@@ -88,66 +82,66 @@ class _MutablePosition:
         self.total_fees += fee
         if self.shares == 0:
             self.side = PositionSide.FLAT
-            self.avg_entry_price = _ZERO
-            self.cost_basis = _ZERO
-            self.unrealized_pnl = _ZERO
+            self.avg_entry_price = 0.0
+            self.cost_basis = 0.0
+            self.unrealized_pnl = 0.0
 
-    def settle(self, settlement_price: Decimal) -> Decimal:
+    def settle(self, settlement_price: float) -> float:
         if self.shares == 0:
-            return _ZERO
+            return 0.0
         pnl = (settlement_price - self.avg_entry_price) * self.shares
         self.realized_pnl += pnl
-        self.shares = _ZERO
-        self.cost_basis = _ZERO
-        self.unrealized_pnl = _ZERO
+        self.shares = 0.0
+        self.cost_basis = 0.0
+        self.unrealized_pnl = 0.0
         self.side = PositionSide.FLAT
-        self.avg_entry_price = _ZERO
+        self.avg_entry_price = 0.0
         return pnl
 
-    def mark_to_market(self, current_price: Decimal) -> None:
+    def mark_to_market(self, current_price: float) -> None:
         if self.shares > 0:
             self.unrealized_pnl = (current_price - self.avg_entry_price) * self.shares
         else:
-            self.unrealized_pnl = _ZERO
+            self.unrealized_pnl = 0.0
 
     def snapshot(self) -> Position:
         return Position(
             market_id=self.market_id,
             side=self.side,
-            shares=str(self.shares.quantize(_FOUR)),
-            avg_entry_price=str(self.avg_entry_price.quantize(_FOUR)),
-            cost_basis=str(self.cost_basis.quantize(_FOUR)),
-            unrealized_pnl=str(self.unrealized_pnl.quantize(_FOUR)),
-            realized_pnl=str(self.realized_pnl.quantize(_FOUR)),
-            total_fees=str(self.total_fees.quantize(_FOUR)),
+            shares=self.shares,
+            avg_entry_price=self.avg_entry_price,
+            cost_basis=self.cost_basis,
+            unrealized_pnl=self.unrealized_pnl,
+            realized_pnl=self.realized_pnl,
+            total_fees=self.total_fees,
         )
 
 
 class Portfolio:
-    def __init__(self, initial_cash: str = "10000.0000") -> None:
-        self._initial_cash = Decimal(initial_cash)
+    def __init__(self, initial_cash: float = 10_000.0) -> None:
+        self._initial_cash = float(initial_cash)
         self._cash = self._initial_cash
         self._positions: dict[str, _MutablePosition] = {}
-        self._total_fees = _ZERO
+        self._total_fees = 0.0
 
     @property
-    def cash(self) -> str:
-        return str(self._cash.quantize(_FOUR))
+    def cash(self) -> float:
+        return self._cash
 
     @property
-    def initial_cash(self) -> str:
-        return str(self._initial_cash.quantize(_FOUR))
+    def initial_cash(self) -> float:
+        return self._initial_cash
 
     @property
-    def total_fees(self) -> str:
-        return str(self._total_fees.quantize(_FOUR))
+    def total_fees(self) -> float:
+        return self._total_fees
 
     @property
-    def equity(self) -> str:
+    def equity(self) -> float:
         total = self._cash
         for pos in self._positions.values():
             total += pos.cost_basis + pos.unrealized_pnl
-        return str(total.quantize(_FOUR))
+        return total
 
     def _get_or_create(self, market_id: str) -> _MutablePosition:
         if market_id not in self._positions:
@@ -162,9 +156,9 @@ class Portfolio:
 
     def apply_fill(self, fill: Fill) -> None:
         pos = self._get_or_create(fill.market_id)
-        price = Decimal(fill.price)
-        size = Decimal(fill.size)
-        fee = Decimal(fill.fee)
+        price = fill.price
+        size = fill.size
+        fee = fill.fee
 
         if fill.side in (OrderSide.BUY_YES, OrderSide.BUY_NO):
             target_side = (
@@ -173,8 +167,8 @@ class Portfolio:
             matched = pos.add_shares(target_side, size, price, fee)
             self._cash -= price * size + fee
             # Simulate CTF merge: matched YES+NO pairs return $1 each.
-            if matched > _ZERO:
-                self._cash += matched * _ONE
+            if matched > 0.0:
+                self._cash += matched
         else:  # SELL_YES, SELL_NO
             pos.remove_shares(size, price, fee)
             self._cash += price * size - fee
@@ -189,9 +183,9 @@ class Portfolio:
             return None
 
         if pos.side == PositionSide.YES:
-            settlement_price = _ONE if market.winning_outcome_index == 0 else _ZERO
+            settlement_price = 1.0 if market.winning_outcome_index == 0 else 0.0
         else:
-            settlement_price = _ONE if market.winning_outcome_index == 1 else _ZERO
+            settlement_price = 1.0 if market.winning_outcome_index == 1 else 0.0
 
         pre_shares = pos.shares
         pre_entry = pos.avg_entry_price
@@ -205,25 +199,27 @@ class Portfolio:
             market_id=market.id,
             series_id=series_id,
             side=pre_side,
-            shares=str(pre_shares.quantize(_FOUR)),
-            avg_entry_price=str(pre_entry.quantize(_FOUR)),
-            settlement_price=str(settlement_price.quantize(_FOUR)),
-            pnl=str(((settlement_price - pre_entry) * pre_shares).quantize(_FOUR)),
-            fees=str(pre_fees.quantize(_FOUR)),
+            shares=pre_shares,
+            avg_entry_price=pre_entry,
+            settlement_price=settlement_price,
+            pnl=(settlement_price - pre_entry) * pre_shares,
+            fees=pre_fees,
             winning_outcome=market.winning_outcome,
             resolved_at=timestamp,
         )
 
     def mark_to_market(self, market_id: str, book: OrderBook) -> None:
         pos = self._get_or_create(market_id)
-        if pos.side == PositionSide.YES and book.best_bid:
-            pos.mark_to_market(Decimal(book.best_bid))
-        elif pos.side == PositionSide.NO and book.best_ask:
-            pos.mark_to_market(_ONE - Decimal(book.best_ask))
+        # `best_bid`/`best_ask` default to 0.5 when the side is empty —
+        # use the level count to detect a real top-of-book.
+        if pos.side == PositionSide.YES and book.bid_levels:
+            pos.mark_to_market(book.best_bid)
+        elif pos.side == PositionSide.NO and book.ask_levels:
+            pos.mark_to_market(1.0 - book.best_ask)
         else:
             pos.mark_to_market(pos.avg_entry_price)
 
-    def can_sell(self, market_id: str, side: OrderSide, size: Decimal) -> bool:
+    def can_sell(self, market_id: str, side: OrderSide, size: float) -> bool:
         pos = self._get_or_create(market_id)
         if side == OrderSide.SELL_YES and pos.side == PositionSide.YES:
             return pos.shares >= size

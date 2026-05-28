@@ -8,7 +8,6 @@ import shutil
 import sys
 import warnings
 from datetime import datetime, timezone
-from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -34,9 +33,7 @@ from marketlens.backtest._portfolio import Portfolio
 if TYPE_CHECKING:
     from marketlens.backtest._engine import BacktestConfig
 
-_FOUR = Decimal("0.0001")
-_ZERO = Decimal("0")
-_FORMAT_VERSION = 1
+_FORMAT_VERSION = 2
 
 
 class BacktestResult:
@@ -63,33 +60,31 @@ class BacktestResult:
         self.market_names: dict[str, str] = dict(market_names) if market_names else {}
         self.initial_cash = portfolio.initial_cash
 
-        initial = Decimal(portfolio.initial_cash)
-        final_equity = Decimal(portfolio.equity)
+        initial = portfolio.initial_cash
+        final_equity = portfolio.equity
 
-        self.total_pnl = str((final_equity - initial).quantize(_FOUR))
-        self.total_return = float((final_equity - initial) / initial) if initial else 0.0
+        self.total_pnl = final_equity - initial
+        self.total_return = (final_equity - initial) / initial if initial else 0.0
         self.total_trades = len(self._fills)
         self.markets_traded = len({f.market_id for f in self._fills})
         self.total_fees = portfolio.total_fees
 
         # Fee drag
-        total_volume = sum(Decimal(f.price) * Decimal(f.size) for f in self._fills)
+        total_volume = sum(f.price * f.size for f in self._fills)
         self.fee_drag_bps = (
-            float(Decimal(portfolio.total_fees) / total_volume * 10000)
-            if total_volume > 0
-            else 0.0
+            portfolio.total_fees / total_volume * 10_000 if total_volume > 0 else 0.0
         )
 
         # Win rate & profit factor (net of fees)
-        net_pnls = [(s, Decimal(s.pnl) - Decimal(s.fees)) for s in settlements]
+        net_pnls = [(s, s.pnl - s.fees) for s in settlements]
         wins = [n for _, n in net_pnls if n > 0]
         losses = [n for _, n in net_pnls if n < 0]
         self.win_rate = len(wins) / len(net_pnls) if net_pnls else 0.0
 
-        gross_profit = sum(wins, _ZERO)
-        gross_loss = abs(sum(losses, _ZERO))
+        gross_profit = sum(wins)
+        gross_loss = abs(sum(losses))
         if gross_loss > 0:
-            self.profit_factor = float(gross_profit / gross_loss)
+            self.profit_factor = gross_profit / gross_loss
         elif gross_profit > 0:
             self.profit_factor = float("inf")
         else:
@@ -99,9 +94,9 @@ class BacktestResult:
         returns: list[float] = []
         if len(settlements) >= 2:
             for s in settlements:
-                cb = Decimal(s.avg_entry_price) * Decimal(s.shares)
+                cb = s.avg_entry_price * s.shares
                 if cb > 0:
-                    returns.append(float((Decimal(s.pnl) - Decimal(s.fees)) / cb))
+                    returns.append((s.pnl - s.fees) / cb)
 
         # Sharpe ratio
         self.sharpe_ratio: float | None = None
@@ -125,12 +120,12 @@ class BacktestResult:
 
         # Max drawdown & max drawdown duration
         if equity_curve:
-            peak = Decimal(equity_curve[0]["equity"])
-            max_dd = _ZERO
+            peak = float(equity_curve[0]["equity"])
+            max_dd = 0.0
             dd_start: int | None = None
             max_dur = 0
             for point in equity_curve:
-                eq = Decimal(point["equity"])
+                eq = float(point["equity"])
                 if eq >= peak:
                     if dd_start is not None:
                         dur = point["t"] - dd_start
@@ -144,12 +139,11 @@ class BacktestResult:
                     dd = peak - eq
                     if dd > max_dd:
                         max_dd = dd
-            # Handle still in drawdown at end
             if dd_start is not None:
                 dur = equity_curve[-1]["t"] - dd_start
                 if dur > max_dur:
                     max_dur = dur
-            self.max_drawdown = float(max_dd / initial) if initial else 0.0
+            self.max_drawdown = max_dd / initial if initial else 0.0
             self.max_drawdown_duration: int = max_dur
         else:
             self.max_drawdown = 0.0
@@ -158,27 +152,25 @@ class BacktestResult:
         # Avg entry price
         buy_fills = [f for f in self._fills if f.side.value.startswith("BUY")]
         if buy_fills:
-            total_cost = sum(Decimal(f.price) * Decimal(f.size) for f in buy_fills)
-            total_size = sum(Decimal(f.size) for f in buy_fills)
-            self.avg_entry_price = str((total_cost / total_size).quantize(_FOUR))
+            total_cost = sum(f.price * f.size for f in buy_fills)
+            total_size = sum(f.size for f in buy_fills)
+            self.avg_entry_price = total_cost / total_size
         else:
-            self.avg_entry_price = "0.0000"
+            self.avg_entry_price = 0.0
 
-        # Expectancy (avg net PnL per settlement)
+        # Expectancy
         if net_pnls:
             total_net = sum(n for _, n in net_pnls)
-            self.expectancy = str((total_net / len(net_pnls)).quantize(_FOUR))
+            self.expectancy = total_net / len(net_pnls)
         else:
-            self.expectancy = "0.0000"
+            self.expectancy = 0.0
 
         # Average win / average loss / payoff ratio
-        self.avg_win = str((sum(wins) / len(wins)).quantize(_FOUR)) if wins else "0.0000"
-        self.avg_loss = str((sum(losses) / len(losses)).quantize(_FOUR)) if losses else "0.0000"
+        self.avg_win = sum(wins) / len(wins) if wins else 0.0
+        self.avg_loss = sum(losses) / len(losses) if losses else 0.0
         if losses:
             self.payoff_ratio = (
-                float(abs(sum(wins) / len(wins)) / abs(sum(losses) / len(losses)))
-                if wins
-                else 0.0
+                abs(self.avg_win) / abs(self.avg_loss) if wins else 0.0
             )
         else:
             self.payoff_ratio = float("inf") if wins else 0.0
@@ -200,14 +192,14 @@ class BacktestResult:
 
         # Capital utilization
         if equity_curve and initial > 0:
-            avg_cash = sum(Decimal(p["cash"]) for p in equity_curve) / len(equity_curve)
-            self.capital_utilization = max(0.0, float(1 - avg_cash / initial))
+            avg_cash = sum(float(p["cash"]) for p in equity_curve) / len(equity_curve)
+            self.capital_utilization = max(0.0, 1 - avg_cash / initial)
         else:
             self.capital_utilization = 0.0
 
     def summary(self) -> dict[str, Any]:
         s: dict[str, Any] = {
-            "total_pnl": self.total_pnl,
+            "total_pnl": f"{self.total_pnl:.4f}",
             "total_return": f"{self.total_return:.2%}",
             "win_rate": f"{self.win_rate:.2%}",
             "profit_factor": f"{self.profit_factor:.2f}",
@@ -218,18 +210,18 @@ class BacktestResult:
             "sortino_ratio": (
                 f"{self.sortino_ratio:.2f}" if self.sortino_ratio is not None else "N/A"
             ),
-            "expectancy": self.expectancy,
-            "avg_win": self.avg_win,
-            "avg_loss": self.avg_loss,
+            "expectancy": f"{self.expectancy:.4f}",
+            "avg_win": f"{self.avg_win:.4f}",
+            "avg_loss": f"{self.avg_loss:.4f}",
             "payoff_ratio": f"{self.payoff_ratio:.2f}",
             "avg_holding_ms": self.avg_holding_ms,
             "capital_utilization": f"{self.capital_utilization:.1%}",
             "max_drawdown_duration_ms": self.max_drawdown_duration,
             "total_trades": self.total_trades,
             "markets_traded": self.markets_traded,
-            "total_fees": self.total_fees,
+            "total_fees": f"{self.total_fees:.4f}",
             "fee_drag_bps": f"{self.fee_drag_bps:.1f}",
-            "avg_entry_price": self.avg_entry_price,
+            "avg_entry_price": f"{self.avg_entry_price:.4f}",
         }
         if self.cash_rejected > 0:
             s["cash_rejected"] = self.cash_rejected
@@ -252,9 +244,9 @@ class BacktestResult:
                 "t": f.timestamp,
                 "market_id": f.market_id,
                 "side": f.side.value,
-                "price": float(f.price),
-                "size": float(f.size),
-                "fee": float(f.fee),
+                "price": f.price,
+                "size": f.size,
+                "fee": f.fee,
                 "is_maker": f.is_maker,
             }
             for f in self._fills
@@ -273,14 +265,12 @@ class BacktestResult:
                 "market_id": o.market_id,
                 "side": o.side.value,
                 "order_type": o.order_type.value,
-                "size": float(o.size),
-                "limit_price": float(o.limit_price) if o.limit_price else None,
+                "size": o.size,
+                "limit_price": o.limit_price,
                 "status": o.status.value,
-                "filled_size": float(o.filled_size),
-                "avg_fill_price": (
-                    float(o.avg_fill_price) if o.avg_fill_price else None
-                ),
-                "total_fees": float(o.total_fees),
+                "filled_size": o.filled_size,
+                "avg_fill_price": o.avg_fill_price,
+                "total_fees": o.total_fees,
             }
             for o in self._orders
         ]
@@ -297,11 +287,11 @@ class BacktestResult:
                 "market_id": s.market_id,
                 "series_id": s.series_id,
                 "side": s.side.value,
-                "shares": float(s.shares),
-                "avg_entry_price": float(s.avg_entry_price),
-                "settlement_price": float(s.settlement_price),
-                "pnl": float(s.pnl),
-                "fees": float(s.fees),
+                "shares": s.shares,
+                "avg_entry_price": s.avg_entry_price,
+                "settlement_price": s.settlement_price,
+                "pnl": s.pnl,
+                "fees": s.fees,
                 "winning_outcome": s.winning_outcome,
                 "resolved_at": s.resolved_at,
             }
@@ -318,17 +308,10 @@ class BacktestResult:
             return pd.DataFrame()
         df = pd.DataFrame(self._equity_curve)
         df["t"] = pd.to_datetime(df["t"], unit="ms", utc=True)
-        df["cash"] = df["cash"].astype(float)
-        df["equity"] = df["equity"].astype(float)
-        df["pnl"] = df["pnl"].astype(float)
         return df.set_index("t")
 
     def by_series(self) -> dict[str | None, dict]:
-        """Per-series breakdown of backtest results.
-
-        Returns a dict keyed by ``series_id`` (or ``None`` for unseries'd markets),
-        with each value containing aggregated stats for that series.
-        """
+        """Per-series breakdown of backtest results."""
         from collections import defaultdict
 
         groups: dict[str | None, list[SettlementRecord]] = defaultdict(list)
@@ -337,16 +320,16 @@ class BacktestResult:
 
         result: dict[str | None, dict] = {}
         for sid, settlements in groups.items():
-            net_pnls = [(Decimal(s.pnl) - Decimal(s.fees)) for s in settlements]
-            total_pnl = sum(net_pnls, _ZERO)
-            total_fees = sum(Decimal(s.fees) for s in settlements)
+            net_pnls = [s.pnl - s.fees for s in settlements]
+            total_pnl = sum(net_pnls)
+            total_fees = sum(s.fees for s in settlements)
             wins = [n for n in net_pnls if n > 0]
             losses = [n for n in net_pnls if n < 0]
             win_rate = len(wins) / len(net_pnls) if net_pnls else 0.0
-            gross_profit = sum(wins, _ZERO)
-            gross_loss = abs(sum(losses, _ZERO))
+            gross_profit = sum(wins)
+            gross_loss = abs(sum(losses))
             if gross_loss > 0:
-                profit_factor = float(gross_profit / gross_loss)
+                profit_factor = gross_profit / gross_loss
             elif gross_profit > 0:
                 profit_factor = float("inf")
             else:
@@ -357,32 +340,17 @@ class BacktestResult:
                 f for f in self._fills if f.market_id in market_ids
             ])
 
-            expectancy = (
-                str((total_pnl / len(net_pnls)).quantize(_FOUR)) if net_pnls else "0.0000"
-            )
-            avg_win = (
-                str((sum(wins, _ZERO) / len(wins)).quantize(_FOUR)) if wins else "0.0000"
-            )
-            avg_loss = (
-                str((sum(losses, _ZERO) / len(losses)).quantize(_FOUR))
-                if losses
-                else "0.0000"
-            )
+            expectancy = total_pnl / len(net_pnls) if net_pnls else 0.0
+            avg_win = sum(wins) / len(wins) if wins else 0.0
+            avg_loss = sum(losses) / len(losses) if losses else 0.0
             if losses:
-                payoff_ratio = (
-                    float(
-                        abs(sum(wins, _ZERO) / len(wins))
-                        / abs(sum(losses, _ZERO) / len(losses))
-                    )
-                    if wins
-                    else 0.0
-                )
+                payoff_ratio = abs(avg_win) / abs(avg_loss) if wins else 0.0
             else:
                 payoff_ratio = float("inf") if wins else 0.0
 
             result[sid] = {
-                "total_pnl": str(total_pnl.quantize(_FOUR)),
-                "total_fees": str(total_fees.quantize(_FOUR)),
+                "total_pnl": total_pnl,
+                "total_fees": total_fees,
                 "win_rate": win_rate,
                 "profit_factor": profit_factor,
                 "expectancy": expectancy,
@@ -407,11 +375,6 @@ class BacktestResult:
         title: str | None = None,
         open_browser: bool = True,
     ) -> None:
-        """Open a local browser dashboard for this result.
-
-        Pass additional results as positional args to compare runs side by side.
-        The server blocks on the main thread until Ctrl+C.
-        """
         from marketlens.backtest._dashboard import show as _show
 
         _show(self, *others, labels=labels, title=title, open_browser=open_browser)
@@ -424,7 +387,6 @@ class BacktestResult:
         title: str | None = None,
         open_browser: bool = True,
     ) -> None:
-        """Load saved results and open a browser dashboard."""
         from marketlens.backtest._dashboard import dashboard as _dashboard
 
         _dashboard(*paths, labels=labels, title=title, open_browser=open_browser)
@@ -432,19 +394,6 @@ class BacktestResult:
     # ── Persistence ───────────────────────────────────────────────
 
     def save(self, path: str | Path, *, overwrite: bool = False) -> Path:
-        """Write the result to a directory as parquet + JSON manifest.
-
-        Layout::
-
-            <path>/
-              manifest.json
-              trades.parquet
-              orders.parquet
-              settlements.parquet
-              equity.parquet
-
-        Reload with :meth:`BacktestResult.load`.
-        """
         out = Path(path)
         if out.exists():
             if not overwrite:
@@ -477,12 +426,6 @@ class BacktestResult:
 
     @classmethod
     def load(cls, path: str | Path) -> "BacktestResult":
-        """Reconstruct a result from a directory previously written by :meth:`save`.
-
-        The returned result is read-only: ``_portfolio`` is ``None`` and the
-        backtest cannot be resumed. All metrics and DataFrames are restored
-        verbatim.
-        """
         src = Path(path)
         with open(src / "manifest.json") as f:
             manifest = json.load(f)
@@ -504,7 +447,7 @@ class BacktestResult:
         obj = cls.__new__(cls)
         obj._portfolio = None  # type: ignore[assignment]
         obj.cash_rejected = int(manifest.get("cash_rejected", 0))
-        obj.initial_cash = manifest.get("initial_cash", "0.0000")
+        obj.initial_cash = float(manifest.get("initial_cash", 0.0))
         obj.config = _deserialize_config(manifest.get("config"))
         obj.targets = manifest.get("targets") or {}
         obj.market_names = manifest.get("market_names") or {}
@@ -554,7 +497,6 @@ def _sdk_version() -> str:
 
 
 def _log_status(message: str) -> None:
-    """One-line status to stderr; suppressed when MARKETLENS_PROGRESS is falsy."""
     if os.environ.get("MARKETLENS_PROGRESS", "").strip().lower() in {"0", "false", "no", "off"}:
         return
     try:
@@ -593,14 +535,14 @@ def _serialize_fee_model(model: FeeModel | None) -> dict | None:
     if isinstance(model, ZeroFeeModel):
         return {"type": "zero"}
     if isinstance(model, FlatFeeModel):
-        return {"type": "flat", "fee_per_share": str(model._fee)}
+        return {"type": "flat", "fee_per_share": model._fee}
     if isinstance(model, PolymarketFeeModel):
         return {
             "type": "polymarket",
-            "fee_rate": str(model._fee_rate),
+            "fee_rate": model._fee_rate,
             "exponent": model._exponent,
         }
-    return None  # custom subclass — falls back to fee_model_repr
+    return None
 
 
 def _deserialize_fee_model(data: dict | None) -> FeeModel | None:
@@ -610,10 +552,10 @@ def _deserialize_fee_model(data: dict | None) -> FeeModel | None:
     if t == "zero":
         return ZeroFeeModel()
     if t == "flat":
-        return FlatFeeModel(Decimal(data["fee_per_share"]))
+        return FlatFeeModel(float(data["fee_per_share"]))
     if t == "polymarket":
         return PolymarketFeeModel(
-            Decimal(data["fee_rate"]),
+            float(data["fee_rate"]),
             exponent=int(data.get("exponent", 1)),
         )
     return None
@@ -744,9 +686,9 @@ def _read_orders_and_fills(src: Path) -> tuple[list[Order], list[Fill]]:
             order_id=str(row["order_id"]),
             market_id=str(row["market_id"]),
             side=OrderSide(row["side"]),
-            price=str(row["price"]),
-            size=str(row["size"]),
-            fee=str(row["fee"]),
+            price=float(row["price"]),
+            size=float(row["size"]),
+            fee=float(row["fee"]),
             timestamp=int(row["timestamp"]),
             is_maker=bool(row["is_maker"]),
         )
@@ -762,13 +704,13 @@ def _read_orders_and_fills(src: Path) -> tuple[list[Order], list[Fill]]:
             market_id=str(row["market_id"]),
             side=OrderSide(row["side"]),
             order_type=OrderType(row["order_type"]),
-            size=str(row["size"]),
-            limit_price=_or_none(row["limit_price"]),
+            size=float(row["size"]),
+            limit_price=_or_none(row["limit_price"], cast=float),
             submitted_at=int(row["submitted_at"]),
             status=OrderStatus(row["status"]),
-            filled_size=str(row["filled_size"]),
-            avg_fill_price=_or_none(row["avg_fill_price"]),
-            total_fees=str(row["total_fees"]),
+            filled_size=float(row["filled_size"]),
+            avg_fill_price=_or_none(row["avg_fill_price"], cast=float),
+            total_fees=float(row["total_fees"]),
             fills=fills_by_order.get(oid, []),
             cancel_after=_or_none(row["cancel_after"], cast=int),
         ))
@@ -783,11 +725,11 @@ def _read_settlements(src: Path) -> list[SettlementRecord]:
             market_id=str(row["market_id"]),
             series_id=_or_none(row["series_id"]),
             side=PositionSide(row["side"]),
-            shares=str(row["shares"]),
-            avg_entry_price=str(row["avg_entry_price"]),
-            settlement_price=str(row["settlement_price"]),
-            pnl=str(row["pnl"]),
-            fees=str(row["fees"]),
+            shares=float(row["shares"]),
+            avg_entry_price=float(row["avg_entry_price"]),
+            settlement_price=float(row["settlement_price"]),
+            pnl=float(row["pnl"]),
+            fees=float(row["fees"]),
             winning_outcome=_or_none(row["winning_outcome"]),
             resolved_at=int(row["resolved_at"]),
         ))
@@ -801,9 +743,9 @@ def _read_equity(src: Path) -> list[dict]:
         out.append({
             "t": int(row["t"]),
             "market_id": str(row["market_id"]),
-            "cash": str(row["cash"]),
-            "equity": str(row["equity"]),
-            "pnl": str(row["pnl"]),
+            "cash": float(row["cash"]),
+            "equity": float(row["equity"]),
+            "pnl": float(row["pnl"]),
         })
     return out
 

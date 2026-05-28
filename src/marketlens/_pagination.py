@@ -85,7 +85,7 @@ class SyncPageIterator(Generic[T]):
     def to_dataframe(self):  # -> pd.DataFrame
         """Convert all results to a properly-typed pandas DataFrame.
 
-        - Decimal-string fields (prices, sizes) become ``float64``
+        - Numeric fields (prices, sizes) are ``float64``
         - Epoch-ms timestamps become ``datetime64[ns, UTC]``
         - A natural time-based index is set when one exists
         """
@@ -170,7 +170,7 @@ class AsyncPageIterator(Generic[T]):
     async def to_dataframe(self):  # -> pd.DataFrame
         """Convert all results to a properly-typed pandas DataFrame.
 
-        - Decimal-string fields (prices, sizes) become ``float64``
+        - Numeric fields (prices, sizes) are ``float64``
         - Epoch-ms timestamps become ``datetime64[ns, UTC]``
         - A natural time-based index is set when one exists
         """

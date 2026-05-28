@@ -24,7 +24,7 @@ for market, book in walk:
     if event and last_event_id and event.id != last_event_id and last_surface:
         # Event boundary — print summary of the previous event
         print(f"\n{last_surface.series_title}  [{last_event_title}]")
-        print(f"  implied mean: ${float(last_surface.implied_mean):,.0f}  cv={last_surface.implied_cv}%")
+        print(f"  implied mean: ${last_surface.implied_mean:,.0f}  cv={last_surface.implied_cv}%")
         for s in last_surface.survival_strikes():
             print(f"  K=${s.strike:>10,.0f}  P(above)={s.fitted_prob:.3f}")
 
@@ -35,7 +35,7 @@ for market, book in walk:
 # Final event
 if last_surface:
     print(f"\n{last_surface.series_title}  [{last_event_title}]")
-    print(f"  implied mean: ${float(last_surface.implied_mean):,.0f}  cv={last_surface.implied_cv}%")
+    print(f"  implied mean: ${last_surface.implied_mean:,.0f}  cv={last_surface.implied_cv}%")
     for s in last_surface.survival_strikes():
         print(f"  K=${s.strike:>10,.0f}  P(above)={s.fitted_prob:.3f}")
 

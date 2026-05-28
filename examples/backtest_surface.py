@@ -10,7 +10,6 @@ to filter trades to strikes near the current spot price.
 """
 
 from datetime import datetime, timezone
-from decimal import Decimal
 
 from marketlens import MarketLens
 from marketlens.backtest import Strategy
@@ -33,15 +32,14 @@ class SurfaceMispricing(Strategy):
         # Only trade strikes near the current spot price
         ref = ctx.reference_price()
         if ref and market.strike:
-            distance = abs(Decimal(ref) - Decimal(market.strike)) / Decimal(ref)
-            if distance > Decimal("0.05"):
+            if abs(ref - market.strike) / ref > 0.05:
                 return
         surface = compute_surface(ctx.books, self._mkts, self.series)
         if not surface:
             return
         for s in surface.survival_strikes():
             if s.market_id == market.id and s.fitted_prob - s.raw_prob > self.edge:
-                ctx.buy_yes(size="100")
+                ctx.buy_yes(size=100)
                 self._traded.add(market.id)
                 break
 
@@ -50,7 +48,7 @@ client = MarketLens()
 series = client.series.get("ethereum-multi-strikes-weekly")
 result = client.backtest(
     SurfaceMispricing(series, edge=0.01), "ethereum-multi-strikes-weekly",
-    initial_cash="10000.0000",
+    initial_cash=10_000,
     after=datetime(2026, 3, 5, 10, 0, tzinfo=timezone.utc),
     before=datetime(2026, 3, 5, 10, 5, tzinfo=timezone.utc),
 )

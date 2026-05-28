@@ -6,7 +6,6 @@ import os
 import sys
 import warnings
 from dataclasses import dataclass
-from decimal import Decimal
 from pathlib import Path
 from typing import Any, AsyncIterator, Iterator
 
@@ -51,7 +50,7 @@ def _prep_status(message: str) -> None:
 from marketlens.types.market import Market
 from marketlens.types.orderbook import OrderBook, PriceLevel
 
-_FOUR = Decimal("0.0001")
+_EPS_SHARE = 1e-4  # half a tick on shares (4 d.p.)
 
 # Sized so the structured-product fan-out doesn't burst past what the API
 # can absorb without serving 5xx. Larger values stop helping latency anyway
@@ -215,25 +214,25 @@ def _iter_history_parquet(
         t = int(ts_col[i])
         if et == "delta":
             yield DeltaEvent(
-                t=t, price=f"{prices[i]:.4f}", size=f"{sizes[i]:.4f}", side=sides[i],
+                t=t, price=float(prices[i]), size=float(sizes[i]), side=sides[i],
             )
         elif et == "trade":
             yield TradeEvent(
-                t=t, id=trade_ids[i], price=f"{prices[i]:.4f}", size=f"{sizes[i]:.4f}", side=sides[i],
+                t=t, id=trade_ids[i], price=float(prices[i]), size=float(sizes[i]), side=sides[i],
             )
         elif et == "snapshot":
             raw_bids = bids_col[i]
             raw_asks = asks_col[i]
             bids_raw = json.loads(raw_bids) if isinstance(raw_bids, str) else raw_bids
             asks_raw = json.loads(raw_asks) if isinstance(raw_asks, str) else raw_asks
-            bids = [PriceLevel(price=b["price"], size=b["size"]) for b in bids_raw]
-            asks = [PriceLevel(price=a["price"], size=a["size"]) for a in asks_raw]
+            bids = [PriceLevel(price=float(b["price"]), size=float(b["size"])) for b in bids_raw]
+            asks = [PriceLevel(price=float(a["price"]), size=float(a["size"])) for a in asks_raw]
             yield SnapshotEvent(t=t, is_reseed=bool(is_reseeds[i]), bids=bids, asks=asks)
 
 
 @dataclass
 class BacktestConfig:
-    initial_cash: str = "10000.0000"
+    initial_cash: float = 10_000.0
     fee_model: FeeModel | None = None
     fees: str | None = "polymarket"
     taker_only: bool = True
@@ -292,7 +291,7 @@ class _EngineCore:
         self._market_objs: dict[str, Market] = {}
         self._market_series: dict[str, str] = {}  # market_id → series_id (for settlement attribution)
         self._market_group: dict[str, str] = {}    # market_id → group key (for sequential slot tracking)
-        self._ref_prices: dict[str, list[tuple[int, str]]] = {}  # symbol → sorted (timestamp, price)
+        self._ref_prices: dict[str, list[tuple[int, float]]] = {}  # symbol → sorted (timestamp, price)
         self._market_underlying: dict[str, str | None] = {}  # market_id → underlying symbol
         self._underlying_bounds: dict[str, tuple[int, int]] = {}  # symbol → (earliest_open, latest_close)
         # Set in run() so get_reference_price() can lazily load on first use.
@@ -442,20 +441,15 @@ class _EngineCore:
     def submit_order(
         self,
         side: OrderSide,
-        size: str | float | int | Decimal,
+        size: float | int | str,
         *,
         market_id: str | None = None,
-        limit_price: str | float | int | Decimal | None = None,
+        limit_price: float | int | str | None = None,
         cancel_after: int | None = None,
     ) -> Order:
-        # Accept any numeric input from the strategy (float/int/Decimal) and
-        # normalize to the decimal-string form the rest of the engine and the
-        # Order dataclass expect. ``str(float)`` already round-trips cleanly
-        # in CPython (``str(0.1) == "0.1"``).
-        if not isinstance(size, str):
-            size = str(size)
-        if limit_price is not None and not isinstance(limit_price, str):
-            limit_price = str(limit_price)
+        size = float(size)
+        if limit_price is not None:
+            limit_price = float(limit_price)
 
         target = market_id or self._current_market.id  # type: ignore[union-attr]
         self._order_counter += 1
@@ -465,19 +459,16 @@ class _EngineCore:
         if side in (OrderSide.SELL_YES, OrderSide.SELL_NO):
             pos = self._portfolio.position(target)
             expected_side = PositionSide.YES if side == OrderSide.SELL_YES else PositionSide.NO
-            held = Decimal(pos.shares) if pos.side == expected_side else Decimal("0")
-            needed = Decimal(size)
-            if held < needed:
+            held = pos.shares if pos.side == expected_side else 0.0
+            if held < size:
                 side_name = "YES" if side == OrderSide.SELL_YES else "NO"
                 raise ValueError(
-                    f"Cannot sell {size} {side_name} shares: only holding {held.quantize(_FOUR)}"
+                    f"Cannot sell {size:.4f} {side_name} shares: only holding {held:.4f}"
                 )
 
         # Validate limit price
-        if limit_price is not None:
-            lp = Decimal(limit_price)
-            if lp <= 0 or lp >= 1:
-                raise ValueError(f"Limit price must be in (0, 1), got {limit_price}")
+        if limit_price is not None and (limit_price <= 0 or limit_price >= 1):
+            raise ValueError(f"Limit price must be in (0, 1), got {limit_price}")
 
         order = Order(
             id=f"ord-{self._order_counter}",
@@ -655,7 +646,7 @@ class _EngineCore:
         if crossing_fill is not None:
             self._apply_fill(order, crossing_fill)
 
-        if Decimal(order.size) - Decimal(order.filled_size) <= Decimal("0.0001"):
+        if order.size - order.filled_size <= _EPS_SHARE:
             return
 
         # Rest the remainder. Register against the same live book so the
@@ -709,15 +700,8 @@ class _EngineCore:
                 PositionSide.NO if target_side == PositionSide.YES else PositionSide.YES
             )
             pos = self._portfolio.position(fill.market_id)
-            matched = (
-                min(Decimal(pos.shares), Decimal(fill.size))
-                if pos.side == opposite else Decimal("0")
-            )
-            cost = (
-                Decimal(fill.price) * Decimal(fill.size)
-                + Decimal(fill.fee)
-                - matched
-            )
+            matched = min(pos.shares, fill.size) if pos.side == opposite else 0.0
+            cost = fill.price * fill.size + fill.fee - matched
             if self._portfolio._cash < cost:
                 self._cash_rejected += 1
                 raise ValueError("Insufficient cash")
@@ -728,17 +712,15 @@ class _EngineCore:
         self._portfolio.apply_fill(fill)
 
         order.fills.append(fill)
-        filled = Decimal(order.filled_size) + Decimal(fill.size)
-        order.filled_size = str(filled.quantize(_FOUR))
-        order.total_fees = str(
-            (Decimal(order.total_fees) + Decimal(fill.fee)).quantize(_FOUR)
-        )
+        filled = order.filled_size + fill.size
+        order.filled_size = filled
+        order.total_fees = order.total_fees + fill.fee
 
-        total_cost = sum(Decimal(f.price) * Decimal(f.size) for f in order.fills)
-        total_filled = sum(Decimal(f.size) for f in order.fills)
-        order.avg_fill_price = str((total_cost / total_filled).quantize(_FOUR))
+        total_cost = sum(f.price * f.size for f in order.fills)
+        total_filled = sum(f.size for f in order.fills)
+        order.avg_fill_price = total_cost / total_filled
 
-        if filled >= Decimal(order.size):
+        if filled >= order.size - _EPS_SHARE:
             order.status = OrderStatus.FILLED
             self._open_orders = [o for o in self._open_orders if o.id != order.id]
             self._fill_sim.unregister_order(order.id)
@@ -789,13 +771,12 @@ class _EngineCore:
 
         if isinstance(event, SnapshotEvent):
             equity = self._portfolio.equity
-            pnl = str((Decimal(equity) - Decimal(self._portfolio.initial_cash)).quantize(_FOUR))
             self._equity_curve.append({
                 "t": event.t,
                 "market_id": market.id,
                 "cash": self._portfolio.cash,
                 "equity": equity,
-                "pnl": pnl,
+                "pnl": equity - self._portfolio.initial_cash,
             })
 
         return is_first
@@ -1012,7 +993,7 @@ class _EngineCore:
                 yield market, event, book
             reporter.market_finished(market.id)
 
-    def get_reference_price(self, symbol: str | None, at_time: int) -> str | None:
+    def get_reference_price(self, symbol: str | None, at_time: int) -> float | None:
         if symbol is None:
             return None
         if symbol not in self._ref_prices:
@@ -1022,7 +1003,7 @@ class _EngineCore:
             return None
         # Each entry is a candle close at its exact timestamp.
         # Return the most recent close at or before at_time.
-        idx = bisect.bisect_right(prices, (at_time, "~")) - 1
+        idx = bisect.bisect_right(prices, (at_time, float("inf"))) - 1
         return prices[idx][1] if idx >= 0 else None
 
     _REF_RESOLUTION_DEFAULT = "1m"
@@ -1046,7 +1027,7 @@ class _EngineCore:
             if ref_path.exists():
                 table = pq.read_table(ref_path, columns=["timestamp", "price"])
                 ts_col = table.column("timestamp").to_pylist()
-                price_col = [str(v) for v in table.column("price").to_pylist()]
+                price_col = [float(v) for v in table.column("price").to_pylist()]
                 self._ref_prices[symbol] = list(zip(ts_col, price_col))
                 return
         client = ctx.get("client")
@@ -1069,7 +1050,7 @@ class _EngineCore:
                 self._reporter.download_started(
                     f"{symbol} reference ({resolution})", est_total,
                 )
-                prices: list[tuple[int, str]] = []
+                prices: list[tuple[int, float]] = []
                 for candle in client.reference.candles(
                     symbol, after=eff_after, before=eff_before,
                     resolution=resolution, limit=5000,

@@ -19,18 +19,18 @@ class OpeningFader(Strategy):
         self._entered = False
 
     def on_book(self, ctx, market, book):
-        if self._entered or book.midpoint is None:
+        if self._entered:
             return
-        if float(book.midpoint) < 0.50:
-            ctx.buy_yes(size="200")
+        if book.midpoint < 0.50:
+            ctx.buy_yes(size=200)
         else:
-            ctx.buy_no(size="200")
+            ctx.buy_no(size=200)
         self._entered = True
 
 client = MarketLens()  # uses MARKETLENS_API_KEY env var
 result = client.backtest(
     OpeningFader(), "btc-up-or-down-5m",
-    initial_cash="10000",
+    initial_cash=10_000,
     after="2026-04-15T01:45:00Z", before="2026-04-15T02:00:00Z",
 )
 print(result.summary())
@@ -42,24 +42,24 @@ Always pass `after`/`before` — series and multi-strike runs are otherwise unbo
 
 ```python
 # Single market — replays the full lifetime of the market by default
-result = client.backtest(strategy, market_id, initial_cash="10000")
+result = client.backtest(strategy, market_id, initial_cash=10_000)
 
 # Rolling series — walks every market in [after, before)
-result = client.backtest(strategy, "btc-up-or-down-5m", initial_cash="10000",
+result = client.backtest(strategy, "btc-up-or-down-5m", initial_cash=10_000,
                          after="2026-04-15T01:45:00Z",
                          before="2026-04-15T02:00:00Z")
 
 # Multi-asset portfolio — shared capital across series
 result = client.backtest(strategy,
     ["btc-up-or-down-5m", "eth-up-or-down-5m", "sol-up-or-down-5m"],
-    initial_cash="10000",
+    initial_cash=10_000,
     after="2026-04-15T01:45:00Z", before="2026-04-15T02:00:00Z")
 
 # Structured product — replays every strike market in the matched event(s).
 # Pass `after` to pick a single recent event; events are typically week-long,
 # so a wide window can pull millions of book events.
 result = client.backtest(strategy, "btc-multi-strikes-weekly",
-                         initial_cash="10000",
+                         initial_cash=10_000,
                          after="2026-05-08T00:00:00Z")
 ```
 
@@ -203,7 +203,7 @@ for market, book in walk:
     if surface:
         for s in surface.survival_strikes():
             print(f"${s.strike:,.0f} P(above)={s.fitted_prob:.3f}")
-        print(f"implied_mean=${float(surface.implied_mean):,.0f}")
+        print(f"implied_mean=${surface.implied_mean:,.0f}")
         break  # the loop fires per book tick — break to print one fit
 ```
 
@@ -224,9 +224,30 @@ book.microprice()              # size-weighted mid from best level
 book.weighted_midpoint(n=3)    # n-level weighted mid
 book.spread_bps()              # spread in basis points
 book.imbalance(levels=3)       # bid/ask imbalance [-1, 1]
-book.impact("BUY", "1000")     # VWAP for $1k market buy
-book.slippage("BUY", "1000")   # slippage from mid
-book.depth_within("0.02")      # (bid, ask) depth within 2c of mid
+book.impact("BUY", 1000)       # VWAP for $1k market buy
+book.slippage("BUY", 1000)     # slippage from mid
+book.depth_within(0.02)        # (bid, ask) depth within 2c of mid
+```
+
+## Numeric types
+
+All numeric fields (prices, sizes, volumes, fees, OHLCV, depths, strikes, statistics) are `float`. Defaults are picked so call sites don't need defensive guards:
+
+- **Polymarket prices** — `best_bid`, `best_ask`, `midpoint`, `Outcome.last_price` — default to `0.5` (the neutral [0, 1] prior). `if book.midpoint < 0.4` and `if book.best_ask > 0.7` both behave correctly when the side is missing.
+- **Sizes & rates** — `spread`, `bid_depth`, `ask_depth`, `volume`, `liquidity`, `vwap`, `fee_rate_bps` — default to `0.0`. Absence reads as zero magnitude.
+- **Genuinely optional** — an unresolved market's `winning_outcome`, a non-structured market's `strike`, and helper methods like `book.spread_bps()` / `book.impact(...)` still return `None` when the book itself is empty or insufficient.
+
+```python
+book.best_bid * 0.99           # works directly — no Decimal wrap
+if book.midpoint < 0.35:       # cheap → consider buying YES
+    ctx.buy_yes(size=200)
+```
+
+Detect a truly empty book with `book.bid_levels` / `book.ask_levels` rather than comparing the price defaults against `0`:
+
+```python
+if book.bid_levels and book.ask_levels:
+    print(book.spread_bps())
 ```
 
 ## Reference Prices

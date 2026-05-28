@@ -1,8 +1,8 @@
-"""DataFrame conversion with proper type coercion.
+"""DataFrame conversion with sensible index and timestamp handling.
 
-Turns decimal-string prices into floats, epoch-ms timestamps into
-``datetime64[ns, UTC]``, and sets a sensible index — so the user gets an
-analysis-ready DataFrame from every ``to_dataframe()`` call.
+Turns epoch-ms timestamps into ``datetime64[ns, UTC]`` and sets a natural
+time-based index. Numeric fields are already ``float`` on the model so no
+extra coercion is needed.
 """
 
 from __future__ import annotations
@@ -16,14 +16,12 @@ from pydantic import BaseModel
 
 @dataclass(frozen=True)
 class _DFConfig:
-    """Declares how to coerce a model's fields for DataFrame output."""
-    numeric: tuple[str, ...] = ()
+    """Declares how to shape a model's DataFrame output."""
     timestamps: tuple[str, ...] = ()
     index: str | None = None
     exclude: tuple[str, ...] = ()
 
 
-# Lazy registry — populated on first access to avoid import-time circular deps.
 _REGISTRY: dict[type, _DFConfig] | None = None
 
 
@@ -42,22 +40,18 @@ def _get_registry() -> dict[type, _DFConfig]:
 
     _REGISTRY = {
         Candle: _DFConfig(
-            numeric=("open", "high", "low", "close", "vwap", "volume"),
             timestamps=("open_time", "close_time"),
             index="open_time",
         ),
         Trade: _DFConfig(
-            numeric=("price", "size"),
             timestamps=("platform_timestamp", "collected_at"),
             index="platform_timestamp",
         ),
         BookMetrics: _DFConfig(
-            numeric=("best_bid", "best_ask", "spread", "midpoint", "bid_depth", "ask_depth"),
             timestamps=("t",),
             index="t",
         ),
         Market: _DFConfig(
-            numeric=("tick_size", "volume", "liquidity"),
             timestamps=("open_time", "close_time", "resolved_at", "platform_resolved_at", "created_at", "updated_at"),
             exclude=("outcomes",),
         ),
@@ -68,8 +62,6 @@ def _get_registry() -> dict[type, _DFConfig]:
             timestamps=("first_market_close", "last_market_close"),
         ),
         Surface: _DFConfig(
-            numeric=("implied_mean", "implied_cv", "implied_skew",
-                     "implied_peak", "implied_peak_cv", "implied_trough", "implied_trough_cv"),
             timestamps=("computed_at", "expiry_ms"),
             index="computed_at",
             exclude=("strikes",),
@@ -79,11 +71,11 @@ def _get_registry() -> dict[type, _DFConfig]:
 
 
 def models_to_dataframe(items: Sequence[BaseModel], model_cls: type | None = None) -> pd.DataFrame:
-    """Convert a sequence of Pydantic models to a properly-typed DataFrame.
+    """Convert a sequence of Pydantic models to a typed DataFrame.
 
-    - Decimal-string fields (prices, sizes, volumes) → ``float64``
-    - Epoch-ms timestamp fields → ``datetime64[ns, UTC]``
-    - Sets a natural time-based index when one exists
+    Numeric fields are native ``float`` on the model and round-trip directly
+    into ``float64`` columns. Epoch-ms timestamps become
+    ``datetime64[ns, UTC]`` and a natural index is set when one exists.
     """
 
     if not items:
@@ -106,17 +98,10 @@ def models_to_dataframe(items: Sequence[BaseModel], model_cls: type | None = Non
     if config is None:
         return df
 
-    # Coerce numeric-string columns to float
-    for col in config.numeric:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors="coerce")
-
-    # Coerce epoch-ms columns to datetime
     for col in config.timestamps:
         if col in df.columns:
             df[col] = pd.to_datetime(df[col], unit="ms", utc=True, errors="coerce")
 
-    # Set index
     if config.index and config.index in df.columns:
         df = df.set_index(config.index)
 
