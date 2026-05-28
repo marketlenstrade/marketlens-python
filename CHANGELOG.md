@@ -7,6 +7,9 @@ All notable changes to the `marketlens` Python SDK, version by version.
 * Interactive backtest dashboard. Call `result.show()` to open a local browser dashboard with equity curve, drawdown, PnL by market, PnL distribution, trade timeline, order analysis, and a sortable settlements table. Zero new dependencies — uses plotly.js via CDN and Python's stdlib HTTP server.
 * Multi-run comparison. Pass additional results to `result.show(other)` or load from disk with `BacktestResult.dashboard("path1", "path2")`. Charts overlay runs, metrics highlight the best value per row, and toggle checkboxes control visibility.
 * Market names stored in backtest results. The engine now persists `Market.question` text alongside market IDs so the dashboard, charts, and tables display human-readable names instead of UUIDs. Backward compatible — older saved results fall back to truncated IDs.
+* Offline backtests on structured series (multi-strike products, e.g. `btc-multi-strikes-weekly`) over a window narrower than the market lifetime now skip pre-window parquet rows instead of replaying the whole file. A 1h backtest against weekly markets runs roughly 14x faster end-to-end on a cached `data_dir`.
+* Streaming backtests on structured series fan out per-lane prefetchers concurrently. Time-to-first-event drops from N round-trips to a small parallel batch for products with many overlapping markets. Rolling series and single-market backtests are unaffected (they run on a single lane).
+* Streaming path no longer surfaces the API's anchor snapshot (delivered at `t <= after` to seed the order book) to the strategy. Matches the offline path's `[after, before)` half-open contract exactly.
 
 ## [1.3.0] 2026-05-26
 

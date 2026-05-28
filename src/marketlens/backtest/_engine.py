@@ -53,6 +53,53 @@ from marketlens.types.orderbook import OrderBook, PriceLevel
 
 _FOUR = Decimal("0.0001")
 
+# Sized so the structured-product fan-out doesn't burst past what the API
+# can absorb without serving 5xx. Larger values stop helping latency anyway
+# once the server's own concurrency is saturated.
+_PREWARM_MAX_WORKERS = 4
+_STOP = object()
+
+
+def _prewarm_streams(
+    streams: list[Iterator[tuple[Market, HistoryEvent, OrderBook]]],
+) -> list[Iterator[tuple[Market, HistoryEvent, OrderBook]]]:
+    """Drive the first ``next()`` on each stream concurrently.
+
+    ``_make_market_stream`` starts its prefetcher only on the first
+    ``next()``, and ``merge_streams`` calls ``next()`` on streams one at a
+    time, so without this the per-lane fan-out is sequential. Empty streams
+    are dropped so they don't sit dead in the merge heap.
+    """
+    if len(streams) <= 1:
+        return streams
+
+    from concurrent.futures import ThreadPoolExecutor
+
+    def _warm(stream: Iterator) -> tuple[Iterator, Any]:
+        it = iter(stream)
+        try:
+            return it, next(it)
+        except StopIteration:
+            return it, _STOP
+
+    with ThreadPoolExecutor(
+        max_workers=min(_PREWARM_MAX_WORKERS, len(streams)),
+        thread_name_prefix="marketlens-prewarm",
+    ) as ex:
+        warmed = list(ex.map(_warm, streams))
+
+    out: list[Iterator] = []
+    for it, first in warmed:
+        if first is _STOP:
+            continue
+
+        def _chain(it=it, first=first):
+            yield first
+            yield from it
+
+        out.append(_chain())
+    return out
+
 
 def _pack_into_lanes(markets: list[Market]) -> list[list[Market]]:
     """Pack markets into time-disjoint lanes via greedy interval coloring.
@@ -87,29 +134,85 @@ def _pack_into_lanes(markets: list[Market]) -> list[list[Market]]:
     return lanes
 
 
-def _iter_history_parquet(path: Path) -> Iterator[HistoryEvent]:
-    """Read a history Parquet file and yield HistoryEvent objects."""
-    import pandas as pd
+def _iter_history_parquet(
+    path: Path,
+    *,
+    after_ms: int | None = None,
+    before_ms: int | None = None,
+) -> Iterator[HistoryEvent]:
+    """Read a history Parquet file and yield HistoryEvent objects.
 
-    df = pd.read_parquet(path)
+    When ``after_ms`` is set, emit rows from the latest snapshot with
+    ``t <= after_ms`` (the anchor) onward so OrderBookReplay seeds without
+    iterating the full market lifetime. When ``before_ms`` is set, stop at
+    the first row with ``t >= before_ms``.
+    """
+    pf = pq.ParquetFile(path)
 
-    # PyArrow-backed columns route every .values[i] through arrow __getitem__
-    # (~2.7us, ~970K calls/market). .tolist() materializes once into a native
-    # Python list with C-level O(1) indexing.
-    event_types = df["event_type"].tolist()
-    ts = df["t"].tolist()
-    prices = df["price"].tolist()
-    sizes = df["size"].tolist()
-    sides = df["side"].tolist()
-    trade_ids = df["trade_id"].tolist()
-    is_reseeds = df["is_reseed"].tolist()
-    bids_col = df["bids"].tolist()
-    asks_col = df["asks"].tolist()
+    if after_ms is None and before_ms is None:
+        slice_start = 0
+        slice_len: int | None = None
+    else:
+        # Two-pass: locate [anchor, end) from t + event_type, then read the
+        # remaining columns only for that slice.
+        keys = pf.read(columns=["t", "event_type"])
+        ts = keys.column("t").to_pylist()
+        ets = keys.column("event_type").to_pylist()
+        n = len(ts)
+        if n == 0:
+            return
+
+        anchor_idx = -1
+        if after_ms is not None:
+            for i in range(n - 1, -1, -1):
+                if ts[i] > after_ms:
+                    continue
+                if ets[i] == "snapshot":
+                    anchor_idx = i
+                    break
+            if anchor_idx == -1:
+                # No prior snapshot: fall back to the first snapshot inside
+                # the window so the book can still seed.
+                upper = before_ms if before_ms is not None else ts[-1] + 1
+                for i in range(n):
+                    if ts[i] > after_ms and ts[i] < upper and ets[i] == "snapshot":
+                        anchor_idx = i
+                        break
+                if anchor_idx == -1:
+                    return
+        else:
+            anchor_idx = 0
+
+        end_idx = n
+        if before_ms is not None:
+            for i in range(anchor_idx, n):
+                if ts[i] >= before_ms:
+                    end_idx = i
+                    break
+        if end_idx <= anchor_idx:
+            return
+        slice_start = anchor_idx
+        slice_len = end_idx - anchor_idx
+
+    cols = ["event_type", "t", "price", "size", "side", "trade_id", "is_reseed", "bids", "asks"]
+    tbl = pf.read(columns=cols)
+    if slice_len is not None:
+        tbl = tbl.slice(slice_start, slice_len)
+
+    event_types = tbl.column("event_type").to_pylist()
+    ts_col = tbl.column("t").to_pylist()
+    prices = tbl.column("price").to_pylist()
+    sizes = tbl.column("size").to_pylist()
+    sides = tbl.column("side").to_pylist()
+    trade_ids = tbl.column("trade_id").to_pylist()
+    is_reseeds = tbl.column("is_reseed").to_pylist()
+    bids_col = tbl.column("bids").to_pylist()
+    asks_col = tbl.column("asks").to_pylist()
 
     # Reorder dispatch: deltas + trades dominate; snapshot is rare (~16/market).
     for i in range(len(event_types)):
         et = event_types[i]
-        t = int(ts[i])
+        t = int(ts_col[i])
         if et == "delta":
             yield DeltaEvent(
                 t=t, price=f"{prices[i]:.4f}", size=f"{sizes[i]:.4f}", side=sides[i],
@@ -119,8 +222,10 @@ def _iter_history_parquet(path: Path) -> Iterator[HistoryEvent]:
                 t=t, id=trade_ids[i], price=f"{prices[i]:.4f}", size=f"{sizes[i]:.4f}", side=sides[i],
             )
         elif et == "snapshot":
-            bids_raw = json.loads(bids_col[i])
-            asks_raw = json.loads(asks_col[i])
+            raw_bids = bids_col[i]
+            raw_asks = asks_col[i]
+            bids_raw = json.loads(raw_bids) if isinstance(raw_bids, str) else raw_bids
+            asks_raw = json.loads(raw_asks) if isinstance(raw_asks, str) else raw_asks
             bids = [PriceLevel(price=b["price"], size=b["size"]) for b in bids_raw]
             asks = [PriceLevel(price=a["price"], size=a["size"]) for a in asks_raw]
             yield SnapshotEvent(t=t, is_reseed=bool(is_reseeds[i]), bids=bids, asks=asks)
@@ -716,6 +821,8 @@ class _EngineCore:
         active: dict[str, Market] = {}  # grouping_key → current Market
         finalized: set[str] = set()  # market IDs already finalized
 
+        streams = _prewarm_streams(streams)
+
         for market, event, book in merge_streams(streams):
             self._reporter.consumed(market.id, 1)
             # Skip events for markets already finalized (past close_time)
@@ -837,6 +944,13 @@ class _EngineCore:
                 reporter.market_started(market.id, market.id)
                 replay = OrderBookReplay(current, market_id=market.id, platform=market.platform)
                 for event, book in replay:
+                    if user_before_ms is not None and event.t >= user_before_ms:
+                        break
+                    if user_after_ms is not None and event.t < user_after_ms:
+                        # Silent replay: the API delivers an anchor snapshot
+                        # at t <= after so the book can seed; don't surface
+                        # pre-window events to the strategy.
+                        continue
                     yield market, event, book
                 reporter.market_finished(market.id)
 
@@ -885,7 +999,7 @@ class _EngineCore:
         for market, path in resolved:
             if path is None:
                 continue
-            events = _iter_history_parquet(path)
+            events = _iter_history_parquet(path, after_ms=after_ms, before_ms=before_ms)
             reporter.market_started(market.id, market.id)
             replay = OrderBookReplay(events, market_id=market.id, platform=market.platform)
             for event, book in replay:
