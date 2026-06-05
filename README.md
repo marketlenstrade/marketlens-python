@@ -185,7 +185,7 @@ backtest = client.backtest(
     strategy, "btc-up-or-down-5m",
     data_dir=result,                      # PathLike — passes straight through
     after="2026-03-01", before="2026-03-08",
-    initial_cash="10000",
+    initial_cash=10_000,
 )
 ```
 
