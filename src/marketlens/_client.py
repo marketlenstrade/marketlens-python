@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any
 
@@ -74,6 +75,7 @@ class MarketLens:
         data_dir: str | None = None,
         progress: bool = True,
         coalesce: bool | None = None,
+        concurrency: int = 8,
         **params: Any,
     ) -> Any:
         """Run a backtest on a market, series, or list of markets/series.
@@ -93,6 +95,9 @@ class MarketLens:
                 and ``include_trades=True``). ``False`` forces full firehose.
                 Fill prices are mode-independent — the override only
                 controls inter-trade event density.
+            concurrency: Parallel per-market downloads when ``data_dir`` is set
+                but empty (the auto-download path). Defaults to 8, capped to the
+                CPU count. No effect once the files are already on disk.
 
         Simple one-liner API. For advanced config, use ``BacktestEngine`` directly.
         """
@@ -109,6 +114,7 @@ class MarketLens:
             settlement_delay_ms=settlement_delay_ms,
             progress=progress,
             coalesce=coalesce,
+            download_concurrency=concurrency,
         )
         engine = BacktestEngine(strategy, config)
         # Auto-download (when ``data_dir`` is missing/empty) is dispatched
@@ -125,6 +131,7 @@ class MarketLens:
         before: Any,
         coalesce: bool,
         progress: bool,
+        concurrency: int = 1,
     ) -> None:
         ids = id if isinstance(id, list) else [id]
         for one in ids:
@@ -136,6 +143,7 @@ class MarketLens:
                 self.exports.download_series(
                     one, after=after, before=before,
                     data_dir=data_dir, coalesce=coalesce, progress=progress,
+                    concurrency=concurrency,
                 )
 
     def close(self) -> None:
@@ -197,6 +205,7 @@ class AsyncMarketLens:
         data_dir: str | None = None,
         progress: bool = True,
         coalesce: bool | None = None,
+        concurrency: int = 8,
         **params: Any,
     ) -> Any:
         """Run a backtest on a market, series, or list of markets/series (async).
@@ -216,6 +225,7 @@ class AsyncMarketLens:
             settlement_delay_ms=settlement_delay_ms,
             progress=progress,
             coalesce=coalesce,
+            download_concurrency=concurrency,
         )
         engine = AsyncBacktestEngine(strategy, config)
 
@@ -226,6 +236,7 @@ class AsyncMarketLens:
                 after=after, before=before,
                 coalesce=engine._resolve_compact_mode(),
                 progress=progress,
+                concurrency=max(1, min(concurrency, os.cpu_count() or 1)),
             )
 
         return await engine.run(self, id, after=after, before=before, data_dir=data_dir, **params)
@@ -239,6 +250,7 @@ class AsyncMarketLens:
         before: Any,
         coalesce: bool,
         progress: bool,
+        concurrency: int = 1,
     ) -> None:
         ids = id if isinstance(id, list) else [id]
         for one in ids:
@@ -250,6 +262,7 @@ class AsyncMarketLens:
                 await self.exports.download_series(
                     one, after=after, before=before,
                     data_dir=data_dir, coalesce=coalesce, progress=progress,
+                    concurrency=concurrency,
                 )
 
     async def close(self) -> None:

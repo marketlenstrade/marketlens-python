@@ -243,6 +243,9 @@ class BacktestConfig:
     queue_position: bool = False
     settlement_delay_ms: int = 5000  # on-chain balance availability (~5s after MATCHED)
     progress: bool = True  # show rich progress bars for fetch/backtest
+    # Concurrent per-market downloads for the auto-download path (data_dir set
+    # but empty). Capped to the CPU count at download time.
+    download_concurrency: int = 8
     # None=auto, True=force compact, False=force full. Auto picks compact
     # when on_book isn't overridden and queue_position/include_trades allow it.
     coalesce: bool | None = None
@@ -427,11 +430,13 @@ class _EngineCore:
         path = Path(data_dir)
         if path.exists() and any(path.glob("history-*.parquet")):
             return
+        concurrency = max(1, min(self._config.download_concurrency, os.cpu_count() or 1))
         client._ensure_exports_downloaded(
             id, data_dir,
             after=after, before=before,
             coalesce=self._resolve_compact_mode(),
             progress=self._config.progress,
+            concurrency=concurrency,
         )
 
     def _with_reporter(self, n_markets: int, *, replay: bool = False):
