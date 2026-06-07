@@ -122,7 +122,16 @@ class _BookBuilder:
         return self._make_book(as_of)
 
     def delta(self, price: float, size: float, side: str, as_of: int) -> OrderBook:
-        """Apply a single price level change."""
+        """Apply a single price level change and return the full book."""
+        self.apply_delta(price, size, side)
+        return self._make_book(as_of)
+
+    def apply_delta(self, price: float, size: float, side: str) -> None:
+        """Apply a single price level change to internal state (no book build).
+
+        Split out from :meth:`delta` so the hot path can update state without
+        materialising an ``OrderBook`` on every delta (see ``_ScalarBook``).
+        """
         price = _norm_price(price)
         size = round(size, _SIZE_DP)
         if side == "BUY":
@@ -141,7 +150,6 @@ class _BookBuilder:
             if new_best != self._best_ask:
                 self._best_ask = new_best
                 self._refresh_spread()
-        return self._make_book(as_of)
 
     @staticmethod
     def _apply(
@@ -201,6 +209,81 @@ class _BookBuilder:
         )
 
 
+class _ScalarBook:
+    """A cheap book view for delta events whose consumer only reads scalars.
+
+    Building a full ``OrderBook`` (pydantic model + bid/ask list copies) on
+    every delta dominates replay cost, yet trade-only strategies only read
+    scalar fields (best_bid, midpoint, level counts) off delta books — the
+    portfolio mark-to-market and cross-market checks never touch the lists.
+    This captures the scalar fields eagerly (cheap) and materialises the full
+    ``OrderBook`` lazily on first access to ``bids``/``asks`` or any metric
+    method.
+
+    Correctness: a builder is only mutated by its own market's events, and the
+    engine consumes/replaces each market's book within the same synchronous
+    step before that market's next delta — so a lazy materialisation always
+    reflects this event's state. (Not safe to retain across the same market's
+    later events; backtest consumers don't.)
+    """
+
+    __slots__ = (
+        "market_id", "platform", "as_of",
+        "best_bid", "best_ask", "spread", "midpoint",
+        "bid_depth", "ask_depth", "bid_levels", "ask_levels",
+        "_builder", "_full",
+    )
+
+    def __init__(self, builder: _BookBuilder, as_of: int) -> None:
+        self._builder = builder
+        self._full: OrderBook | None = None
+        self.as_of = as_of
+        self.market_id = builder._market_id
+        self.platform = builder._platform
+        self.best_bid = builder._best_bid
+        self.best_ask = builder._best_ask
+        self.spread = builder._spread
+        self.midpoint = builder._midpoint
+        self.bid_depth = builder._bid_depth
+        self.ask_depth = builder._ask_depth
+        self.bid_levels = len(builder._bid_levels)
+        self.ask_levels = len(builder._ask_levels)
+
+    def materialize(self) -> OrderBook:
+        if self._full is None:
+            self._full = self._builder._make_book(self.as_of)
+        return self._full
+
+    @property
+    def bids(self) -> list[PriceLevel]:
+        return self.materialize().bids
+
+    @property
+    def asks(self) -> list[PriceLevel]:
+        return self.materialize().asks
+
+    def impact(self, side: str, size: float) -> float | None:
+        return self.materialize().impact(side, size)
+
+    def depth_within(self, spread: float) -> tuple[float, float]:
+        return self.materialize().depth_within(spread)
+
+    def slippage(self, side: str, size: float) -> float | None:
+        return self.materialize().slippage(side, size)
+
+    def microprice(self) -> float | None:
+        return self.materialize().microprice()
+
+    def spread_bps(self) -> float | None:
+        return self.materialize().spread_bps()
+
+    def imbalance(self, levels: int | None = None) -> float | None:
+        return self.materialize().imbalance(levels)
+
+    def weighted_midpoint(self, n: int = 1) -> float | None:
+        return self.materialize().weighted_midpoint(n)
+
+
 class OrderBookReplay:
     """Reconstruct full orderbook state from a history event stream.
 
@@ -224,14 +307,19 @@ class OrderBookReplay:
         events: Iterable[HistoryEvent],
         market_id: str = "",
         platform: str = "polymarket",
+        lazy_deltas: bool = False,
     ) -> None:
         self._events = events
         self._market_id = market_id
         self._platform = platform
+        # When True, delta events yield a cheap _ScalarBook that builds the full
+        # OrderBook lazily. Safe only when the consumer reads delta books as
+        # transient scalar views (e.g. a trade-only backtest strategy).
+        self._lazy_deltas = lazy_deltas
 
     def __iter__(self) -> Iterator[tuple[HistoryEvent, OrderBook]]:
         builder = _BookBuilder(self._market_id, self._platform)
-        book: OrderBook | None = None
+        book: OrderBook | _ScalarBook | None = None
         initialized = False
 
         for event in self._events:
@@ -246,7 +334,11 @@ class OrderBookReplay:
                         "OrderBookReplay received a delta before any snapshot. "
                         "The history stream must begin with a snapshot event."
                     )
-                book = builder.delta(event.price, event.size, event.side, event.t)
+                if self._lazy_deltas:
+                    builder.apply_delta(event.price, event.size, event.side)
+                    book = _ScalarBook(builder, event.t)
+                else:
+                    book = builder.delta(event.price, event.size, event.side, event.t)
                 yield event, book
 
             elif isinstance(event, TradeEvent):
@@ -255,6 +347,9 @@ class OrderBookReplay:
                         "OrderBookReplay received a trade before any snapshot. "
                         "The history stream must begin with a snapshot event."
                     )
+                # Hand on_trade a full book (cheap: only at trades, not deltas).
+                if isinstance(book, _ScalarBook):
+                    book = book.materialize()
                 yield event, book
 
     def to_dataframe(self):

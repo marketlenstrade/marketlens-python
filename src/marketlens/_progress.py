@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import sys
+import threading
 from typing import Protocol
 
 
@@ -40,6 +41,8 @@ class _ProgressReporter(Protocol):
     def download_finished(self) -> None: ...
     def status(self, message: str) -> None: ...
     def set_mode(self, mode: str) -> None: ...
+    def set_stats(self, *, pnl: float, ret: float = 0.0,
+                  win_rate: float | None = None) -> None: ...
     def batch_download_started(self, label: str, total: int) -> None: ...
     def batch_download_advance(self) -> None: ...
 
@@ -63,6 +66,8 @@ class _NullReporter:
     def download_finished(self) -> None: pass
     def status(self, message: str) -> None: pass
     def set_mode(self, mode: str) -> None: pass
+    def set_stats(self, *, pnl: float, ret: float = 0.0,
+                  win_rate: float | None = None) -> None: pass
     def batch_download_started(self, label: str, total: int) -> None: pass
     def batch_download_advance(self) -> None: pass
 
@@ -88,23 +93,63 @@ class _RichReporter:
             BarColumn,
             MofNCompleteColumn,
             Progress,
+            ProgressColumn,
             SpinnerColumn,
             TextColumn,
             TimeRemainingColumn,
         )
+        from rich.text import Text
+
+        class _PnLColumn(ProgressColumn):
+            """Live stats on the Backtesting task (blank on other tasks).
+
+            Fixed-width fields so the line never shrinks — VS Code's terminal
+            renderer leaves stale trailing chars when a line gets shorter.
+            """
+
+            def render(self, task):
+                pnl = task.fields.get("pnl")
+                if pnl is None:
+                    return Text("")
+                ret = task.fields.get("ret") or 0.0
+                win = task.fields.get("win")
+                win_s = f"{win:>4.0%}" if win is not None else "  - "
+                # Compact, fixed-width — keeps the line short so VS Code's
+                # terminal doesn't wrap (which forces a new line per update).
+                s = f"PnL {pnl:>+8,.0f}  {ret:>+6.1%}  win {win_s}"
+                return Text(s, style="green" if pnl >= 0 else "red")
 
         self._n_markets = n_markets
+        # In notebooks, force rich's terminal renderer (ANSI in-place updates)
+        # rather than its Jupyter display renderer, which VS Code duplicates into
+        # two flickering bars. Outside notebooks, write to stderr as usual.
+        in_notebook = "ipykernel" in sys.modules or "IPython" in sys.modules
+        self._notebook = in_notebook
+        # In notebooks, notes are buffered and flushed after the bar finishes:
+        # any print interleaved with the live bar leaves a ghost frame in VS Code.
+        self._status_buffer: list[str] = []
+        console = (
+            Console(force_terminal=True, force_jupyter=False)
+            if in_notebook else Console(stderr=True)
+        )
         self._progress = Progress(
             SpinnerColumn(),
             TextColumn("[bold]{task.description}"),
-            BarColumn(),
-            MofNCompleteColumn(),
+            BarColumn(bar_width=16),  # fixed (not flexible) so the line never
+            MofNCompleteColumn(),     # fills to the edge and wraps in VS Code
             TimeRemainingColumn(),
-            console=Console(stderr=True),
-            transient=False,
+            _PnLColumn(),
+            console=console,
+            # Notebooks: remove the bar on completion. VS Code doesn't fully
+            # clear rich's persisted final frame, leaving stale trailing chars.
+            transient=in_notebook,
         )
         self._started = False
         self._mode = "stream"
+        # Streams are prewarmed concurrently (see _prewarm_streams), so the
+        # first ``market_started`` can fire from several threads at once.
+        # Guard lazy task creation so we don't add duplicate bars.
+        self._task_lock = threading.Lock()
         self._fetched_markets = 0
         self._consumed_markets = 0
         self._fetched_events = 0
@@ -120,6 +165,14 @@ class _RichReporter:
     def __exit__(self, *args: object) -> None:
         if self._started:
             self._progress.__exit__(*args)
+        # Flush buffered notes after the live bar is gone (notebook path).
+        if self._notebook and self._status_buffer:
+            try:
+                for msg in self._status_buffer:
+                    print(f"· {msg}", file=sys.stderr, flush=True)
+            except Exception:
+                pass
+            self._status_buffer.clear()
 
     def _start(self) -> None:
         if not self._started:
@@ -129,17 +182,34 @@ class _RichReporter:
     def set_mode(self, mode: str) -> None:
         self._mode = mode
 
+    def set_stats(self, *, pnl: float, ret: float = 0.0,
+                  win_rate: float | None = None) -> None:
+        """Update the running stats shown on the Backtesting bar."""
+        if self._consume_task is not None:
+            self._progress.update(
+                self._consume_task, pnl=pnl, ret=ret, win=win_rate,
+            )
+
     def _ensure_event_tasks(self) -> None:
         if self._consume_task is not None:
             return
-        self._start()
-        if self._mode != "replay":
-            self._fetch_task = self._progress.add_task(
-                "Downloading", total=self._n_markets,
+        with self._task_lock:
+            # Double-checked: another prewarm thread may have created the
+            # tasks between the unlocked check above and acquiring the lock.
+            if self._consume_task is not None:
+                return
+            self._start()
+            # A second concurrent bar means a multi-line live render, which VS
+            # Code can't redraw in place (it re-emits a new line per tick). In
+            # notebooks keep a single bar — the Backtesting bar sits at 0/N while
+            # data streams in, then advances. Terminals handle multi-line fine.
+            if self._mode != "replay" and not self._notebook:
+                self._fetch_task = self._progress.add_task(
+                    "Downloading", total=self._n_markets,
+                )
+            self._consume_task = self._progress.add_task(
+                "Backtesting", total=self._n_markets,
             )
-        self._consume_task = self._progress.add_task(
-            "Backtesting", total=self._n_markets,
-        )
 
     def fetched(self, market_id: str, n: int) -> None:
         # Tally only; bars advance on ``market_fetch_done`` / ``market_finished``.
@@ -153,18 +223,20 @@ class _RichReporter:
 
     def market_fetch_done(self, market_id: str) -> None:
         self._ensure_event_tasks()
-        self._fetched_markets += 1
+        # Prefetch ``on_done`` callbacks fire from multiple prefetch threads,
+        # so guard the counter to keep the "Downloading" bar from undercounting.
+        with self._task_lock:
+            self._fetched_markets += 1
+            completed = self._fetched_markets
         if self._fetch_task is not None:
-            self._progress.update(
-                self._fetch_task, completed=self._fetched_markets,
-            )
+            self._progress.update(self._fetch_task, completed=completed)
 
     def market_finished(self, market_id: str) -> None:
         self._ensure_event_tasks()
-        self._consumed_markets += 1
-        self._progress.update(
-            self._consume_task, completed=self._consumed_markets,
-        )
+        with self._task_lock:
+            self._consumed_markets += 1
+            completed = self._consumed_markets
+        self._progress.update(self._consume_task, completed=completed)
 
     def batch_download_started(self, label: str, total: int) -> None:
         if total <= 0:
@@ -199,9 +271,19 @@ class _RichReporter:
         pass
 
     def status(self, message: str) -> None:
-        """Print a status line above the bars during prep phases."""
+        """Emit a status line.
+
+        In notebooks the live bar renders on stdout, so notes go to stderr (a
+        separate output block) — printing through the live console mid-render
+        leaves a ghost bar in VS Code. In a real terminal the bar owns stderr,
+        so once started we route through the rich console (which redraws around
+        the print); otherwise plain stderr.
+        """
         try:
-            if self._started:
+            if self._notebook:
+                # Buffer; flushed in __exit__ so nothing interleaves with the bar.
+                self._status_buffer.append(message)
+            elif self._started:
                 self._progress.console.print(f"[dim]· {message}[/]")
             else:
                 print(f"· {message}", file=sys.stderr)

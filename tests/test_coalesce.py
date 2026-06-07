@@ -291,7 +291,7 @@ class TestDataDirResolution:
         assert resolved is not None
         assert resolved.name == f"history-{market_id}.parquet"
 
-    def test_compact_strategy_falls_back_to_full(self, tmp_path, capsys):
+    def test_compact_strategy_falls_back_to_full(self, tmp_path):
         market_id = SAMPLE_MARKET["id"]
         _write_minimal_parquet(tmp_path / f"history-{market_id}.parquet")
         engine = BacktestEngine(Strategy())
@@ -300,9 +300,9 @@ class TestDataDirResolution:
         assert resolved.name == f"history-{market_id}.parquet"
         # Targets recorded the chosen filename for non-TTY visibility.
         assert engine._targets["resolved_files"][market_id] == resolved.name
-        # And we emitted a stderr note.
-        captured = capsys.readouterr()
-        assert "slower than necessary" in captured.err
+        # And we surfaced a one-time fallback note (routed via the reporter so it
+        # prints above the live bar instead of corrupting it).
+        assert any("slower than necessary" in n for n in engine._noted_fallbacks)
 
     def test_queue_position_and_only_compact_hard_errors(self, tmp_path):
         market_id = SAMPLE_MARKET["id"]

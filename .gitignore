@@ -15,3 +15,5 @@ output2/
 
 # Local secrets (release token for scripts/release.sh, etc.)
 .env
+
+runs/
