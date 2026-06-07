@@ -7,6 +7,7 @@ if TYPE_CHECKING:
     from marketlens.backtest._results import BacktestResult
 
 _MAX_EQUITY_POINTS = 2000
+_MAX_MARKERS = 3000  # cap trade/order timeline markers so the browser stays responsive
 
 
 def serialize_results(
@@ -113,6 +114,9 @@ def _downsample(data: list, max_points: int) -> list:
 
 
 def _serialize_trades(fills: list) -> list[dict]:
+    # Cap the timeline markers; active strategies emit tens of thousands of fills
+    # which would crash the browser. Headline counts come from the full lists.
+    fills = _downsample(fills, _MAX_MARKERS)
     return [
         {
             "t": f.timestamp,
@@ -128,6 +132,7 @@ def _serialize_trades(fills: list) -> list[dict]:
 
 
 def _serialize_orders(orders: list) -> list[dict]:
+    orders = _downsample(orders, _MAX_MARKERS)
     return [
         {
             "t": o.submitted_at,

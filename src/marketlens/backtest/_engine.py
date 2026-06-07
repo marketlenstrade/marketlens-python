@@ -4,7 +4,6 @@ import bisect
 import json
 import os
 import sys
-import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, AsyncIterator, Iterator
@@ -278,6 +277,9 @@ class _EngineCore:
         self._settlements: list[SettlementRecord] = []
         self._equity_curve: list[dict] = []
         self._cash_rejected = 0
+        # Running tallies for the live progress stats (settled-with-position).
+        self._n_settled = 0
+        self._n_wins = 0
 
         self._targets: dict[str, Any] = {}
 
@@ -302,6 +304,11 @@ class _EngineCore:
         self._reporter: _ProgressReporter = make_reporter(enabled=False)
 
         self._compact_mode = self._resolve_compact_mode()
+        # Trade-only strategies never read delta books beyond scalar fields, so
+        # the replay can skip building a full OrderBook on every delta.
+        self._lazy_book = _is_trade_only(self._strategy)
+        # Data-path fallback notes are emitted once per run (see _resolve_history_file).
+        self._noted_fallbacks: set[str] = set()
 
         self._ctx = StrategyContext(self)
 
@@ -352,18 +359,54 @@ class _EngineCore:
                     f"Re-run client.exports.download(..., coalesce=False)."
                 )
             note = (
-                "compact data with on_book overridden — book updates fire only at "
-                "snapshot and trade boundaries" if not self._compact_mode
-                else "full data with trade-only strategy — slower than necessary; "
-                "consider re-downloading with coalesce=True"
+                "using compact data: book updates fire only at snapshot and "
+                "trade boundaries" if not self._compact_mode
+                else "using full data with a trade-only strategy: slower than "
+                "necessary; consider re-downloading with coalesce=True"
             )
-            try:
-                sys.stderr.write(f"· using {chosen.name}: {note}\n")
-                sys.stderr.flush()
-            except Exception:
-                pass
+            # Emit once per run (not per market) and route through the reporter so
+            # it prints above the live progress bar instead of corrupting it.
+            if note not in self._noted_fallbacks:
+                self._noted_fallbacks.add(note)
+                self._reporter.status(note)
         self._targets.setdefault("resolved_files", {})[market_id] = chosen.name
         return chosen
+
+    def _prelog_file_skips(self, markets: list[Market], data_dir: str) -> int:
+        """Pre-resolve local files before the progress bar starts.
+
+        Logs one ``Skipping N of M markets for '<series>'`` line per series via
+        ``_prep_status`` (printed before the bar, so it never interleaves with
+        the live render) and returns the count of markets that have data — the
+        correct bar total. ``_make_file_stream`` then skips missing files
+        silently. Existence-only check (no side effects on resolver state).
+        """
+        dir_path = Path(data_dir)
+        groups: dict[str, dict] = {}
+        present_total = 0
+        for m in markets:
+            has = (
+                (dir_path / f"history-{m.id}.parquet").exists()
+                or (dir_path / f"history-{m.id}-compact.parquet").exists()
+            )
+            sid = m.series_id or m.id
+            g = groups.setdefault(
+                sid, {"present": 0, "missing": 0,
+                      "label": m.series_title or m.underlying or sid},
+            )
+            if has:
+                g["present"] += 1
+                present_total += 1
+            else:
+                g["missing"] += 1
+        for g in groups.values():
+            if g["missing"]:
+                total = g["present"] + g["missing"]
+                _prep_status(
+                    f"Skipping {g['missing']} of {total} markets for "
+                    f"'{g['label']}': no history file in {dir_path}"
+                )
+        return present_total
 
     def _maybe_autodownload(
         self,
@@ -791,8 +834,19 @@ class _EngineCore:
             record = self._portfolio.settle_market(market, timestamp, series_id=series_id)
             if record is not None:
                 self._settlements.append(record)
+                self._n_settled += 1
+                if record.pnl > 0:
+                    self._n_wins += 1
 
         self._books.pop(market.id, None)
+        # Surface running stats on the progress bar (once per finalized market).
+        init = self._portfolio.initial_cash
+        pnl = self._portfolio.equity - init
+        self._reporter.set_stats(
+            pnl=pnl,
+            ret=(pnl / init if init else 0.0),
+            win_rate=(self._n_wins / self._n_settled if self._n_settled else None),
+        )
 
     def _run_merged(
         self,
@@ -923,7 +977,10 @@ class _EngineCore:
                     next_prefetcher = _make_prefetcher(markets[i + 1]).start()
 
                 reporter.market_started(market.id, market.id)
-                replay = OrderBookReplay(current, market_id=market.id, platform=market.platform)
+                replay = OrderBookReplay(
+                    current, market_id=market.id, platform=market.platform,
+                    lazy_deltas=self._lazy_book,
+                )
                 for event, book in replay:
                     if user_before_ms is not None and event.t >= user_before_ms:
                         break
@@ -971,18 +1028,17 @@ class _EngineCore:
         reporter = self._reporter
         dir_path = Path(data_dir)
         resolved = [(m, self._resolve_history_file(dir_path, m.id)) for m in markets]
-        missing = [m for m, p in resolved if p is None]
-        if missing:
-            warnings.warn(
-                f"Skipping {len(missing)} of {len(markets)} markets: "
-                f"no history file in {dir_path} (first: {missing[0].id})"
-            )
+        # Missing files are skipped silently here; they were already counted and
+        # logged once up-front by _prelog_file_skips (before the progress bar).
         for market, path in resolved:
             if path is None:
                 continue
             events = _iter_history_parquet(path, after_ms=after_ms, before_ms=before_ms)
             reporter.market_started(market.id, market.id)
-            replay = OrderBookReplay(events, market_id=market.id, platform=market.platform)
+            replay = OrderBookReplay(
+                events, market_id=market.id, platform=market.platform,
+                lazy_deltas=self._lazy_book,
+            )
             for event, book in replay:
                 if before_ms is not None and event.t >= before_ms:
                     break
@@ -1144,10 +1200,12 @@ class BacktestEngine(_EngineCore):
 
         if isinstance(id, list):
             _prep_status(f"Resolving {len(id)} target(s)…")
-            streams, n_markets, _ = self._resolve_list(
+            streams, n_markets, all_markets = self._resolve_list(
                 client, id, after=after, before=before, data_dir=data_dir, **params,
             )
             self._maybe_autodownload(client, id, after=after, before=before, data_dir=data_dir)
+            if data_dir is not None:
+                n_markets = self._prelog_file_skips(all_markets, data_dir)
             with self._with_reporter(n_markets, replay=replay):
                 self._run_merged(streams)
             return self._build_result()
@@ -1158,7 +1216,8 @@ class BacktestEngine(_EngineCore):
             self._market_series[market.id] = market.series_id or market.id
             self._register_market(market)
             self._maybe_autodownload(client, id, after=after, before=before, data_dir=data_dir)
-            with self._with_reporter(1, replay=replay):
+            n_one = self._prelog_file_skips([market], data_dir) if data_dir is not None else 1
+            with self._with_reporter(n_one, replay=replay):
                 self._run_merged([_stream([market])])
             return self._build_result()
         except NotFoundError:
@@ -1179,6 +1238,10 @@ class BacktestEngine(_EngineCore):
                 n_markets = sum(len(lane) for lane in lanes)
                 streams = [_stream(lane) for lane in lanes]
                 self._maybe_autodownload(client, id, after=after, before=before, data_dir=data_dir)
+                if data_dir is not None:
+                    n_markets = self._prelog_file_skips(
+                        [m for lane in lanes for m in lane], data_dir,
+                    )
                 with self._with_reporter(n_markets, replay=replay):
                     self._run_merged(streams)
             elif series.is_rolling:
@@ -1189,7 +1252,11 @@ class BacktestEngine(_EngineCore):
                     self._market_group[m.id] = series.id
                     self._register_market(m)
                 self._maybe_autodownload(client, id, after=after, before=before, data_dir=data_dir)
-                with self._with_reporter(len(markets), replay=replay):
+                n_markets = (
+                    self._prelog_file_skips(markets, data_dir)
+                    if data_dir is not None else len(markets)
+                )
+                with self._with_reporter(n_markets, replay=replay):
                     self._run_merged([_stream(markets)])
             else:
                 raise ValueError(
@@ -1203,7 +1270,8 @@ class BacktestEngine(_EngineCore):
             self._market_series[found[0].id] = found[0].series_id or found[0].id
             self._register_market(found[0])
             self._maybe_autodownload(client, id, after=after, before=before, data_dir=data_dir)
-            with self._with_reporter(1, replay=replay):
+            n_one = self._prelog_file_skips([found[0]], data_dir) if data_dir is not None else 1
+            with self._with_reporter(n_one, replay=replay):
                 self._run_merged([_stream([found[0]])])
             return self._build_result()
 

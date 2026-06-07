@@ -129,6 +129,59 @@ class TestRichReporter:
             r.batch_download_started("Downloading exports", 1)
             assert r._started is True
 
+    def test_concurrent_market_started_creates_single_bar(self):
+        """Multi-stream runs (list-of-series, structured multi-strike lanes)
+        prewarm every stream concurrently, so the first ``market_started``
+        can fire from many threads at once. Lazy task creation must be
+        race-free: exactly one "Backtesting" task and one "Downloading"
+        task, no matter how many threads hit it together."""
+        import threading
+
+        for _ in range(50):  # repeat to expose the race reliably
+            r = _RichReporter(n_markets=8)
+            with r:
+                n_threads = 8
+                barrier = threading.Barrier(n_threads)
+
+                def _hammer():
+                    barrier.wait()  # release all threads simultaneously
+                    r.market_started("m", "m")
+
+                threads = [threading.Thread(target=_hammer) for _ in range(n_threads)]
+                for t in threads:
+                    t.start()
+                for t in threads:
+                    t.join()
+
+                descriptions = [t.description for t in r._progress.tasks]
+                assert descriptions.count("Backtesting") == 1, descriptions
+                assert descriptions.count("Downloading") == 1, descriptions
+
+    def test_concurrent_market_started_replay_single_bar(self):
+        """Same race, replay mode: exactly one "Backtesting" bar and no
+        "Downloading" bar (data is already on disk)."""
+        import threading
+
+        for _ in range(50):
+            r = _RichReporter(n_markets=8)
+            r.set_mode("replay")
+            with r:
+                barrier = threading.Barrier(8)
+
+                def _hammer():
+                    barrier.wait()
+                    r.market_started("m", "m")
+
+                threads = [threading.Thread(target=_hammer) for _ in range(8)]
+                for t in threads:
+                    t.start()
+                for t in threads:
+                    t.join()
+
+                descriptions = [t.description for t in r._progress.tasks]
+                assert descriptions.count("Backtesting") == 1, descriptions
+                assert descriptions.count("Downloading") == 0, descriptions
+
 
 class TestEngineIntegration:
     """End-to-end: confirm the prefetch+reporter wiring doesn't deadlock or
