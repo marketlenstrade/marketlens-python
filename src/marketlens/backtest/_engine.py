@@ -17,7 +17,7 @@ from marketlens.backtest._fees import FeeModel, PolymarketFeeModel, ZeroFeeModel
 from marketlens.backtest._fills import FillSimulator
 from marketlens.backtest._portfolio import Portfolio
 from marketlens.backtest._prefetch import AsyncPrefetchedIterator, PrefetchedIterator
-from marketlens.backtest._results import BacktestResult
+from marketlens.backtest._results import BacktestResult, MultiBacktestResult
 from marketlens.backtest._strategy import Strategy, StrategyContext, _is_trade_only
 from marketlens.backtest._types import (
     Fill,
@@ -1395,6 +1395,35 @@ class BacktestEngine(_EngineCore):
             for m in lane:
                 self._market_group[m.id] = lane_key
         return lanes
+
+
+def run_strategies(
+    client: Any,
+    strategies: list[Strategy],
+    config: BacktestConfig,
+    id: str | list[str],
+    *,
+    labels: list[str] | None = None,
+    after: Any = None,
+    before: Any = None,
+    data_dir: str | None = None,
+    **params: Any,
+) -> MultiBacktestResult:
+    """Backtest several strategies over the same targets, one run each.
+
+    Each strategy gets an independent engine (its own portfolio, orders, and
+    settlements) replaying the same window, so the results are directly
+    comparable. Returns a :class:`MultiBacktestResult` that overlays them.
+    """
+    if not strategies:
+        raise ValueError("Pass at least one strategy.")
+    results = [
+        BacktestEngine(strategy, config).run(
+            client, id, after=after, before=before, data_dir=data_dir, **params,
+        )
+        for strategy in strategies
+    ]
+    return MultiBacktestResult(results, labels=labels)
 
 
 class AsyncBacktestEngine(_EngineCore):

@@ -99,6 +99,9 @@ class MarketLens:
                 but empty (the auto-download path). Defaults to 8, capped to the
                 CPU count. No effect once the files are already on disk.
 
+        Pass a list of strategies to backtest several over the same window and
+        get back a ``MultiBacktestResult`` (overlay them with ``.show(...)``).
+
         Simple one-liner API. For advanced config, use ``BacktestEngine`` directly.
         """
         from marketlens.backtest import BacktestConfig, BacktestEngine
@@ -116,10 +119,17 @@ class MarketLens:
             coalesce=coalesce,
             download_concurrency=concurrency,
         )
-        engine = BacktestEngine(strategy, config)
         # Auto-download (when ``data_dir`` is missing/empty) is dispatched
         # from inside engine.run after the market-resolution log, so the
         # status line and the "Downloading" bar appear in the right order.
+        if isinstance(strategy, (list, tuple)):
+            from marketlens.backtest._engine import run_strategies
+
+            return run_strategies(
+                self, list(strategy), config, id,
+                after=after, before=before, data_dir=data_dir, **params,
+            )
+        engine = BacktestEngine(strategy, config)
         return engine.run(self, id, after=after, before=before, data_dir=data_dir, **params)
 
     def _ensure_exports_downloaded(
@@ -227,19 +237,31 @@ class AsyncMarketLens:
             coalesce=coalesce,
             download_concurrency=concurrency,
         )
-        engine = AsyncBacktestEngine(strategy, config)
+        strategies = list(strategy) if isinstance(strategy, (list, tuple)) else [strategy]
+        if not strategies:
+            raise ValueError("Pass at least one strategy.")
+        engines = [AsyncBacktestEngine(s, config) for s in strategies]
 
         if data_dir is not None and _needs_download(data_dir):
             # Directory missing or empty: fetch the bulk export first.
             await self._ensure_exports_downloaded(
                 id, data_dir,
                 after=after, before=before,
-                coalesce=engine._resolve_compact_mode(),
+                coalesce=engines[0]._resolve_compact_mode(),
                 progress=progress,
                 concurrency=max(1, min(concurrency, os.cpu_count() or 1)),
             )
 
-        return await engine.run(self, id, after=after, before=before, data_dir=data_dir, **params)
+        results = [
+            await engine.run(self, id, after=after, before=before, data_dir=data_dir, **params)
+            for engine in engines
+        ]
+        if not isinstance(strategy, (list, tuple)):
+            return results[0]
+
+        from marketlens.backtest._results import MultiBacktestResult
+
+        return MultiBacktestResult(results)
 
     async def _ensure_exports_downloaded(
         self,

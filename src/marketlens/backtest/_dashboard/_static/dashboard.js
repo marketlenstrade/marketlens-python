@@ -291,8 +291,7 @@ function renderEquityCurve(runs) {
 
     const layout = {
         ...PLOTLY_LAYOUT,
-        showlegend: runs.length > 1,
-        legend: { x: 0, y: 1, bgcolor: BG_TRANSPARENT, font: { size: 11 } },
+        showlegend: false,
         yaxis: { ...PLOTLY_LAYOUT.yaxis, tickprefix: '$', range: [yMin - yPad, yMax + yPad] },
     };
 
@@ -325,8 +324,7 @@ function renderDrawdown(runs) {
 
     const layout = {
         ...PLOTLY_LAYOUT,
-        showlegend: runs.length > 1,
-        legend: { x: 0, y: 1, bgcolor: BG_TRANSPARENT, font: { size: 11 } },
+        showlegend: false,
         yaxis: { ...PLOTLY_LAYOUT.yaxis, ticksuffix: '%' },
     };
 
@@ -414,8 +412,7 @@ function renderPnLByMarket(runs) {
     const layout = {
         ...PLOTLY_LAYOUT,
         barmode: runs.length > 1 ? 'group' : undefined,
-        showlegend: runs.length > 1,
-        legend: { x: 1, y: 1, xanchor: 'right', bgcolor: BG_TRANSPARENT, font: { size: 11 } },
+        showlegend: false,
         xaxis: {
             ...PLOTLY_LAYOUT.xaxis,
             type: 'linear',
@@ -476,7 +473,7 @@ function renderPnLDist(runs) {
     const layout = {
         ...PLOTLY_LAYOUT,
         barmode: 'overlay',
-        showlegend: runs.length > 1,
+        showlegend: runs.length === 1,
         legend: { x: 1, y: 1, xanchor: 'right', bgcolor: BG_TRANSPARENT, font: { size: 11 } },
         xaxis: { ...PLOTLY_LAYOUT.xaxis, type: 'linear', tickformat: '$,.2f', autorange: true,
             rangemode: 'tozero', range: undefined },
@@ -584,7 +581,7 @@ function renderTradeTimeline(runs) {
 
     const layout = {
         ...PLOTLY_LAYOUT,
-        showlegend: true,
+        showlegend: runs.length === 1,
         hovermode: 'closest',
         legend: { x: 0, y: 1, bgcolor: BG_TRANSPARENT, font: { size: 11 } },
         yaxis: { ...PLOTLY_LAYOUT.yaxis, tickprefix: '$' },
@@ -611,18 +608,30 @@ function renderOrderAnalysis(runs) {
         'OPEN': '#B8860B',
         'PENDING': '#DBD5C9',
     };
+    // Short display names so labels fit inside the donut ring without clipping.
+    const statusLabels = {
+        'FILLED': 'Filled',
+        'PARTIALLY_FILLED': 'Partial',
+        'CANCELLED': 'Cancelled',
+        'EXPIRED': 'Expired',
+        'OPEN': 'Open',
+        'PENDING': 'Pending',
+    };
+    const prettyStatus = s => statusLabels[s] || s;
 
     if (runs.length === 1) {
         const stats = runs[0].order_stats;
         const statuses = Object.entries(stats.by_status).sort((a, b) => b[1] - a[1]);
 
         const traces = [{
-            labels: statuses.map(([s]) => s),
+            labels: statuses.map(([s]) => prettyStatus(s)),
             values: statuses.map(([, v]) => v),
             type: 'pie',
             hole: 0.5,
             marker: { colors: statuses.map(([s]) => statusColors[s] || '#9A9288') },
             textinfo: statuses.length > 1 ? 'label+percent' : 'none',
+            textposition: 'inside',
+            insidetextorientation: 'horizontal',
             textfont: { family: 'JetBrains Mono, monospace', size: 10 },
             hovertemplate: '%{label}: %{value} (%{percent})<extra></extra>',
         }];
@@ -653,12 +662,14 @@ function renderOrderAnalysis(runs) {
             const xCenter = (xStart + xEnd) / 2;
 
             traces.push({
-                labels: statuses.map(([s]) => s),
+                labels: statuses.map(([s]) => prettyStatus(s)),
                 values: statuses.map(([, v]) => v),
                 type: 'pie',
                 hole: 0.5,
                 marker: { colors: statuses.map(([s]) => statusColors[s] || '#9A9288') },
                 textinfo: statuses.length > 1 ? 'label+percent' : 'none',
+                textposition: 'inside',
+                insidetextorientation: 'horizontal',
                 textfont: { family: 'JetBrains Mono, monospace', size: 9 },
                 hovertemplate: '%{label}: %{value} (%{percent})<extra></extra>',
                 domain: { x: [xStart + 0.02, xEnd - 0.02], y: [0, 1] },
@@ -697,8 +708,8 @@ function renderOrderAnalysis(runs) {
 // ── Settlements Table ─────────────────────────────────────
 // Fewer columns, sortable, paged
 
-let sortCol = null;
-let sortAsc = true;
+let sortCol = 'net_pnl';
+let sortAsc = false;
 
 function renderSettlements(runs) {
     const el = document.getElementById('settlements-table');

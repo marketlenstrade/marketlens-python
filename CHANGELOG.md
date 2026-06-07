@@ -2,6 +2,13 @@
 
 All notable changes to the `marketlens` Python SDK, version by version.
 
+## [1.3.2] 2026-06-07
+
+* Multi-strategy backtests. Pass a list of strategies as the first argument to `client.backtest([s1, s2], ...)` to run each over the same window and get back a `MultiBacktestResult`. Each strategy runs in its own engine (independent portfolio, orders, settlements) so the results are directly comparable.
+* `MultiBacktestResult` behaves like a sequence of `BacktestResult` (index by position or label, iterate, `len`), exposes `summary()` and `save(dir)`, and overlays every run in one dashboard via `result.show("name a", "name b", ...)` — names default to the run labels. Reopen saved runs with `MultiBacktestResult.load(dir)` or jump straight to the comparison dashboard with `MultiBacktestResult.dashboard(dir)` (mirrors `BacktestResult.dashboard`).
+* New `marketlens.backtest.run_strategies(client, strategies, config, id, ...)` helper backing the list form, exported alongside `MultiBacktestResult`.
+* Reference (underlying spot) exports now fetch a 60s lookback before the first market open. A market opening exactly on the window boundary (e.g. midnight) previously had no prior tick — the underlying's first trade lands a few hundred ms later — so `ctx.reference_price()` returned `None` for its opening events. Delete and re-download existing `reference-*.parquet` files to pick up the wider window. The price lookup is unchanged (still the closest tick at/before the query time).
+
 ## [1.3.1] 2026-05-27
 
 * **Breaking:** numerical fields (prices, sizes, volumes, fees, OHLCV, strikes, depth) are now `float` instead of decimal strings. `book.best_bid * 0.99` works directly, no `Decimal(...)` wrap. The DB still stores at 4 d.p. precision so float round-trip is lossless within that tick. Callers that compared with `== "0.6500"` need to switch to numeric comparison (`pytest.approx(0.65)` or `abs(x - 0.65) < 1e-4`).

@@ -199,6 +199,28 @@ class TestMarketDownload:
         assert "authorization" not in {h.lower() for h in bucket_calls[0].request.headers.keys()}
 
 
+class TestReferenceDownload:
+    def test_applies_open_lookback(self, mock_api, client, tmp_path):
+        captured = {}
+
+        def _capture(request):
+            captured["after"] = int(request.url.params["after"])
+            captured["before"] = int(request.url.params["before"])
+            captured["symbol"] = request.url.params["symbol"]
+            return httpx.Response(200, content=b"PAR1" + b"x" * 64)
+
+        mock_api.get("/reference/trades/export").mock(side_effect=_capture)
+        open_time, close_time = 1779148800000, 1779148800000 + 300_000
+
+        client.exports._ensure_reference(tmp_path, "BTC", open_time, close_time)
+
+        # The window starts 60s before the first open so a price at/before the
+        # opening edge is always present; the close edge is unchanged.
+        assert captured["after"] == open_time - 60_000
+        assert captured["before"] == close_time
+        assert captured["symbol"] == "BTC"
+
+
 # ── Per-series download ────────────────────────────────────────────
 
 
@@ -420,6 +442,22 @@ class TestAsyncExports:
 
         out = await aclient.exports.download("m1", data_dir=str(tmp_path), progress=False)
         assert (out / "history-m1-compact.parquet").read_bytes() == b"PAR1"
+
+    async def test_reference_download_applies_open_lookback(self, mock_api, aclient, tmp_path):
+        captured = {}
+
+        def _capture(request):
+            captured["after"] = int(request.url.params["after"])
+            captured["before"] = int(request.url.params["before"])
+            return httpx.Response(200, content=b"PAR1" + b"x" * 64)
+
+        mock_api.get("/reference/trades/export").mock(side_effect=_capture)
+        open_time, close_time = 1779148800000, 1779148800000 + 300_000
+
+        await aclient.exports._ensure_reference(tmp_path, "BTC", open_time, close_time)
+
+        assert captured["after"] == open_time - 60_000
+        assert captured["before"] == close_time
 
     async def test_market_download_409_raises_export_not_ready(self, mock_api, aclient, tmp_path):
         mock_api.get("/markets/m1/export").mock(

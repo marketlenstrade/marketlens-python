@@ -10,6 +10,14 @@ from marketlens._base import AsyncHTTPClient, SyncHTTPClient, _coerce_timestamp
 from marketlens._progress import make_reporter
 from marketlens.exceptions import NotFoundError
 
+# Reference trades are fetched a touch before the first market opens so a price
+# at/before the open is always available. Without it, a market opening on the
+# exact window boundary (e.g. midnight) has no prior tick — the underlying's
+# first trade lands a few hundred ms later — and ``reference_price()`` returns
+# None there. 60s is ample for liquid crypto underlyings and costs a handful of
+# extra ticks; the price lookup still returns the closest tick <= the query.
+_REFERENCE_LOOKBACK_MS = 60_000
+
 
 @dataclass(frozen=True)
 class SeriesPending:
@@ -238,7 +246,7 @@ class Exports:
                 "/reference/trades/export", dest,
                 params={
                     "symbol": symbol,
-                    "after": _coerce_timestamp(after),
+                    "after": _coerce_timestamp(after) - _REFERENCE_LOOKBACK_MS,
                     "before": _coerce_timestamp(before),
                 },
                 reporter=reporter, label=f"reference {symbol}",
@@ -392,7 +400,7 @@ class AsyncExports:
                 "/reference/trades/export", dest,
                 params={
                     "symbol": symbol,
-                    "after": _coerce_timestamp(after),
+                    "after": _coerce_timestamp(after) - _REFERENCE_LOOKBACK_MS,
                     "before": _coerce_timestamp(before),
                 },
                 reporter=reporter, label=f"reference {symbol}",

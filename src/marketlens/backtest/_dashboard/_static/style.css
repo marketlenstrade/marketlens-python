@@ -92,14 +92,23 @@ body::before {
 .run-toggle {
     display: flex;
     align-items: center;
-    gap: 6px;
+    gap: 7px;
     cursor: pointer;
     font-family: var(--font-mono);
-    font-size: 11px;
+    font-size: 12px;
     text-transform: uppercase;
     letter-spacing: 0.06em;
-    color: var(--text-secondary);
+    color: var(--text);
     user-select: none;
+    padding: 7px 12px;
+    border: 1px solid var(--border);
+    background: var(--surface);
+    transition: border-color 0.12s, box-shadow 0.12s;
+}
+
+.run-toggle:hover {
+    border-color: var(--text-secondary);
+    box-shadow: 0 1px 4px rgba(27, 25, 21, 0.08);
 }
 
 .run-toggle input { display: none; }
@@ -111,7 +120,16 @@ body::before {
     flex-shrink: 0;
 }
 
-.run-toggle.muted { opacity: 0.35; }
+.run-toggle .run-dot {
+    width: 10px;
+    height: 10px;
+}
+
+.run-toggle.muted {
+    opacity: 0.45;
+    background: var(--surface-warm);
+    border-style: dashed;
+}
 
 /* ── Section label ──────────────────────────── */
 

@@ -289,3 +289,78 @@ class TestIntegration:
 
         with pytest.raises(ValueError, match="At least one"):
             dashboard()
+
+
+class TestMultiBacktestResult:
+    def test_sequence_and_default_labels(self):
+        from marketlens.backtest._results import MultiBacktestResult
+
+        a, b = _make_result(pnl="35.0000"), _make_result(pnl="-10.0000")
+        multi = MultiBacktestResult([a, b])
+        assert len(multi) == 2
+        assert list(multi) == [a, b]
+        assert multi.labels == ["strategy_1", "strategy_2"]
+        assert multi[0] is a
+        assert multi["strategy_2"] is b
+
+    def test_requires_results(self):
+        from marketlens.backtest._results import MultiBacktestResult
+
+        with pytest.raises(ValueError, match="at least one"):
+            MultiBacktestResult([])
+
+    def test_label_count_validated(self):
+        from marketlens.backtest._results import MultiBacktestResult
+
+        with pytest.raises(ValueError, match="labels length"):
+            MultiBacktestResult([_make_result()], labels=["A", "B"])
+
+    def test_summary_keyed_by_label(self):
+        from marketlens.backtest._results import MultiBacktestResult
+
+        multi = MultiBacktestResult([_make_result(), _make_result()], labels=["x", "y"])
+        assert set(multi.summary()) == {"x", "y"}
+
+    def test_show_name_count_validated(self):
+        from marketlens.backtest._results import MultiBacktestResult
+
+        multi = MultiBacktestResult([_make_result(), _make_result()])
+        with pytest.raises(ValueError, match="for 2 runs"):
+            multi.show("only-one", open_browser=False)
+
+    def test_save_writes_each_run(self, tmp_path):
+        from marketlens.backtest._results import MultiBacktestResult
+
+        multi = MultiBacktestResult([_make_result(), _make_result()], labels=["a", "b"])
+        out = multi.save(tmp_path / "runs")
+        assert (out / "a" / "manifest.json").exists()
+        assert (out / "b" / "manifest.json").exists()
+
+    def test_save_load_round_trip(self, tmp_path):
+        from marketlens.backtest._results import MultiBacktestResult
+
+        original = MultiBacktestResult(
+            [_make_result(pnl="35.0000"), _make_result(pnl="-10.0000")],
+            labels=["alpha", "beta"],
+        )
+        original.save(tmp_path / "runs")
+
+        loaded = MultiBacktestResult.load(tmp_path / "runs")
+        assert len(loaded) == 2
+        assert loaded.labels == ["alpha", "beta"]
+        assert loaded["alpha"].total_pnl == pytest.approx(original["alpha"].total_pnl)
+        assert loaded["beta"].total_trades == original["beta"].total_trades
+
+    def test_load_no_runs_raises(self, tmp_path):
+        from marketlens.backtest._results import MultiBacktestResult
+
+        (tmp_path / "empty").mkdir()
+        with pytest.raises(ValueError, match="No saved runs"):
+            MultiBacktestResult.load(tmp_path / "empty")
+
+    def test_dashboard_no_runs_raises(self, tmp_path):
+        from marketlens.backtest._results import MultiBacktestResult
+
+        (tmp_path / "empty").mkdir()
+        with pytest.raises(ValueError, match="No saved runs"):
+            MultiBacktestResult.dashboard(tmp_path / "empty", open_browser=False)

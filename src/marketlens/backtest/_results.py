@@ -486,6 +486,113 @@ class BacktestResult:
         }
 
 
+class MultiBacktestResult:
+    """Results from running several strategies over the same targets.
+
+    Behaves like a sequence of :class:`BacktestResult` (index, iterate, ``len``)
+    and overlays them in one dashboard via :meth:`show`.
+    """
+
+    def __init__(
+        self,
+        results: list[BacktestResult],
+        labels: list[str] | None = None,
+    ) -> None:
+        if not results:
+            raise ValueError("MultiBacktestResult requires at least one result.")
+        if labels is not None and len(labels) != len(results):
+            raise ValueError(
+                f"labels length ({len(labels)}) must match results length ({len(results)})."
+            )
+        self.results = list(results)
+        self.labels = list(labels) if labels else [
+            f"strategy_{i + 1}" for i in range(len(results))
+        ]
+
+    def __len__(self) -> int:
+        return len(self.results)
+
+    def __iter__(self):
+        return iter(self.results)
+
+    def __getitem__(self, key: int | str) -> BacktestResult:
+        if isinstance(key, str):
+            return self.results[self.labels.index(key)]
+        return self.results[key]
+
+    def summary(self) -> dict[str, Any]:
+        return {lbl: r.summary() for lbl, r in zip(self.labels, self.results)}
+
+    def __repr__(self) -> str:
+        lines = ["MultiBacktestResult("]
+        for lbl, r in zip(self.labels, self.results):
+            lines.append(
+                f"  {lbl}: pnl={r.total_pnl:.2f} return={r.total_return:.2%} "
+                f"win_rate={r.win_rate:.2%} trades={r.total_trades}"
+            )
+        lines.append(")")
+        return "\n".join(lines)
+
+    def show(
+        self,
+        *labels: str,
+        title: str | None = None,
+        open_browser: bool = True,
+    ) -> None:
+        """Open one dashboard overlaying every run.
+
+        Pass a name per run to label them (defaults to the labels the runs
+        were created with). The server blocks until Ctrl+C.
+        """
+        from marketlens.backtest._dashboard import show as _show
+
+        names = list(labels) if labels else self.labels
+        if len(names) != len(self.results):
+            raise ValueError(
+                f"got {len(names)} names for {len(self.results)} runs."
+            )
+        _show(*self.results, labels=names, title=title, open_browser=open_browser)
+
+    def save(self, directory: str | Path, *, overwrite: bool = False) -> Path:
+        """Save each run under ``directory/<label>``."""
+        out = Path(directory)
+        out.mkdir(parents=True, exist_ok=True)
+        for lbl, r in zip(self.labels, self.results):
+            r.save(out / lbl, overwrite=overwrite)
+        return out
+
+    @classmethod
+    def load(cls, directory: str | Path) -> "MultiBacktestResult":
+        """Load runs saved by :meth:`save` (each under ``directory/<label>``).
+
+        Subdirectory names become the labels; runs load in label order.
+        """
+        root = Path(directory)
+        run_dirs = sorted(
+            p for p in root.iterdir() if (p / "manifest.json").exists()
+        )
+        if not run_dirs:
+            raise ValueError(f"No saved runs found under {root}.")
+        return cls(
+            [BacktestResult.load(p) for p in run_dirs],
+            labels=[p.name for p in run_dirs],
+        )
+
+    @classmethod
+    def dashboard(
+        cls,
+        directory: str | Path,
+        *,
+        labels: list[str] | None = None,
+        title: str | None = None,
+        open_browser: bool = True,
+    ) -> None:
+        """Load runs saved by :meth:`save` from ``directory`` and open the dashboard."""
+        multi = cls.load(directory)
+        names = labels if labels else multi.labels
+        multi.show(*names, title=title, open_browser=open_browser)
+
+
 # ── Persistence helpers ───────────────────────────────────────────
 
 
