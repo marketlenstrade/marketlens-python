@@ -8,6 +8,9 @@ All notable changes to the `marketlens` Python SDK, version by version.
 * `MultiBacktestResult` behaves like a sequence of `BacktestResult` (index by position or label, iterate, `len`), exposes `summary()` and `save(dir)`, and overlays every run in one dashboard via `result.show("name a", "name b", ...)` — names default to the run labels. Reopen saved runs with `MultiBacktestResult.load(dir)` or jump straight to the comparison dashboard with `MultiBacktestResult.dashboard(dir)` (mirrors `BacktestResult.dashboard`).
 * New `marketlens.backtest.run_strategies(client, strategies, config, id, ...)` helper backing the list form, exported alongside `MultiBacktestResult`.
 * Reference (underlying spot) exports now fetch a 60s lookback before the first market open. A market opening exactly on the window boundary (e.g. midnight) previously had no prior tick — the underlying's first trade lands a few hundred ms later — so `ctx.reference_price()` returned `None` for its opening events. Delete and re-download existing `reference-*.parquet` files to pick up the wider window. The price lookup is unchanged (still the closest tick at/before the query time).
+* New `concurrency` parameter on `client.backtest(...)` (default 8, capped to the CPU count) controlling parallel per-market downloads on the auto-download path (`data_dir` set but empty). No effect once the files are already on disk.
+* Faster full-firehose replay. Trade-only strategies now reconstruct the order book lazily from deltas, cutting replay time roughly 3x with byte-identical results across single, rolling, multi, and structured backtests.
+* Progress bar fixes. Thread-safe bar creation avoids duplicate bars under concurrent prewarm, notebooks render a single clean bar with live PnL/return/win, and skip notes are logged once with correct post-skip totals. Dashboard trade/order timeline markers are now capped so large runs don't crash the browser.
 
 ## [1.3.1] 2026-05-27
 
