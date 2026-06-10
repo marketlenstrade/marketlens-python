@@ -76,6 +76,7 @@ class MarketLens:
         progress: bool = True,
         coalesce: bool | None = None,
         concurrency: int = 8,
+        labels: list[str] | None = None,
         **params: Any,
     ) -> Any:
         """Run a backtest on a market, series, or list of markets/series.
@@ -98,6 +99,9 @@ class MarketLens:
             concurrency: Parallel per-market downloads when ``data_dir`` is set
                 but empty (the auto-download path). Defaults to 8, capped to the
                 CPU count. No effect once the files are already on disk.
+            labels: Optional names for a multi-strategy run, one per strategy.
+                Used to label each strategy's progress bar and the resulting
+                ``MultiBacktestResult``. Defaults to ``strategy 1``, ``strategy 2``…
 
         Pass a list of strategies to backtest several over the same window and
         get back a ``MultiBacktestResult`` (overlay them with ``.show(...)``).
@@ -127,10 +131,14 @@ class MarketLens:
 
             return run_strategies(
                 self, list(strategy), config, id,
+                labels=labels,
                 after=after, before=before, data_dir=data_dir, **params,
             )
         engine = BacktestEngine(strategy, config)
-        return engine.run(self, id, after=after, before=before, data_dir=data_dir, **params)
+        return engine.run(
+            self, id, after=after, before=before, data_dir=data_dir,
+            label=labels[0] if labels else None, **params,
+        )
 
     def _ensure_exports_downloaded(
         self,

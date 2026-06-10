@@ -375,7 +375,9 @@ class _EngineCore:
         self._targets.setdefault("resolved_files", {})[market_id] = chosen.name
         return chosen
 
-    def _prelog_file_skips(self, markets: list[Market], data_dir: str) -> int:
+    def _prelog_file_skips(
+        self, markets: list[Market], data_dir: str, *, announce: bool = True,
+    ) -> int:
         """Pre-resolve local files before the progress bar starts.
 
         Logs one ``Skipping N of M markets for '<series>'`` line per series via
@@ -402,13 +404,14 @@ class _EngineCore:
                 present_total += 1
             else:
                 g["missing"] += 1
-        for g in groups.values():
-            if g["missing"]:
-                total = g["present"] + g["missing"]
-                _prep_status(
-                    f"Skipping {g['missing']} of {total} markets for "
-                    f"'{g['label']}': no history file in {dir_path}"
-                )
+        if announce:
+            for g in groups.values():
+                if g["missing"]:
+                    total = g["present"] + g["missing"]
+                    _prep_status(
+                        f"Skipping {g['missing']} of {total} markets for "
+                        f"'{g['label']}': no history file in {dir_path}"
+                    )
         return present_total
 
     def _maybe_autodownload(
@@ -439,11 +442,12 @@ class _EngineCore:
             concurrency=concurrency,
         )
 
-    def _with_reporter(self, n_markets: int, *, replay: bool = False):
+    def _with_reporter(self, n_markets: int, *, replay: bool = False, label: str | None = None):
         """Context manager that installs a progress reporter for the run.
 
         ``replay=True`` tells the reporter to skip the "Fetching" bar
         since the data is already on disk and no network fetch happens.
+        ``label`` is appended to the "Backtesting" bar (multi-strategy runs).
         """
         engine = self
         config = self._config
@@ -451,7 +455,7 @@ class _EngineCore:
         class _Ctx:
             def __enter__(self_inner):
                 self_inner.reporter = make_reporter(
-                    enabled=config.progress, n_markets=n_markets,
+                    enabled=config.progress, n_markets=n_markets, label=label,
                 )
                 self_inner.reporter.__enter__()
                 if replay:
@@ -1177,8 +1181,13 @@ class BacktestEngine(_EngineCore):
         before: Any = None,
         data_dir: str | None = None,
         reference_resolution: str = "1m",
+        announce: bool = True,
+        label: str | None = None,
         **params: Any,
     ) -> BacktestResult:
+        # ``announce`` gates the resolution-phase status lines so a multi-strategy
+        # run (which replays the same targets once per strategy) logs them once.
+        # ``label`` names this run's "Backtesting" bar (multi-strategy runs).
         self._capture_targets(id, after=after, before=before, data_dir=data_dir)
         # Reference prices are fetched lazily by get_reference_price() on
         # first call — strategies that don't query them pay zero cost.
@@ -1204,14 +1213,15 @@ class BacktestEngine(_EngineCore):
         replay = data_dir is not None
 
         if isinstance(id, list):
-            _prep_status(f"Resolving {len(id)} target(s)…")
+            if announce:
+                _prep_status(f"Resolving {len(id)} target(s)…")
             streams, n_markets, all_markets = self._resolve_list(
                 client, id, after=after, before=before, data_dir=data_dir, **params,
             )
             self._maybe_autodownload(client, id, after=after, before=before, data_dir=data_dir)
             if data_dir is not None:
-                n_markets = self._prelog_file_skips(all_markets, data_dir)
-            with self._with_reporter(n_markets, replay=replay):
+                n_markets = self._prelog_file_skips(all_markets, data_dir, announce=announce)
+            with self._with_reporter(n_markets, replay=replay, label=label):
                 self._run_merged(streams)
             return self._build_result()
 
@@ -1221,8 +1231,11 @@ class BacktestEngine(_EngineCore):
             self._market_series[market.id] = market.series_id or market.id
             self._register_market(market)
             self._maybe_autodownload(client, id, after=after, before=before, data_dir=data_dir)
-            n_one = self._prelog_file_skips([market], data_dir) if data_dir is not None else 1
-            with self._with_reporter(n_one, replay=replay):
+            n_one = (
+                self._prelog_file_skips([market], data_dir, announce=announce)
+                if data_dir is not None else 1
+            )
+            with self._with_reporter(n_one, replay=replay, label=label):
                 self._run_merged([_stream([market])])
             return self._build_result()
         except NotFoundError:
@@ -1236,7 +1249,8 @@ class BacktestEngine(_EngineCore):
 
         if series is not None:
             if series.structured_type:
-                _prep_status(f"Resolving strikes in '{series.title}'…")
+                if announce:
+                    _prep_status(f"Resolving strikes in '{series.title}'…")
                 lanes = self._resolve_structured(
                     client, id, series, after=after, before=before, **params,
                 )
@@ -1245,12 +1259,13 @@ class BacktestEngine(_EngineCore):
                 self._maybe_autodownload(client, id, after=after, before=before, data_dir=data_dir)
                 if data_dir is not None:
                     n_markets = self._prelog_file_skips(
-                        [m for lane in lanes for m in lane], data_dir,
+                        [m for lane in lanes for m in lane], data_dir, announce=announce,
                     )
-                with self._with_reporter(n_markets, replay=replay):
+                with self._with_reporter(n_markets, replay=replay, label=label):
                     self._run_merged(streams)
             elif series.is_rolling:
-                _prep_status(f"Resolving markets in '{series.title}'…")
+                if announce:
+                    _prep_status(f"Resolving markets in '{series.title}'…")
                 markets = list(client.series.walk(id, after=after, before=before, **params))
                 for m in markets:
                     self._market_series[m.id] = series.id
@@ -1258,10 +1273,10 @@ class BacktestEngine(_EngineCore):
                     self._register_market(m)
                 self._maybe_autodownload(client, id, after=after, before=before, data_dir=data_dir)
                 n_markets = (
-                    self._prelog_file_skips(markets, data_dir)
+                    self._prelog_file_skips(markets, data_dir, announce=announce)
                     if data_dir is not None else len(markets)
                 )
-                with self._with_reporter(n_markets, replay=replay):
+                with self._with_reporter(n_markets, replay=replay, label=label):
                     self._run_merged([_stream(markets)])
             else:
                 raise ValueError(
@@ -1275,8 +1290,11 @@ class BacktestEngine(_EngineCore):
             self._market_series[found[0].id] = found[0].series_id or found[0].id
             self._register_market(found[0])
             self._maybe_autodownload(client, id, after=after, before=before, data_dir=data_dir)
-            n_one = self._prelog_file_skips([found[0]], data_dir) if data_dir is not None else 1
-            with self._with_reporter(n_one, replay=replay):
+            n_one = (
+                self._prelog_file_skips([found[0]], data_dir, announce=announce)
+                if data_dir is not None else 1
+            )
+            with self._with_reporter(n_one, replay=replay, label=label):
                 self._run_merged([_stream([found[0]])])
             return self._build_result()
 
@@ -1417,11 +1435,23 @@ def run_strategies(
     """
     if not strategies:
         raise ValueError("Pass at least one strategy.")
+    if labels is not None and len(labels) != len(strategies):
+        raise ValueError(
+            f"labels length ({len(labels)}) must match strategies length "
+            f"({len(strategies)})."
+        )
+    # Name each run's "Backtesting" bar so concurrent strategies are
+    # distinguishable; fall back to the MultiBacktestResult default.
+    bar_labels = labels or [f"strategy {i + 1}" for i in range(len(strategies))]
+    # Every strategy replays the same targets, so the resolution-phase status
+    # lines are identical — announce them once (first strategy) and stay quiet
+    # for the rest.
     results = [
         BacktestEngine(strategy, config).run(
-            client, id, after=after, before=before, data_dir=data_dir, **params,
+            client, id, after=after, before=before, data_dir=data_dir,
+            announce=(i == 0), label=bar_labels[i], **params,
         )
-        for strategy in strategies
+        for i, strategy in enumerate(strategies)
     ]
     return MultiBacktestResult(results, labels=labels)
 

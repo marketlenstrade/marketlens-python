@@ -2,6 +2,13 @@
 
 All notable changes to the `marketlens` Python SDK, version by version.
 
+## [Unreleased]
+
+* `client.backtest(...)` accepts an optional `labels=[...]` (one name per strategy) for multi-strategy runs. The labels name each strategy's `Backtesting` progress bar and become the `MultiBacktestResult` labels; they default to `strategy 1`, `strategy 2`, ….
+* Multi-strategy backtests log the resolution-phase status lines (`Resolving N target(s)…`, file-skip notes) once instead of repeating them once per strategy.
+* The auto-download progress bar names the series/market being fetched (`Downloading <series>`) instead of a bare `Downloading`.
+* Notebook progress bars no longer ghost a new line per tick when a labelled (or otherwise full-width) bar reaches the cell edge: the bar is held one column under the width and its columns crop/ellipsize instead of wrapping onto a second row.
+
 ## [1.3.2] 2026-06-07
 
 * Multi-strategy backtests. Pass a list of strategies as the first argument to `client.backtest([s1, s2], ...)` to run each over the same window and get back a `MultiBacktestResult`. Each strategy runs in its own engine (independent portfolio, orders, settlements) so the results are directly comparable.

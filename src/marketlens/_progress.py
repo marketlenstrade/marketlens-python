@@ -87,7 +87,7 @@ class _RichReporter:
     HTTP round-trip that precedes the first byte.
     """
 
-    def __init__(self, *, n_markets: int) -> None:
+    def __init__(self, *, n_markets: int, label: str | None = None) -> None:
         from rich.console import Console
         from rich.progress import (
             BarColumn,
@@ -98,6 +98,7 @@ class _RichReporter:
             TextColumn,
             TimeRemainingColumn,
         )
+        from rich.table import Column
         from rich.text import Text
 
         class _PnLColumn(ProgressColumn):
@@ -116,10 +117,15 @@ class _RichReporter:
                 win_s = f"{win:>4.0%}" if win is not None else "  - "
                 # Compact, fixed-width — keeps the line short so VS Code's
                 # terminal doesn't wrap (which forces a new line per update).
+                # no_wrap so a tight line crops this column rather than spilling
+                # it onto a second row.
                 s = f"PnL {pnl:>+8,.0f}  {ret:>+6.1%}  win {win_s}"
-                return Text(s, style="green" if pnl >= 0 else "red")
+                return Text(s, style="green" if pnl >= 0 else "red", no_wrap=True)
 
         self._n_markets = n_markets
+        # Optional strategy label appended to the "Backtesting" bar so
+        # multi-strategy runs are distinguishable (e.g. "Backtesting Aggressive").
+        self._label = label
         # In notebooks, force rich's terminal renderer (ANSI in-place updates)
         # rather than its Jupyter display renderer, which VS Code duplicates into
         # two flickering bars. Outside notebooks, write to stderr as usual.
@@ -128,17 +134,31 @@ class _RichReporter:
         # In notebooks, notes are buffered and flushed after the bar finishes:
         # any print interleaved with the live bar leaves a ghost frame in VS Code.
         self._status_buffer: list[str] = []
-        console = (
-            Console(force_terminal=True, force_jupyter=False)
-            if in_notebook else Console(stderr=True)
-        )
+        if in_notebook:
+            # rich detects the cell width and crops to it, but a line that is
+            # exactly the width hits the terminal's auto-wrap margin and spills
+            # onto a second row — which VS Code can't redraw in place, so every
+            # tick ghosts a new line. Reserve one column so the (possibly
+            # labelled) bar always stays strictly under the edge; rich shrinks
+            # the bar / ellipsizes the label to fit a single line.
+            probe = Console(force_terminal=True, force_jupyter=False)
+            console = Console(
+                force_terminal=True, force_jupyter=False,
+                width=max(20, probe.width - 1),
+            )
+        else:
+            console = Console(stderr=True)
         self._progress = Progress(
             SpinnerColumn(),
-            TextColumn("[bold]{task.description}"),
-            BarColumn(bar_width=16),  # fixed (not flexible) so the line never
-            MofNCompleteColumn(),     # fills to the edge and wraps in VS Code
+            # Ellipsize a long label instead of wrapping it to a second row.
+            TextColumn(
+                "[bold]{task.description}",
+                table_column=Column(no_wrap=True, overflow="ellipsis"),
+            ),
+            BarColumn(bar_width=16),
+            MofNCompleteColumn(),
             TimeRemainingColumn(),
-            _PnLColumn(),
+            _PnLColumn(table_column=Column(no_wrap=True, overflow="crop")),
             console=console,
             # Notebooks: remove the bar on completion. VS Code doesn't fully
             # clear rich's persisted final frame, leaving stale trailing chars.
@@ -208,7 +228,8 @@ class _RichReporter:
                     "Downloading", total=self._n_markets,
                 )
             self._consume_task = self._progress.add_task(
-                "Backtesting", total=self._n_markets,
+                f"Backtesting {self._label}" if self._label else "Backtesting",
+                total=self._n_markets,
             )
 
     def fetched(self, market_id: str, n: int) -> None:
@@ -291,12 +312,17 @@ class _RichReporter:
             pass
 
 
-def make_reporter(*, enabled: bool = True, n_markets: int = 1) -> _ProgressReporter:
+def make_reporter(
+    *, enabled: bool = True, n_markets: int = 1, label: str | None = None,
+) -> _ProgressReporter:
     """Build a reporter or a no-op.
 
     Falls back to no-op if ``rich`` is missing, if ``enabled`` is False,
     if ``MARKETLENS_PROGRESS`` is falsy, or if stderr isn't a TTY and we're
     not in Jupyter.
+
+    ``label`` is appended to the "Backtesting" bar to distinguish strategies
+    in a multi-strategy run.
     """
     if not enabled or _env_disabled() or not _can_render():
         return _NullReporter()
@@ -304,4 +330,4 @@ def make_reporter(*, enabled: bool = True, n_markets: int = 1) -> _ProgressRepor
         import rich  # noqa: F401
     except ImportError:
         return _NullReporter()
-    return _RichReporter(n_markets=n_markets)
+    return _RichReporter(n_markets=n_markets, label=label)

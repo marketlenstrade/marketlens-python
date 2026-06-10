@@ -105,7 +105,7 @@ class Exports:
                 self._client.download_via_redirect(
                     f"/markets/{market_id}/export", dest,
                     params=params,
-                    reporter=reporter, label=f"market {market_id[:8]}",
+                    reporter=reporter, label=market_id,
                 )
 
             if self._markets is not None:
@@ -194,7 +194,7 @@ class Exports:
 
         with make_reporter(enabled=progress, n_markets=len(targets)) as reporter:
             if targets:
-                reporter.batch_download_started("Downloading", len(targets))
+                reporter.batch_download_started(f"Downloading {series_id}", len(targets))
             if concurrency <= 1 or len(targets) <= 1:
                 ready = [_one(m, u, reporter) for m, u in targets]
             else:
@@ -285,7 +285,7 @@ class AsyncExports:
                 await self._client.download_via_redirect(
                     f"/markets/{market_id}/export", dest,
                     params=params,
-                    reporter=reporter, label=f"market {market_id[:8]}",
+                    reporter=reporter, label=market_id,
                 )
 
             if self._markets is not None:
@@ -351,7 +351,7 @@ class AsyncExports:
 
         with make_reporter(enabled=progress, n_markets=len(targets)) as reporter:
             if targets:
-                reporter.batch_download_started("Downloading", len(targets))
+                reporter.batch_download_started(f"Downloading {series_id}", len(targets))
                 ready = list(await asyncio.gather(*[_one(m, u, reporter) for m, u in targets]))
             else:
                 ready = []
