@@ -2,7 +2,7 @@
 
 All notable changes to the `marketlens` Python SDK, version by version.
 
-## [Unreleased]
+## [1.3.3] 2026-06-11
 
 * `client.backtest(...)` accepts an optional `labels=[...]` (one name per strategy) for multi-strategy runs. The labels name each strategy's `Backtesting` progress bar and become the `MultiBacktestResult` labels; they default to `strategy 1`, `strategy 2`, ….
 * Multi-strategy backtests log the resolution-phase status lines (`Resolving N target(s)…`, file-skip notes) once instead of repeating them once per strategy.
