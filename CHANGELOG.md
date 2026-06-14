@@ -2,6 +2,10 @@
 
 All notable changes to the `marketlens` Python SDK, version by version.
 
+## [1.4.1] 2026-06-14
+
+* Clear error when no API key is configured. Constructing `MarketLens()` or `AsyncMarketLens()` without an `api_key` argument and without the `MARKETLENS_API_KEY` environment variable now raises `AuthenticationError` immediately with a message pointing to the sign-in page, instead of failing later on the first request with an opaque httpx `LocalProtocolError: Illegal header value b'Bearer '`.
+
 ## [1.4.0] 2026-06-14
 
 * New MCP server for agentic access. Install with `pip install 'marketlens[mcp]'` and run the `marketlens-mcp` console script (or `python -m marketlens.mcp`); it serves over stdio and authenticates with `MARKETLENS_API_KEY`. Point any MCP client (Claude Code, Claude Desktop, Cursor) at it to research markets, pull order book data and implied-probability surfaces, and author and run backtests in natural language.

@@ -20,6 +20,7 @@ from marketlens._constants import (
 )
 from marketlens.exceptions import (
     APIError,
+    AuthenticationError,
     ConnectionError,
     DailyBudgetExceededError,
     ExportNotReadyError,
@@ -31,6 +32,24 @@ from marketlens.exceptions import (
 
 
 _EXPORT_NOT_READY_RE = re.compile(r"status=([^)]+)\)(?::\s*(.+))?")
+
+
+def _resolve_api_key(api_key: str | None) -> str:
+    """Resolve the API key from the argument or environment, raising if absent.
+
+    Without this, an empty key would build an ``Authorization: Bearer`` header
+    that httpx rejects at request time with an opaque ``LocalProtocolError``.
+    """
+    key = api_key or os.environ.get("MARKETLENS_API_KEY", "")
+    if not key:
+        raise AuthenticationError(
+            401,
+            "NO_API_KEY",
+            "No API key provided. Pass api_key=\"...\" or set the "
+            "MARKETLENS_API_KEY environment variable. Get a key by signing in "
+            "at https://marketlens.trade/?signin=1",
+        )
+    return key
 
 
 def _coerce_timestamp(value: Any) -> Any:
@@ -171,7 +190,7 @@ class SyncHTTPClient:
         timeout: float | httpx.Timeout = DEFAULT_TIMEOUT,
         max_retries: int = DEFAULT_MAX_RETRIES,
     ) -> None:
-        self.api_key = api_key or os.environ.get("MARKETLENS_API_KEY", "")
+        self.api_key = _resolve_api_key(api_key)
         self.base_url = (os.environ.get("MARKETLENS_BASE_URL") or base_url).rstrip("/")
         self.max_retries = max_retries
         self._client = httpx.Client(
@@ -385,7 +404,7 @@ class AsyncHTTPClient:
         timeout: float | httpx.Timeout = DEFAULT_TIMEOUT,
         max_retries: int = DEFAULT_MAX_RETRIES,
     ) -> None:
-        self.api_key = api_key or os.environ.get("MARKETLENS_API_KEY", "")
+        self.api_key = _resolve_api_key(api_key)
         self.base_url = (os.environ.get("MARKETLENS_BASE_URL") or base_url).rstrip("/")
         self.max_retries = max_retries
         self._client = httpx.AsyncClient(
