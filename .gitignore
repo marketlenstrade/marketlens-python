@@ -17,3 +17,6 @@ output2/
 .env
 
 runs/
+
+# Backtest output (default save dir for run_backtest / the MCP server).
+marketlens-backtests/

@@ -264,6 +264,43 @@ for candle in candles:
     print(candle.timestamp, candle.close)
 ```
 
+## Agentic access (MCP)
+
+Expose the SDK to any MCP client (Claude Code, Claude Desktop, Cursor) so an agent can research markets, pull order book data and surfaces, and author and run backtests in natural language. The server runs locally over stdio with your own API key.
+
+```bash
+pip install 'marketlens[mcp]'
+```
+
+Add it to your MCP client config:
+
+```json
+{
+  "mcpServers": {
+    "marketlens": {
+      "command": "marketlens-mcp",
+      "env": { "MARKETLENS_API_KEY": "mk_..." }
+    }
+  }
+}
+```
+
+| Tool | Purpose |
+|------|---------|
+| `search_markets` `get_market` | Find and inspect markets |
+| `search_events` `search_series` | Browse events and recurring series |
+| `get_orderbook` | Point-in-time L2 book with spread/microprice/imbalance |
+| `get_orderbook_metrics` | Time-bucketed book metrics (budget-friendly series) |
+| `get_trades` `get_candles` | Executed trades and OHLCV |
+| `get_reference_candles` | Binance spot for the underlying |
+| `get_signals` `get_surface` | Implied-probability surfaces |
+| `strategy_reference` `run_backtest` | Author a `Strategy` and run it through the engine |
+| `compare_backtests` `open_backtest` | Score strategies side by side, inspect a saved run |
+
+Tools that bill events (`get_trades`, `get_candles`, `get_orderbook_metrics`, `get_reference_candles`) require both `after` and `before`. `run_backtest` executes agent-authored strategy code in a subprocess on your machine and returns metrics plus a saved result path; disable it with `MARKETLENS_MCP_DISABLE_BACKTEST=1`. Compose alongside other MCP servers (web search, arxiv, filesystem) for a full research loop.
+
+A typical flow: ask your agent to find liquid BTC 5m markets, pull their recent book metrics, draft a maker strategy with `strategy_reference`, and backtest it with `run_backtest`.
+
 ## API Reference
 
 | Resource | Methods |
