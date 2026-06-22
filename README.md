@@ -61,7 +61,16 @@ result = client.backtest(strategy,
 result = client.backtest(strategy, "btc-multi-strikes-weekly",
                          initial_cash=10_000,
                          after="2026-05-08T00:00:00Z")
+
+# A sports league has several kinds of bets under one ticker (moneyline,
+# spread, totals, player props). Pass `subtype` to backtest just one of
+# them across the day's games.
+result = client.backtest(strategy, "mlb", subtype="moneyline",
+                         initial_cash=10_000,
+                         after="2026-06-21T17:30:00Z", before="2026-06-22T03:30:00Z")
 ```
+
+Rolling and structured series hold one kind of bet, so they run whole, no `subtype` needed. A sports league bundles several kinds of bets under one ticker (moneyline, spread, totals, player props), so pass `subtype` to pick one; leave it off and the run stops and lists the choices, so different kinds of bets never end up in the same backtest. List a series' bet types with `client.markets.list(series_id=..., subtype=...)` or by reading that error.
 
 ### Execution realism
 

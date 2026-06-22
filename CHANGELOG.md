@@ -2,6 +2,11 @@
 
 All notable changes to the `marketlens` Python SDK, version by version.
 
+## [1.5.0] 2026-06-22
+
+* Backtest a single bet type within a series using the new `subtype=` argument, e.g. `client.backtest(strategy, "mlb", subtype="moneyline", after=..., before=...)`. Rolling series (the "up or down" chains) and structured strike markets each hold one kind of bet, so they still run whole with no `subtype` needed. A sports league bundles several kinds of bets under one ticker (moneyline, spread, totals, player props); `subtype` picks one and backtests those markets together across the day's games under a shared portfolio. Leave `subtype` off for such a series and the run stops and lists the available bet types, so different kinds of bets never land in the same backtest by accident.
+* The `Market` type gains a `subtype` field naming the bet type (`up_or_down`, `survival`, `density`, `barrier`, `beat_estimate`, `moneyline`, `spread`, `total`, `segment_winner`, and similar), or `rest` when it could not be classified.
+
 ## [1.4.1] 2026-06-14
 
 * Clear error when no API key is configured. Constructing `MarketLens()` or `AsyncMarketLens()` without an `api_key` argument and without the `MARKETLENS_API_KEY` environment variable now raises `AuthenticationError` immediately with a message pointing to the sign-in page, instead of failing later on the first request with an opaque httpx `LocalProtocolError: Illegal header value b'Bearer '`.

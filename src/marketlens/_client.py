@@ -106,6 +106,12 @@ class MarketLens:
         Pass a list of strategies to backtest several over the same window and
         get back a ``MultiBacktestResult`` (overlay them with ``.show(...)``).
 
+        Pass ``subtype=`` to backtest one cohort of a multi-nature series, e.g.
+        ``backtest(strategy, "mlb", subtype="moneyline", ...)``. Series whose
+        markets share a single nature (rolling, structured) need no subtype; a
+        multi-nature series (most sports leagues) raises and lists the available
+        subtypes when it is omitted, so different natures are never mixed.
+
         Simple one-liner API. For advanced config, use ``BacktestEngine`` directly.
         """
         from marketlens.backtest import BacktestConfig, BacktestEngine

@@ -1183,6 +1183,7 @@ class BacktestEngine(_EngineCore):
         reference_resolution: str = "1m",
         announce: bool = True,
         label: str | None = None,
+        subtype: str | None = None,
         **params: Any,
     ) -> BacktestResult:
         # ``announce`` gates the resolution-phase status lines so a multi-strategy
@@ -1213,6 +1214,10 @@ class BacktestEngine(_EngineCore):
         replay = data_dir is not None
 
         if isinstance(id, list):
+            if subtype is not None:
+                raise ValueError(
+                    "subtype= is only supported for a single series target, not a list."
+                )
             if announce:
                 _prep_status(f"Resolving {len(id)} target(s)…")
             streams, n_markets, all_markets = self._resolve_list(
@@ -1248,22 +1253,9 @@ class BacktestEngine(_EngineCore):
             series = None
 
         if series is not None:
-            if series.structured_type:
-                if announce:
-                    _prep_status(f"Resolving strikes in '{series.title}'…")
-                lanes = self._resolve_structured(
-                    client, id, series, after=after, before=before, **params,
-                )
-                n_markets = sum(len(lane) for lane in lanes)
-                streams = [_stream(lane) for lane in lanes]
-                self._maybe_autodownload(client, id, after=after, before=before, data_dir=data_dir)
-                if data_dir is not None:
-                    n_markets = self._prelog_file_skips(
-                        [m for lane in lanes for m in lane], data_dir, announce=announce,
-                    )
-                with self._with_reporter(n_markets, replay=replay, label=label):
-                    self._run_merged(streams)
-            elif series.is_rolling:
+            # Rolling series stay a single sequential chain (one nature, one
+            # market live at a time) — unchanged unless a subtype is forced.
+            if series.is_rolling and subtype is None:
                 if announce:
                     _prep_status(f"Resolving markets in '{series.title}'…")
                 markets = list(client.series.walk(id, after=after, before=before, **params))
@@ -1278,10 +1270,41 @@ class BacktestEngine(_EngineCore):
                 )
                 with self._with_reporter(n_markets, replay=replay, label=label):
                     self._run_merged([_stream(markets)])
-            else:
-                raise ValueError(
-                    f"Series '{series.title}' is neither rolling nor structured."
+                return self._build_result()
+
+            # Everything else resolves to one or more time-disjoint lanes:
+            #   explicit subtype  -> that cohort
+            #   structured series -> the strike surface (unchanged)
+            #   otherwise         -> infer the cohort by subtype (raises if the
+            #                        series mixes several natures, e.g. sports)
+            if subtype is not None:
+                if announce:
+                    _prep_status(f"Resolving '{subtype}' markets in '{series.title}'…")
+                lanes = self._resolve_cohort(
+                    client, id, series, subtype, after=after, before=before, **params,
                 )
+            elif series.structured_type:
+                if announce:
+                    _prep_status(f"Resolving strikes in '{series.title}'…")
+                lanes = self._resolve_structured(
+                    client, id, series, after=after, before=before, **params,
+                )
+            else:
+                if announce:
+                    _prep_status(f"Resolving markets in '{series.title}'…")
+                lanes = self._resolve_cohort(
+                    client, id, series, None, after=after, before=before, **params,
+                )
+
+            n_markets = sum(len(lane) for lane in lanes)
+            streams = [_stream(lane) for lane in lanes]
+            self._maybe_autodownload(client, id, after=after, before=before, data_dir=data_dir)
+            if data_dir is not None:
+                n_markets = self._prelog_file_skips(
+                    [m for lane in lanes for m in lane], data_dir, announce=announce,
+                )
+            with self._with_reporter(n_markets, replay=replay, label=label):
+                self._run_merged(streams)
             return self._build_result()
 
         # 3. Fallback: condition ID
@@ -1414,6 +1437,68 @@ class BacktestEngine(_EngineCore):
                 self._market_group[m.id] = lane_key
         return lanes
 
+    def _resolve_cohort(
+        self,
+        client: Any,
+        series_id: str,
+        series: Any,
+        subtype: str | None,
+        *,
+        after: Any = None,
+        before: Any = None,
+        **params: Any,
+    ) -> list[list[Market]]:
+        """Resolve a ``(series, subtype)`` cohort into time-disjoint lanes.
+
+        A cohort is the set of markets in a series sharing one contract nature
+        (``subtype``), so one strategy applies uniformly across them. Mirrors
+        ``_resolve_structured`` but selects markets by subtype instead of
+        unpacking a strike surface, so it covers sports and any other series
+        whose markets span several natures.
+
+        ``subtype=None`` means infer: if the series has exactly one
+        backtestable subtype, use it; otherwise raise and list the choices so
+        callers never silently mix natures. The subtype filter is also applied
+        client-side, so it is correct whether or not the server narrows by it.
+        """
+        after_ms = _coerce_timestamp(after) if after is not None else None
+        before_ms = _coerce_timestamp(before) if before is not None else None
+
+        list_params = dict(params)
+        if subtype is not None:
+            list_params["subtype"] = subtype
+        markets = client.markets.list(series_id=series_id, **list_params).to_list()
+
+        if subtype is None:
+            available = sorted(
+                {m.subtype for m in markets if m.subtype and m.subtype != "rest"}
+            )
+            if len(available) > 1:
+                raise ValueError(
+                    f"Series '{series.title}' has multiple subtypes; pass "
+                    f"subtype=… (available: {', '.join(available)})."
+                )
+            subtype = available[0] if available else None
+
+        selected: list[Market] = []
+        for m in markets:
+            if subtype is not None and m.subtype != subtype:
+                continue
+            if after_ms is not None and m.close_time and m.close_time < after_ms:
+                continue
+            if before_ms is not None and m.open_time and m.open_time > before_ms:
+                continue
+            self._market_series[m.id] = series.id
+            self._register_market(m)
+            selected.append(m)
+
+        lanes = _pack_into_lanes(selected)
+        for i, lane in enumerate(lanes):
+            lane_key = f"cohort:{series.id}:{subtype}:{i}"
+            for m in lane:
+                self._market_group[m.id] = lane_key
+        return lanes
+
 
 def run_strategies(
     client: Any,
@@ -1466,6 +1551,7 @@ class AsyncBacktestEngine(_EngineCore):
         before: Any = None,
         data_dir: str | None = None,
         reference_resolution: str = "1m",
+        subtype: str | None = None,
         **params: Any,
     ) -> BacktestResult:
         self._capture_targets(id, after=after, before=before, data_dir=data_dir)
@@ -1479,6 +1565,10 @@ class AsyncBacktestEngine(_EngineCore):
         }
 
         if isinstance(id, list):
+            if subtype is not None:
+                raise ValueError(
+                    "subtype= is only supported for a single series target, not a list."
+                )
             streams, n_markets = await self._resolve_list(client, id, after=after, before=before, **params)
             with self._with_reporter(n_markets):
                 await self._run_merged(streams)
@@ -1502,18 +1592,7 @@ class AsyncBacktestEngine(_EngineCore):
             series = None
 
         if series is not None:
-            if series.structured_type:
-                lanes = await self._async_resolve_structured(
-                    client, id, series, after=after, before=before, **params,
-                )
-                n_markets = sum(len(lane) for lane in lanes)
-                streams = [
-                    self._async_make_market_stream(client, lane, after=after, before=before)
-                    for lane in lanes
-                ]
-                with self._with_reporter(n_markets):
-                    await self._run_merged(streams)
-            elif series.is_rolling:
+            if series.is_rolling and subtype is None:
                 markets = []
                 async for m in client.series.walk(id, after=after, before=before, **params):
                     markets.append(m)
@@ -1523,10 +1602,28 @@ class AsyncBacktestEngine(_EngineCore):
                     self._register_market(m)
                 with self._with_reporter(len(markets)):
                     await self._run_merged([self._async_make_market_stream(client, markets, after=after, before=before)])
-            else:
-                raise ValueError(
-                    f"Series '{series.title}' is neither rolling nor structured."
+                return self._build_result()
+
+            if subtype is not None:
+                lanes = await self._async_resolve_cohort(
+                    client, id, series, subtype, after=after, before=before, **params,
                 )
+            elif series.structured_type:
+                lanes = await self._async_resolve_structured(
+                    client, id, series, after=after, before=before, **params,
+                )
+            else:
+                lanes = await self._async_resolve_cohort(
+                    client, id, series, None, after=after, before=before, **params,
+                )
+
+            n_markets = sum(len(lane) for lane in lanes)
+            streams = [
+                self._async_make_market_stream(client, lane, after=after, before=before)
+                for lane in lanes
+            ]
+            with self._with_reporter(n_markets):
+                await self._run_merged(streams)
             return self._build_result()
 
         # 3. Fallback: condition ID
@@ -1731,6 +1828,56 @@ class AsyncBacktestEngine(_EngineCore):
         lanes = _pack_into_lanes(all_markets)
         for i, lane in enumerate(lanes):
             lane_key = f"lane:{series.id}:{i}"
+            for m in lane:
+                self._market_group[m.id] = lane_key
+        return lanes
+
+    async def _async_resolve_cohort(
+        self,
+        client: Any,
+        series_id: str,
+        series: Any,
+        subtype: str | None,
+        *,
+        after: Any = None,
+        before: Any = None,
+        **params: Any,
+    ) -> list[list[Market]]:
+        """Async ``_resolve_cohort``. See the sync version for rationale."""
+        after_ms = _coerce_timestamp(after) if after is not None else None
+        before_ms = _coerce_timestamp(before) if before is not None else None
+
+        list_params = dict(params)
+        if subtype is not None:
+            list_params["subtype"] = subtype
+        markets = await client.markets.list(series_id=series_id, **list_params).to_list()
+
+        if subtype is None:
+            available = sorted(
+                {m.subtype for m in markets if m.subtype and m.subtype != "rest"}
+            )
+            if len(available) > 1:
+                raise ValueError(
+                    f"Series '{series.title}' has multiple subtypes; pass "
+                    f"subtype=… (available: {', '.join(available)})."
+                )
+            subtype = available[0] if available else None
+
+        selected: list[Market] = []
+        for m in markets:
+            if subtype is not None and m.subtype != subtype:
+                continue
+            if after_ms is not None and m.close_time and m.close_time < after_ms:
+                continue
+            if before_ms is not None and m.open_time and m.open_time > before_ms:
+                continue
+            self._market_series[m.id] = series.id
+            self._register_market(m)
+            selected.append(m)
+
+        lanes = _pack_into_lanes(selected)
+        for i, lane in enumerate(lanes):
+            lane_key = f"cohort:{series.id}:{subtype}:{i}"
             for m in lane:
                 self._market_group[m.id] = lane_key
         return lanes
