@@ -2,7 +2,7 @@
 
 All notable changes to the `marketlens` Python SDK, version by version.
 
-## [1.5.1] Unreleased
+## [1.5.1] 2026-06-25
 
 * New `auto_merge` option on `client.backtest(...)` (and `AsyncMarketLens.backtest`), default `True`. With it on, a fill that leaves you holding both YES and NO on the same market nets the matched pairs back to cash at $1 per pair (a CTF merge). That is the existing behavior, so current backtests are unchanged. Set `auto_merge=False` to hold the YES and NO legs independently instead, for strategies that quote or hedge both sides and want each leg tracked, marked, and settled on its own. The MCP `run_backtest` tool takes the same flag.
 * New `ctx.split(size, market_id=...)` and `ctx.merge(size, market_id=...)` methods on `StrategyContext`. `split` mints `size` YES plus `size` NO shares for `size` cash, and `merge` redeems a matched `size` of YES and NO back to `size` cash, mirroring the on-chain CTF split and merge. A split is held as two legs even when `auto_merge` is on (it is an explicit position, not an order fill), so use it when you want both sides on the book at once.
