@@ -422,6 +422,7 @@ def build_server() -> FastMCP:
         slippage_bps: int = 0,
         limit_fill_rate: float = 0.1,
         queue_position: bool = False,
+        auto_merge: bool = True,
         strategy_class: str | None = None,
         data_dir: str | None = None,
         save: bool = True,
@@ -442,8 +443,10 @@ def build_server() -> FastMCP:
         with the data in the window, and a run is capped at timeout_s (default
         600s). Reuse a data_dir to cache a window for fast re-runs. limit_fill_rate
         applies when queue_position is False; queue_position instead models fill
-        priority from the order queue. Use compare_backtests to score several
-        strategies over one window.
+        priority from the order queue. auto_merge (default True) nets matched
+        YES+NO pairs back to cash after each fill; set it False to hold the two
+        legs independently. Use compare_backtests to score several strategies
+        over one window.
         """
         if os.environ.get("MARKETLENS_MCP_DISABLE_BACKTEST", "").strip().lower() in {
             "1", "true", "yes", "on",
@@ -481,6 +484,7 @@ def build_server() -> FastMCP:
             "slippage_bps": slippage_bps,
             "limit_fill_rate": limit_fill_rate,
             "queue_position": queue_position,
+            "auto_merge": auto_merge,
             "data_dir": data_dir,
             "save": save,
             "artifact_path": str(artifacts / label),
@@ -660,6 +664,8 @@ ctx:
   cancel(order), cancel_all(market_id=None)
   position(market_id=None) -> Position(side "YES"/"NO"/"FLAT", shares, avg_entry_price,
       cost_basis, unrealized_pnl, realized_pnl, total_fees)   # the field is .shares, not .size
+  yes_position / no_position(market_id=None) -> Position   # one leg; net is position()
+  split / merge(size, *, market_id=None)   # CTF mint/redeem: size YES+NO <-> size cash
   cash, equity, open_orders, book, market, time
   books -> dict[market_id, OrderBook]   # all active books
   reference_price(market_id=None) -> float | None   # ~1s Binance spot; a signal, not the resolution oracle
@@ -670,8 +676,10 @@ book: midpoint, best_bid, best_ask, spread, bid_levels, ask_levels (0 = that sid
 
 Rules:
 - Positions are long only: buy_* open or add, sell_* reduce (sell up to what you hold).
-  To quote the ask on YES, buy_no at 1 - price; matched YES+NO auto-net into $1, so
-  buy_yes(p) + buy_no(1-p) is a two-sided quote that earns the spread.
+  To quote the ask on YES, buy_no at 1 - price. By default (auto_merge=True) matched
+  YES+NO net back into $1 cash, so buy_yes(p) + buy_no(1-p) is a two-sided quote that
+  earns the spread. Run with auto_merge=False to hold the two legs separately and read
+  them with yes_position() / no_position().
 - Fills lag by latency_ms, so position() is unchanged in the on_book that placed the
   order; react in on_fill or guard on position().shares.
 - Unsold positions settle at resolution ($1 win / $0 lose). win_rate and holding metrics

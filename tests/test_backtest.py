@@ -487,6 +487,23 @@ class TestPortfolio:
         assert p.can_sell("m1", OrderSide.SELL_YES, 101) is False
         assert p.can_sell("m1", OrderSide.SELL_NO, 1) is False
 
+    def test_split_merge_round_trip(self):
+        # split mints both legs for $1/pair; merge redeems them. A round-trip
+        # recovers all cash and realizes no P&L.
+        p = Portfolio("10000.0000")
+
+        p.split("m1", 100.0)
+        assert p.cash == pytest.approx(9900.0)              # $1 per minted pair
+        assert p.yes_position("m1").shares == pytest.approx(100.0)
+        assert p.no_position("m1").shares == pytest.approx(100.0)
+        assert p.position("m1").side == PositionSide.FLAT   # equal legs net flat
+
+        p.merge("m1", 100.0)
+        assert p.cash == pytest.approx(10000.0)             # fully recovered
+        assert p.yes_position("m1").shares == 0.0
+        assert p.no_position("m1").shares == 0.0
+        assert p.position("m1").realized_pnl == pytest.approx(0.0)
+
 
 # ── Strategy Context Tests ───────────────────────────────────────
 
@@ -1104,6 +1121,90 @@ class TestEngineIntegration:
             initial_cash="10000.0000", latency_ms=0, limit_fill_rate=1.0,
         )
         assert result.total_trades == 1
+
+    def test_hedge_auto_merge_vs_independent(self, mock_api, client):
+        """Buy 100 YES then 100 NO. auto_merge nets the matched pairs back to
+        cash right after the fill; auto_merge=False holds both legs to
+        settlement. Final P&L is identical either way."""
+        m1 = _market_with({
+            "id": "m1", "status": "resolved",
+            "winning_outcome": "Yes", "winning_outcome_index": 0,
+            "open_time": 1000, "close_time": 6000, "resolved_at": 6000,
+        })
+        mock_api.get("/markets/m1").mock(return_value=httpx.Response(200, json=m1))
+        mock_api.get("/markets/m1/orderbook/history").mock(
+            return_value=httpx.Response(200, json=_history_response(SNAPSHOT_1, SNAPSHOT_2)))
+
+        def run(auto_merge):
+            cap = {}
+
+            class Hedge(Strategy):
+                def __init__(self):
+                    self.step = 0
+
+                def on_book(self, ctx, market, book):
+                    if self.step == 0:
+                        ctx.buy_yes(size="100.0000")     # fills 100 @ 0.67 ask
+                    elif self.step == 1:
+                        ctx.buy_no(size="100.0000")      # fills 100 @ 1-0.66 = 0.34
+                        cap["cash"] = ctx.cash
+                        cap["net"] = ctx.position().shares
+                        cap["yes"] = ctx.yes_position().shares
+                        cap["no"] = ctx.no_position().shares
+                    self.step += 1
+
+            result = client.backtest(
+                Hedge(), "m1", after=1000, before=6000, initial_cash="10000.0000",
+                fees=None, latency_ms=0, limit_fill_rate=1.0, auto_merge=auto_merge,
+            )
+            return cap, result
+
+        merged, merged_res = run(True)
+        held, held_res = run(False)
+
+        # Net directional position is zero in both modes (100 YES vs 100 NO).
+        assert merged["net"] == pytest.approx(0.0)
+        assert held["net"] == pytest.approx(0.0)
+
+        # auto_merge merges the matched pair away; without it both legs persist.
+        assert (merged["yes"], merged["no"]) == pytest.approx((0.0, 0.0))
+        assert (held["yes"], held["no"]) == pytest.approx((100.0, 100.0))
+
+        # The merge returns exactly $1 per matched pair (100) right after the fill.
+        assert merged["cash"] == pytest.approx(9999.0)   # 10000 - 67 - 34 + 100
+        assert held["cash"] == pytest.approx(9899.0)     # 10000 - 67 - 34
+
+        # Merged legs leave nothing to settle; held legs settle as one net record.
+        assert len(merged_res.settlements_df()) == 0
+        assert len(held_res.settlements_df()) == 1
+
+        # Money is conserved: merge timing doesn't change final P&L.
+        assert merged_res.total_pnl == pytest.approx(-1.0)
+        assert held_res.total_pnl == pytest.approx(-1.0)
+
+    def test_ctx_split_and_settle(self, mock_api, client):
+        """ctx.split held to a YES resolution settles to exactly the cash paid:
+        split-and-hold is P&L-neutral, and a net-flat hedge still settles."""
+        m1 = _market_with({
+            "id": "m1", "status": "resolved",
+            "winning_outcome": "Yes", "winning_outcome_index": 0,
+            "open_time": 1000, "close_time": 6000, "resolved_at": 6000,
+        })
+        mock_api.get("/markets/m1").mock(return_value=httpx.Response(200, json=m1))
+        mock_api.get("/markets/m1/orderbook/history").mock(
+            return_value=httpx.Response(200, json=_history_response(SNAPSHOT_1, SNAPSHOT_2)))
+
+        class Splitter(Strategy):
+            def on_market_start(self, ctx, market, book):
+                ctx.split("100.0000")
+
+        result = client.backtest(
+            Splitter(), "m1", after=1000, before=6000, initial_cash="10000.0000",
+            fees=None, latency_ms=0, limit_fill_rate=1.0,
+        )
+        # 100 YES + 100 NO settle to $100 == what the split cost.
+        assert result.total_pnl == pytest.approx(0.0)
+        assert len(result.settlements_df()) == 1   # net-flat position still settles
 
 
 # ── Results Tests ────────────────────────────────────────────────

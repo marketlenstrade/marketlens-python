@@ -143,16 +143,30 @@ class StrategyContext:
     # ── Settlement ───────────────────────────────────────────────
 
     def request_merge(self, condition_id: str, amount: float, neg_risk: bool = False) -> None:
-        """No-op in backtest — portfolio auto-nets matched YES+NO pairs during fill processing."""
+        """No-op in backtest. With ``auto_merge`` on (the default) matched YES+NO
+        pairs are merged to cash during fill processing; call ``ctx.merge(...)``
+        to merge explicitly."""
 
     def request_redeem(self, condition_id: str, neg_risk: bool = False) -> None:
-        """No-op in backtest — settlement is instant."""
+        """No-op in backtest. Settlement is automatic at resolution."""
 
     # ── State queries ─────────────────────────────────────────────
 
     def position(self, market_id: str | None = None) -> Position:
+        """Net position for the market (YES and NO legs combined)."""
         mid = market_id or self._engine.current_market.id
         return self._engine.portfolio.position(mid)
+
+    def yes_position(self, market_id: str | None = None) -> Position:
+        """The YES leg on its own. Useful with ``auto_merge=False``, where the
+        YES and NO legs are held separately; ``position()`` returns their net."""
+        mid = market_id or self._engine.current_market.id
+        return self._engine.portfolio.yes_position(mid)
+
+    def no_position(self, market_id: str | None = None) -> Position:
+        """The NO leg on its own. See :meth:`yes_position`."""
+        mid = market_id or self._engine.current_market.id
+        return self._engine.portfolio.no_position(mid)
 
     @property
     def cash(self) -> float:

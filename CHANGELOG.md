@@ -2,6 +2,12 @@
 
 All notable changes to the `marketlens` Python SDK, version by version.
 
+## [1.5.1] Unreleased
+
+* New `auto_merge` option on `client.backtest(...)` (and `AsyncMarketLens.backtest`), default `True`. With it on, a fill that leaves you holding both YES and NO on the same market nets the matched pairs back to cash at $1 per pair (a CTF merge). That is the existing behavior, so current backtests are unchanged. Set `auto_merge=False` to hold the YES and NO legs independently instead, for strategies that quote or hedge both sides and want each leg tracked, marked, and settled on its own. The MCP `run_backtest` tool takes the same flag.
+* New `ctx.split(size, market_id=...)` and `ctx.merge(size, market_id=...)` methods on `StrategyContext`. `split` mints `size` YES plus `size` NO shares for `size` cash, and `merge` redeems a matched `size` of YES and NO back to `size` cash, mirroring the on-chain CTF split and merge. A split is held as two legs even when `auto_merge` is on (it is an explicit position, not an order fill), so use it when you want both sides on the book at once.
+* `StrategyContext` gains `ctx.yes_position(market_id=...)` and `ctx.no_position(market_id=...)` to read each leg on its own. `ctx.position(...)` still returns the net of the two, so existing reads are unchanged; the per-leg views are most useful with `auto_merge=False`.
+
 ## [1.5.0] 2026-06-22
 
 * Backtest a single bet type within a series using the new `subtype=` argument, e.g. `client.backtest(strategy, "mlb", subtype="moneyline", after=..., before=...)`. Rolling series (the "up or down" chains) and structured strike markets each hold one kind of bet, so they still run whole with no `subtype` needed. A sports league bundles several kinds of bets under one ticker (moneyline, spread, totals, player props); `subtype` picks one and backtests those markets together across the day's games under a shared portfolio. Leave `subtype` off for such a series and the run stops and lists the available bet types, so different kinds of bets never land in the same backtest by accident.

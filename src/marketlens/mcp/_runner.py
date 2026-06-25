@@ -118,6 +118,7 @@ def _config_kwargs(cfg: dict) -> dict:
         slippage_bps=cfg.get("slippage_bps", 0),
         limit_fill_rate=cfg.get("limit_fill_rate", 0.1),
         queue_position=cfg.get("queue_position", False),
+        auto_merge=cfg.get("auto_merge", True),
         data_dir=cfg.get("data_dir"),
         progress=False,
     )
