@@ -124,6 +124,14 @@ class StrategyContext:
                 results.append(self.buy_no(size=size, market_id=market_id, limit_price=limit_price))
         return results
 
+    # ── CTF split / merge ─────────────────────────────────────────
+
+    def split(self, size: float | int | str, *, market_id: str | None = None) -> None:
+        self._engine.split(size, market_id=market_id)
+
+    def merge(self, size: float | int | str, *, market_id: str | None = None) -> None:
+        self._engine.merge(size, market_id=market_id)
+
     # ── Order management ──────────────────────────────────────────
 
     def cancel(self, order: Order) -> None:

@@ -426,6 +426,46 @@ class TestPortfolio:
         }))
         assert p.settle_market(market, 5000) is None
 
+    def test_settle_negative_avg_entry_price(self):
+        # Cheap YES+NO pairs (0.40 + 0.45 = 0.85 < $1) over-credit the $1/pair
+        # rebate, driving the net position's avg_entry_price negative. Cash and
+        # pnl must still come out exact on resolution.
+        from marketlens.types.market import Market
+        p = Portfolio("10000.0000")
+        p.apply_fill(Fill(
+            order_id="o1", market_id="m1", side=OrderSide.BUY_YES,
+            price="0.4000", size="110.0000", fee="0.0000", timestamp=1000, is_maker=False,
+        ))
+        p.apply_fill(Fill(
+            order_id="o2", market_id="m1", side=OrderSide.BUY_NO,
+            price="0.4500", size="100.0000", fee="0.0000", timestamp=1000, is_maker=False,
+        ))
+        assert p.cash == pytest.approx(9911.0)  # 10000 - 44 - 45
+
+        # Net 10 YES; paired 100 credited at $1 -> net_cost = 89 - 100 = -11.
+        pos = p.position("m1")
+        assert pos.side == PositionSide.YES
+        assert pos.shares == pytest.approx(10.0)
+        assert pos.avg_entry_price == pytest.approx(-1.1)
+        assert pos.cost_basis == pytest.approx(89.0)
+
+        market = Market.model_validate(_market_with({
+            "id": "m1", "status": "resolved",
+            "winning_outcome": "Yes", "winning_outcome_index": 0,
+            "resolved_at": 5000,
+        }))
+        record = p.settle_market(market, 5000)
+        assert record is not None
+        assert record.settlement_price == 1.0
+        # pnl = (1 - 0.40)*110 + (0 - 0.45)*100 = 66 - 45 = 21
+        assert record.pnl == pytest.approx(21.0)
+        # Record stays self-consistent even with a negative avg entry.
+        assert record.pnl == pytest.approx(
+            (record.settlement_price - record.avg_entry_price) * record.shares
+        )
+        # 110 YES * $1 settled -> cash 9911 + 110 = 10021
+        assert p.cash == pytest.approx(10021.0)
+
     def test_mark_to_market(self):
         p = Portfolio("10000.0000")
         p.apply_fill(Fill(

@@ -249,6 +249,9 @@ class BacktestConfig:
     # None=auto, True=force compact, False=force full. Auto picks compact
     # when on_book isn't overridden and queue_position/include_trades allow it.
     coalesce: bool | None = None
+    # Auto-merge matched YES+NO pairs back to cash after each fill (CTF merge).
+    # Disable to track YES/NO legs independently.
+    auto_merge: bool = True
 
 
 class _EngineCore:
@@ -259,6 +262,7 @@ class _EngineCore:
         self._config = config or BacktestConfig()
 
         self._auto_fees = self._config.fees == "polymarket"
+        self._auto_merge = self._config.auto_merge
         fee_model = self._config.fee_model or ZeroFeeModel()
         self._fill_sim = FillSimulator(
             fee_model,
@@ -509,11 +513,13 @@ class _EngineCore:
 
         # Validate sell orders
         if side in (OrderSide.SELL_YES, OrderSide.SELL_NO):
-            pos = self._portfolio.position(target)
-            expected_side = PositionSide.YES if side == OrderSide.SELL_YES else PositionSide.NO
-            held = pos.shares if pos.side == expected_side else 0.0
-            if held < size:
-                side_name = "YES" if side == OrderSide.SELL_YES else "NO"
+            if not self._portfolio.can_sell(target, side, size):
+                if side == OrderSide.SELL_YES:
+                    held = self._portfolio.yes_position(target).shares
+                    side_name = "YES"
+                else:
+                    held = self._portfolio.no_position(target).shares
+                    side_name = "NO"
                 raise ValueError(
                     f"Cannot sell {size:.4f} {side_name} shares: only holding {held:.4f}"
                 )
@@ -550,6 +556,37 @@ class _EngineCore:
             self._activate_limit_order(order)
 
         return order
+
+    def split(self, size: float | int | str, *, market_id: str | None = None) -> None:
+        """CTF split: mint ``size`` YES + ``size`` NO shares for $``size`` cash.
+
+        Rejected if free cash can't cover the $1-per-pair cost.
+        """
+        size = float(size)
+        target = market_id or self._current_market.id  # type: ignore[union-attr]
+        if self._portfolio.cash < size:
+            self._cash_rejected += 1
+            raise ValueError(
+                f"Cannot split {size:.4f}: needs {size:.4f} cash, "
+                f"only {self._portfolio.cash:.4f} available"
+            )
+        self._portfolio.split(target, size)
+
+    def merge(self, size: float | int | str, *, market_id: str | None = None) -> None:
+        """CTF merge: redeem ``size`` YES + ``size`` NO shares for $``size`` cash.
+
+        Rejected unless both legs hold at least ``size`` shares.
+        """
+        size = float(size)
+        target = market_id or self._current_market.id  # type: ignore[union-attr]
+        yes_held = self._portfolio.yes_position(target).shares
+        no_held = self._portfolio.no_position(target).shares
+        if yes_held < size or no_held < size:
+            raise ValueError(
+                f"Cannot merge {size:.4f}: holding {yes_held:.4f} YES / "
+                f"{no_held:.4f} NO shares"
+            )
+        self._portfolio.merge(target, size)
 
     def cancel_order(self, order: Order) -> None:
         if order.status in (OrderStatus.OPEN, OrderStatus.PENDING, OrderStatus.PARTIALLY_FILLED):
@@ -739,21 +776,23 @@ class _EngineCore:
         return fills
 
     def _apply_fill(self, order: Order, fill: Fill) -> None:
-        # Check cash sufficiency for buy orders. Net the CTF-merge credit
-        # against the cost: buying the opposite side of an existing position
-        # nets matched YES+NO pairs back to $1 each (Portfolio.apply_fill).
-        # Without this credit, a fully-funded hedge can be falsely rejected
-        # purely because the gross buy notional exceeds free cash.
+        # Check cash sufficiency for buy orders. When auto-merge is on, net the
+        # CTF-merge credit against the cost: the post-fill merge redeems matched
+        # YES+NO pairs at $1 each, so a fully-funded hedge isn't falsely rejected
+        # just because the gross buy notional exceeds free cash.
         if fill.side in (OrderSide.BUY_YES, OrderSide.BUY_NO):
-            target_side = (
-                PositionSide.YES if fill.side == OrderSide.BUY_YES else PositionSide.NO
-            )
-            opposite = (
-                PositionSide.NO if target_side == PositionSide.YES else PositionSide.YES
-            )
-            pos = self._portfolio.position(fill.market_id)
-            matched = min(pos.shares, fill.size) if pos.side == opposite else 0.0
-            cost = fill.price * fill.size + fill.fee - matched
+            cost = fill.price * fill.size + fill.fee
+            if self._auto_merge:
+                target_side = (
+                    PositionSide.YES if fill.side == OrderSide.BUY_YES else PositionSide.NO
+                )
+                yes_after = self._portfolio.yes_position(fill.market_id).shares + (
+                    fill.size if target_side == PositionSide.YES else 0.0
+                )
+                no_after = self._portfolio.no_position(fill.market_id).shares + (
+                    fill.size if target_side == PositionSide.NO else 0.0
+                )
+                cost -= min(yes_after, no_after)
             if self._portfolio._cash < cost:
                 self._cash_rejected += 1
                 raise ValueError("Insufficient cash")
@@ -762,6 +801,15 @@ class _EngineCore:
                 self._settled_at[fill.market_id] = fill.timestamp + self._settlement_delay_ms
         # Apply to portfolio — may also raise ValueError for insufficient shares
         self._portfolio.apply_fill(fill)
+
+        # CTF auto-merge: redeem any matched YES+NO pairs back to cash at $1 each.
+        if self._auto_merge:
+            matched = min(
+                self._portfolio.yes_position(fill.market_id).shares,
+                self._portfolio.no_position(fill.market_id).shares,
+            )
+            if matched > 0:
+                self._portfolio.merge(fill.market_id, matched)
 
         order.fills.append(fill)
         filled = order.filled_size + fill.size
