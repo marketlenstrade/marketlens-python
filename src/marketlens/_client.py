@@ -76,6 +76,7 @@ class MarketLens:
         progress: bool = True,
         coalesce: bool | None = None,
         concurrency: int = 8,
+        auto_merge: bool = True,
         labels: list[str] | None = None,
         **params: Any,
     ) -> Any:
@@ -99,6 +100,9 @@ class MarketLens:
             concurrency: Parallel per-market downloads when ``data_dir`` is set
                 but empty (the auto-download path). Defaults to 8, capped to the
                 CPU count. No effect once the files are already on disk.
+            auto_merge: Merge matched YES+NO pairs back to cash after each fill
+                (CTF merge), mirroring on-chain behaviour. Default ``True``.
+                Set ``False`` to hold YES and NO legs independently.
             labels: Optional names for a multi-strategy run, one per strategy.
                 Used to label each strategy's progress bar and the resulting
                 ``MultiBacktestResult``. Defaults to ``strategy 1``, ``strategy 2``…
@@ -128,6 +132,7 @@ class MarketLens:
             progress=progress,
             coalesce=coalesce,
             download_concurrency=concurrency,
+            auto_merge=auto_merge,
         )
         # Auto-download (when ``data_dir`` is missing/empty) is dispatched
         # from inside engine.run after the market-resolution log, so the
@@ -230,11 +235,13 @@ class AsyncMarketLens:
         progress: bool = True,
         coalesce: bool | None = None,
         concurrency: int = 8,
+        auto_merge: bool = True,
         **params: Any,
     ) -> Any:
         """Run a backtest on a market, series, or list of markets/series (async).
 
-        See :meth:`MarketLens.backtest` for ``data_dir`` and ``coalesce`` semantics.
+        See :meth:`MarketLens.backtest` for ``data_dir``, ``coalesce``, and
+        ``auto_merge`` semantics.
         """
         from marketlens.backtest import AsyncBacktestEngine, BacktestConfig
 
@@ -250,6 +257,7 @@ class AsyncMarketLens:
             progress=progress,
             coalesce=coalesce,
             download_concurrency=concurrency,
+            auto_merge=auto_merge,
         )
         strategies = list(strategy) if isinstance(strategy, (list, tuple)) else [strategy]
         if not strategies:
