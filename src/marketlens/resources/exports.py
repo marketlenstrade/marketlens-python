@@ -8,7 +8,7 @@ from typing import Any
 
 from marketlens._base import AsyncHTTPClient, SyncHTTPClient, _coerce_timestamp
 from marketlens._progress import make_reporter
-from marketlens.exceptions import NotFoundError
+from marketlens.exceptions import ExportNotReadyError, NotFoundError
 
 # Reference trades are fetched a touch before the first market opens so a price
 # at/before the open is always available. Without it, a market opening on the
@@ -53,6 +53,34 @@ class SeriesDownloadResult:
 
     def __fspath__(self) -> str:
         return str(self.data_dir)
+
+
+@dataclass(frozen=True)
+class BarsDownloadResult:
+    """Outcome of ``client.exports.download_market_bars_batch``.
+
+    The bar-cadence parallel to :class:`SeriesDownloadResult`. ``pending`` lists
+    markets whose export is still building (re-run to pick them up once built);
+    ``not_found`` lists markets with no data. PathLike, so it can be passed
+    straight to ``client.backtest(..., data_dir=result)``.
+    """
+    data_dir: Path
+    ready: list[str] = field(default_factory=list)
+    pending: list[str] = field(default_factory=list)
+    not_found: list[str] = field(default_factory=list)
+
+    def __fspath__(self) -> str:
+        return str(self.data_dir)
+
+
+def _run_concurrent(items: list, work: Any, *, concurrency: int) -> list:
+    """Run ``work(item)`` over ``items`` (concurrently when ``concurrency > 1``)
+    and return the results in input order. Shared by the series and bar batch
+    downloads so the fan-out lives in one place."""
+    if concurrency <= 1 or len(items) <= 1:
+        return [work(it) for it in items]
+    with ThreadPoolExecutor(max_workers=concurrency) as ex:
+        return [f.result() for f in [ex.submit(work, it) for it in items]]
 
 
 class Exports:
@@ -182,25 +210,22 @@ class Exports:
         events_charged = int(body.get("events_charged", 0))
         targets = [(e["market_id"], e["url"]) for e in body.get("ready", [])]
 
-        def _one(market_id: str, url: str, reporter: Any) -> str:
-            dest = data_dir / f"history-{market_id}{suffix}.parquet"
-            if not dest.exists():
-                self._client.fetch_presigned(
-                    url, dest,
-                    reporter=reporter, label=f"market {market_id[:8]}",
-                )
-            reporter.batch_download_advance()
-            return market_id
-
         with make_reporter(enabled=progress, n_markets=len(targets)) as reporter:
             if targets:
                 reporter.batch_download_started(f"Downloading {series_id}", len(targets))
-            if concurrency <= 1 or len(targets) <= 1:
-                ready = [_one(m, u, reporter) for m, u in targets]
-            else:
-                with ThreadPoolExecutor(max_workers=concurrency) as ex:
-                    futures = [ex.submit(_one, m, u, reporter) for m, u in targets]
-                    ready = [f.result() for f in futures]
+
+            def _one(target: tuple[str, str]) -> str:
+                market_id, url = target
+                dest = data_dir / f"history-{market_id}{suffix}.parquet"
+                if not dest.exists():
+                    self._client.fetch_presigned(
+                        url, dest,
+                        reporter=reporter, label=f"market {market_id[:8]}",
+                    )
+                reporter.batch_download_advance()
+                return market_id
+
+            ready = _run_concurrent(targets, _one, concurrency=concurrency)
 
             if self._series is not None:
                 try:
@@ -231,6 +256,82 @@ class Exports:
             failed=failed,
             rate_limited=rate_limited,
             events_charged=events_charged,
+        )
+
+    def download_market_bars(
+        self, market_id: str, *, resolution: str, price: str, data_dir: str | Path,
+    ) -> Path:
+        """Download the pre-built bar parquet for one market+resolution.
+
+        The signal-level (alpha) backtest's offline source, the bar-cadence
+        parallel to :meth:`download`. Keyed by market and resolution (the whole
+        market, no time window), fetched the same way as the history export: a
+        302 from the API to a presigned object-store URL. ``price="mid"`` pulls
+        the metrics export, ``price="close"`` the candles export. The first
+        request marks the variant for export and raises ``ExportNotReadyError``
+        until the static-exporter builds it.
+        """
+        from marketlens.backtest._bar import bar_file
+
+        dest = bar_file(data_dir, market_id, resolution, price)
+        if dest.exists():
+            return dest
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        endpoint = (
+            f"/markets/{market_id}/orderbook/metrics/export" if price == "mid"
+            else f"/markets/{market_id}/candles/export"
+        )
+        self._client.download_via_redirect(endpoint, dest, params={"resolution": resolution})
+        return dest
+
+    def download_market_bars_batch(
+        self,
+        market_ids: list[str],
+        *,
+        resolution: str,
+        price: str,
+        data_dir: str | Path,
+        concurrency: int = 1,
+        progress: bool = True,
+    ) -> BarsDownloadResult:
+        """Download many markets' bar exports concurrently, with a progress bar.
+
+        The bar-cadence parallel to :meth:`download_series`: each market's
+        ``price="mid"`` (metrics) or ``price="close"`` (candles) export at
+        ``resolution``, fetched through :meth:`download_market_bars`. Cached files
+        are reused. Variants still building land in ``pending`` (re-run to pick
+        them up once built); markets with no data land in ``not_found``.
+        """
+        data_dir = Path(data_dir)
+        data_dir.mkdir(parents=True, exist_ok=True)
+        targets = list(market_ids)
+
+        with make_reporter(enabled=progress, n_markets=len(targets)) as reporter:
+            if targets:
+                reporter.batch_download_started("Downloading", len(targets))
+
+            def _one(market_id: str) -> tuple[str, str]:
+                try:
+                    self.download_market_bars(
+                        market_id, resolution=resolution, price=price, data_dir=data_dir,
+                    )
+                    state = "ready"
+                except ExportNotReadyError:
+                    state = "pending"
+                except NotFoundError:
+                    state = "not_found"
+                except Exception:
+                    state = "not_found"
+                reporter.batch_download_advance()
+                return market_id, state
+
+            results = _run_concurrent(targets, _one, concurrency=concurrency)
+
+        return BarsDownloadResult(
+            data_dir=data_dir,
+            ready=[m for m, s in results if s == "ready"],
+            pending=[m for m, s in results if s == "pending"],
+            not_found=[m for m, s in results if s == "not_found"],
         )
 
     def _ensure_reference(

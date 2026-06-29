@@ -1233,7 +1233,7 @@ class TestBacktestResult:
         s = result.summary()
         expected_keys = {
             "total_pnl", "total_return", "win_rate", "profit_factor",
-            "max_drawdown", "sharpe_ratio", "sortino_ratio",
+            "max_drawdown", "sharpe_ratio", "sortino_ratio", "volatility", "turnover",
             "expectancy", "avg_win", "avg_loss", "payoff_ratio",
             "avg_holding_ms", "capital_utilization", "max_drawdown_duration_ms",
             "total_trades", "markets_traded",

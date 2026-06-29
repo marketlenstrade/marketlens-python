@@ -78,9 +78,19 @@ class MarketLens:
         concurrency: int = 8,
         auto_merge: bool = True,
         labels: list[str] | None = None,
+        resolution: str = "1m",
+        price: str = "mid",
+        fill: str = "next",
         **params: Any,
     ) -> Any:
         """Run a backtest on a market, series, or list of markets/series.
+
+        Two models, chosen by the strategy's base class: a ``Strategy`` runs the
+        tick-level engine (full L2 replay, realistic execution); an
+        ``AlphaStrategy`` runs the signal-level engine (one bar per
+        ``resolution``, target-weight execution) for long-horizon, low-frequency
+        alphas. The ``resolution`` / ``price`` / ``fill`` options apply only to
+        the latter.
 
         Args:
             data_dir: Local Parquet directory for offline replay. Missing files
@@ -116,8 +126,50 @@ class MarketLens:
         multi-nature series (most sports leagues) raises and lists the available
         subtypes when it is omitted, so different natures are never mixed.
 
-        Simple one-liner API. For advanced config, use ``BacktestEngine`` directly.
+        Simple one-liner API. For advanced config, use ``BacktestEngine`` or
+        ``AlphaBacktestEngine`` directly.
         """
+        from marketlens.backtest._strategy import _is_alpha
+
+        if _is_alpha(strategy) or (
+            isinstance(strategy, (list, tuple)) and strategy and _is_alpha(strategy[0])
+        ):
+            if queue_position:
+                raise ValueError(
+                    "queue_position is a tick-level feature with no meaning for an "
+                    "AlphaStrategy (bar cadence). Drop it, or use a Strategy."
+                )
+            from marketlens.backtest import AlphaBacktestEngine, AlphaConfig
+            from marketlens.backtest._engine import run_strategies
+
+            acfg = AlphaConfig(
+                initial_cash=initial_cash,
+                resolution=resolution,
+                price=price,
+                fill=fill,
+                slippage_bps=slippage_bps,
+                fees=fees,
+                progress=progress,
+                download_concurrency=concurrency,
+            )
+            if isinstance(strategy, (list, tuple)):
+                return run_strategies(
+                    self, list(strategy), acfg, id,
+                    labels=labels, after=after, before=before, data_dir=data_dir, **params,
+                )
+            return AlphaBacktestEngine(strategy, acfg).run(
+                self, id, after=after, before=before, data_dir=data_dir,
+                label=labels[0] if labels else None, **params,
+            )
+
+        # The bar-cadence options belong to AlphaStrategy; a plain Strategy
+        # setting them is a mistake, so fail loudly instead of ignoring them.
+        if resolution != "1m" or price != "mid" or fill != "next":
+            raise ValueError(
+                "resolution, price, and fill apply only to an AlphaStrategy (the "
+                "signal-level model). Pass an AlphaStrategy, or drop these options."
+            )
+
         from marketlens.backtest import BacktestConfig, BacktestEngine
 
         config = BacktestConfig(
@@ -243,6 +295,16 @@ class AsyncMarketLens:
         See :meth:`MarketLens.backtest` for ``data_dir``, ``coalesce``, and
         ``auto_merge`` semantics.
         """
+        from marketlens.backtest._strategy import _is_alpha
+
+        if _is_alpha(strategy) or (
+            isinstance(strategy, (list, tuple)) and strategy and _is_alpha(strategy[0])
+        ):
+            raise NotImplementedError(
+                "AlphaStrategy is supported on the synchronous MarketLens.backtest() "
+                "for now; use the sync client for signal-level backtests."
+            )
+
         from marketlens.backtest import AsyncBacktestEngine, BacktestConfig
 
         config = BacktestConfig(

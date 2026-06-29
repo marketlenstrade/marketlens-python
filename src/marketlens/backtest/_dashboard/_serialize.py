@@ -65,6 +65,8 @@ def _serialize_metrics(r: BacktestResult) -> dict:
         "payoff_ratio": _safe_float(r.payoff_ratio),
         "avg_holding_ms": r.avg_holding_ms,
         "capital_utilization": _safe_float(r.capital_utilization),
+        "turnover": _safe_float(r.turnover),
+        "volatility": _safe_float(r.volatility),
         "total_trades": r.total_trades,
         "markets_traded": r.markets_traded,
         "total_fees": _safe_float(r.total_fees),
@@ -222,19 +224,22 @@ def _serialize_config(result: BacktestResult) -> dict | None:
     cfg = result.config
     if cfg is None:
         return None
-    d: dict[str, Any] = {}
-    d["initial_cash"] = result.initial_cash
-    for field in (
-        "taker_only",
-        "max_fill_fraction",
-        "latency_ms",
-        "slippage_bps",
-        "limit_fill_rate",
-        "queue_position",
-        "settlement_delay_ms",
-    ):
-        if hasattr(cfg, field):
-            d[field] = getattr(cfg, field)
+    d: dict[str, Any] = {"initial_cash": result.initial_cash}
+    if result.targets.get("mode") == "alpha":
+        # Bar model: show the cadence and cost knobs that apply, not the inert
+        # tick microstructure fields carried on the internal config shim.
+        for k in ("resolution", "price", "fill"):
+            if k in result.targets:
+                d[k] = result.targets[k]
+        if hasattr(cfg, "slippage_bps"):
+            d["slippage_bps"] = cfg.slippage_bps
+    else:
+        for field in (
+            "taker_only", "max_fill_fraction", "latency_ms", "slippage_bps",
+            "limit_fill_rate", "queue_position", "settlement_delay_ms",
+        ):
+            if hasattr(cfg, field):
+                d[field] = getattr(cfg, field)
     if hasattr(cfg, "fees") and cfg.fees is not None:
         d["fees"] = str(cfg.fees)
     return d

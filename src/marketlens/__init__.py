@@ -16,6 +16,7 @@ from marketlens.exceptions import (
     TimeoutError,
 )
 from marketlens.resources.exports import (
+    BarsDownloadResult,
     SeriesDownloadResult,
     SeriesFailed,
     SeriesPending,
@@ -83,6 +84,7 @@ __all__ = [
     "OrderBookWalk",
     "AsyncOrderBookWalk",
     # Exports
+    "BarsDownloadResult",
     "SeriesDownloadResult",
     "SeriesPending",
     "SeriesFailed",

@@ -13,12 +13,21 @@ import pyarrow.parquet as pq
 from marketlens._base import _coerce_timestamp
 from marketlens._progress import _ProgressReporter, make_reporter
 from marketlens.exceptions import NotFoundError
+from marketlens.backtest._bar import (
+    _RESOLUTION_MS,
+    AlphaConfig,
+    Bar,
+    BarFillModel,
+    bar_file,
+    iter_bars,
+    iter_bars_parquet,
+)
 from marketlens.backtest._fees import FeeModel, PolymarketFeeModel, ZeroFeeModel
 from marketlens.backtest._fills import FillSimulator
 from marketlens.backtest._portfolio import Portfolio
 from marketlens.backtest._prefetch import AsyncPrefetchedIterator, PrefetchedIterator
 from marketlens.backtest._results import BacktestResult, MultiBacktestResult
-from marketlens.backtest._strategy import Strategy, StrategyContext, _is_trade_only
+from marketlens.backtest._strategy import AlphaContext, Strategy, StrategyContext, _is_trade_only
 from marketlens.backtest._types import (
     Fill,
     Order,
@@ -1551,7 +1560,7 @@ class BacktestEngine(_EngineCore):
 def run_strategies(
     client: Any,
     strategies: list[Strategy],
-    config: BacktestConfig,
+    config: BacktestConfig | AlphaConfig,
     id: str | list[str],
     *,
     labels: list[str] | None = None,
@@ -1579,8 +1588,9 @@ def run_strategies(
     # Every strategy replays the same targets, so the resolution-phase status
     # lines are identical — announce them once (first strategy) and stay quiet
     # for the rest.
+    engine_cls = AlphaBacktestEngine if isinstance(config, AlphaConfig) else BacktestEngine
     results = [
-        BacktestEngine(strategy, config).run(
+        engine_cls(strategy, config).run(
             client, id, after=after, before=before, data_dir=data_dir,
             announce=(i == 0), label=bar_labels[i], **params,
         )
@@ -1929,3 +1939,312 @@ class AsyncBacktestEngine(_EngineCore):
             for m in lane:
                 self._market_group[m.id] = lane_key
         return lanes
+
+
+_YEAR_MS = 365 * 86_400_000
+
+
+class AlphaBacktestEngine(BacktestEngine):
+    """Bar-cadence (signal-level) backtest.
+
+    Reuses :class:`BacktestEngine`'s market resolution and ``run()`` skeleton
+    verbatim and overrides only the three things that differ: the per-market
+    data stream (bars from ``metrics``/``candles`` instead of the L2 firehose),
+    the reconcile loop (trade the delta to each market's target), and the result
+    metrics (time-series, not per-settlement). The tick engine is untouched.
+    """
+
+    def __init__(self, strategy: Strategy, config: AlphaConfig | None = None) -> None:
+        alpha = config or AlphaConfig()
+        alpha.validate()
+        self._alpha = alpha
+        # Map onto a BacktestConfig so _EngineCore's portfolio / fee model /
+        # auto-merge setup is reused unchanged. Microstructure knobs are pinned
+        # off — they have no meaning at bar cadence.
+        bcfg = BacktestConfig(
+            initial_cash=alpha.initial_cash,
+            fee_model=alpha.fee_model,
+            fees=alpha.fees,
+            auto_merge=True,                 # net targets reconcile via CTF merge
+            slippage_bps=alpha.slippage_bps,
+            progress=alpha.progress,
+            download_concurrency=alpha.download_concurrency,
+            latency_ms=0,
+            settlement_delay_ms=0,
+            queue_position=False,
+            include_trades=False,
+        )
+        super().__init__(strategy, bcfg)
+        self._ctx = AlphaContext(self)
+        self._fill = BarFillModel(self._fill_sim._fee_model, slippage_bps=alpha.slippage_bps)
+        self._target: dict[str, tuple[str, float]] = {}   # market_id → ("w"|"s", value)
+        self._bars: dict[str, Bar] = {}
+        self._current_bar: Bar | None = None
+        self._current_mid: float = 0.0
+        self._client: Any = None            # stashed for offline lazy fetch
+        self._n_bars_pending = 0            # markets skipped: bar export still building
+
+    # ── accessors used by AlphaContext ────────────────────────────
+
+    @property
+    def current_bar(self) -> Bar:
+        return self._current_bar  # type: ignore[return-value]
+
+    def set_target(
+        self, market_id: str | None, *,
+        shares: float | None = None, weight: float | None = None,
+    ) -> None:
+        mid = market_id or self._current_market.id  # type: ignore[union-attr]
+        self._target[mid] = ("w", float(weight)) if weight is not None else ("s", float(shares))
+
+    # ── data path overrides ───────────────────────────────────────
+
+    def _resolve_compact_mode(self) -> bool:
+        return False
+
+    def _maybe_autodownload(self, client, id, *, after, before, data_dir):  # type: ignore[override]
+        # Bars are downloaded lazily per market in the file stream. Stash the
+        # client so that path can fetch on a cache miss.
+        self._client = client
+        if data_dir is None:
+            return
+        # Reference (Binance spot) for ctx.reference_price(): the same files the
+        # tick offline path downloads, so a signal that reads it runs fully
+        # offline. Underlyings/bounds were populated during target resolution.
+        for symbol, (lo, hi) in self._underlying_bounds.items():
+            try:
+                client.exports._ensure_reference(Path(data_dir), symbol, lo, hi)
+            except Exception:
+                pass
+
+    def _prelog_file_skips(self, markets, data_dir, *, announce=True):  # type: ignore[override]
+        # Streaming has nothing to pre-download.
+        if data_dir is None:
+            return len(markets)
+        # Offline: pre-download every market's bar export concurrently (with the
+        # "Downloading M/N" bar), then replay from the local cache. The fan-out
+        # lives in the exports resource, the bar parallel to the tick path's
+        # download_series.
+        result = self._client.exports.download_market_bars_batch(
+            [m.id for m in markets],
+            resolution=self._alpha.resolution,
+            price=self._alpha.price,
+            data_dir=data_dir,
+            concurrency=max(1, self._alpha.download_concurrency),
+            progress=self._alpha.progress,
+        )
+        self._n_bars_pending = len(result.pending)
+        return len(markets)
+
+    def _make_market_stream(self, client, markets, *, after=None, before=None):  # type: ignore[override]
+        yield from self._bar_stream(client, markets, after=after, before=before, data_dir=None)
+
+    def _make_file_stream(self, markets, data_dir, *, after_ms=None, before_ms=None):  # type: ignore[override]
+        yield from self._bar_stream(
+            self._client, markets, after=after_ms, before=before_ms, data_dir=data_dir,
+        )
+
+    def _bar_stream(self, client, markets, *, after, before, data_dir):
+        from collections import deque
+        from concurrent.futures import ThreadPoolExecutor
+
+        res, price = self._alpha.resolution, self._alpha.price
+        reporter = self._reporter
+        user_after = _coerce_timestamp(after)
+        user_before = _coerce_timestamp(before)
+        concurrency = max(1, self._alpha.download_concurrency)
+
+        def _load(market):
+            eff_after = market.open_time if user_after is None else (
+                max(user_after, market.open_time) if market.open_time else user_after
+            )
+            eff_before = market.close_time if user_before is None else (
+                min(user_before, market.close_time) if market.close_time else user_before
+            )
+            if eff_after is None or eff_before is None or eff_after >= eff_before:
+                return market, None, None, []
+            bars = list(self._market_bars(client, market, eff_after, eff_before, res, price, data_dir))
+            return market, eff_after, eff_before, bars
+
+        # Prefetch up to `concurrency` markets ahead so their fetch (streaming) or
+        # parquet read (offline) overlaps, but yield in market order so the merge
+        # sees exactly the same sequence as the serial version.
+        markets_it = iter(markets)
+        with ThreadPoolExecutor(max_workers=concurrency) as pool:
+            window = deque()
+            for _ in range(concurrency):
+                m = next(markets_it, None)
+                if m is None:
+                    break
+                window.append(pool.submit(_load, m))
+            while window:
+                market, eff_after, eff_before, bars = window.popleft().result()
+                nxt = next(markets_it, None)
+                if nxt is not None:
+                    window.append(pool.submit(_load, nxt))
+                if eff_after is None:
+                    continue
+                reporter.market_started(market.id, market.id)
+                n = 0
+                for bar in bars:
+                    # Bound by the per-market clamped window so streaming and offline
+                    # see exactly the same bars (close_time is exclusive).
+                    if bar.t >= eff_before:
+                        break
+                    if bar.t < eff_after:
+                        continue
+                    n += 1
+                    if n % 256 == 0:
+                        reporter.fetched(market.id, 256)
+                    yield market, bar, None
+                reporter.market_fetch_done(market.id)
+                reporter.market_finished(market.id)
+
+    def _market_bars(self, client, market, eff_after, eff_before, res, price, data_dir):
+        if data_dir is None:
+            return iter_bars(client.orderbook, client.markets, market.id,
+                             eff_after, eff_before, resolution=res, price=price)
+        # Offline: read the pre-downloaded cache (populated concurrently in
+        # _prelog_file_skips). A missing file is a variant that was still building
+        # at download time (already counted in _n_bars_pending), so skip it.
+        path = bar_file(data_dir, market.id, res, price)
+        if not path.exists():
+            return iter(())
+        return iter_bars_parquet(path, price=price, after_ms=eff_after, before_ms=eff_before)
+
+    # ── reconcile loop ────────────────────────────────────────────
+
+    def _run_merged(self, streams):  # type: ignore[override]
+        first_seen: set[str] = set()
+        active: dict[str, Market] = {}
+        finalized: set[str] = set()
+        for market, bar, _ in merge_streams(streams):
+            self._reporter.consumed(market.id, 1)
+            if market.id in finalized:
+                continue
+            key = self._market_group.get(market.id, market.id)
+            prev = active.get(key)
+            if prev is not None and prev.id != market.id:
+                self._finalize_market(prev)
+                finalized.add(prev.id)
+            active[key] = market
+            if self._auto_fees:
+                self._fill._fee_model = PolymarketFeeModel.for_category(market.category)
+            self._process_bar(market, bar, market.id in first_seen)
+            first_seen.add(market.id)
+            expired = [
+                k for k, m in active.items()
+                if m.close_time and self._current_time >= m.close_time
+                and m.id not in finalized
+            ]
+            for k in expired:
+                self._finalize_market(active[k])
+                finalized.add(active[k].id)
+                del active[k]
+        for m in active.values():
+            if m.id not in finalized:
+                self._finalize_market(m)
+
+        if self._n_bars_pending:
+            self._reporter.status(
+                f"{self._n_bars_pending} market(s) skipped: bar export not built yet."
+            )
+
+    def _process_bar(self, market: Market, bar: Bar, seen: bool) -> None:
+        self._current_market = market
+        self._current_bar = bar
+        self._current_mid = bar.mid
+        self._current_time = bar.t
+        self._bars[market.id] = bar
+        self._market_objs[market.id] = market
+
+        # fill="next": reconcile the standing target against THIS bar before the
+        # strategy sees it — i.e. the bar after the one the target was set on.
+        if self._alpha.fill == "next":
+            self._reconcile(market, bar.mid, bar.t)
+
+        if not seen:
+            self._strategy.on_market_start(self._ctx, market, bar)
+        self._strategy.on_bar(self._ctx, market, bar)
+
+        # fill="close": reconcile within the same bar (mild look-ahead, opt-in).
+        if self._alpha.fill == "close":
+            self._reconcile(market, bar.mid, bar.t)
+
+        self._portfolio.mark_to_mid(market.id, bar.mid)
+        equity = self._portfolio.equity
+        self._equity_curve.append({
+            "t": bar.t,
+            "market_id": market.id,
+            "cash": self._portfolio.cash,
+            "equity": equity,
+            "pnl": equity - self._portfolio.initial_cash,
+        })
+
+    def _reconcile(self, market: Market, mid: float, t: int) -> None:
+        target = self._target.get(market.id)
+        if target is None or mid <= 0.0 or mid >= 1.0:
+            return
+        kind, val = target
+        if kind == "w":
+            equity = self._portfolio.equity
+            desired = (val * equity / mid) if val >= 0 else -(abs(val) * equity / (1.0 - mid))
+        else:
+            desired = val
+
+        pos = self._portfolio.position(market.id)
+        if pos.side == PositionSide.YES:
+            current = pos.shares
+        elif pos.side == PositionSide.NO:
+            current = -pos.shares
+        else:
+            current = 0.0
+
+        delta = desired - current
+        if abs(delta) < _EPS_SHARE:
+            return
+        # Both increases and reductions/flips are a BUY: BUY_NO against a held
+        # YES auto-merges to cash (the CTF way the tick portfolio already nets).
+        side = OrderSide.BUY_YES if delta > 0 else OrderSide.BUY_NO
+        size = abs(delta)
+        self._order_counter += 1
+        order = Order(
+            id=f"reb-{self._order_counter}",
+            market_id=market.id,
+            side=side,
+            order_type=OrderType.MARKET,
+            size=size,
+            submitted_at=t,
+        )
+        fill = self._fill.make_fill(order.id, market.id, side, size, mid, t)
+        if fill.size <= 0.0:
+            return
+        try:
+            self._apply_fill(order, fill)   # reuses cash check, portfolio, auto-merge, on_fill
+        except ValueError:
+            return                          # insufficient cash (counted in _apply_fill); skip
+        self._orders.append(order)
+
+    # ── result ────────────────────────────────────────────────────
+
+    def _build_result(self) -> BacktestResult:
+        res_ms = _RESOLUTION_MS.get(self._alpha.resolution)
+        periods_per_year = (_YEAR_MS / res_ms) if res_ms else None
+        targets = dict(self._targets)
+        targets.update(
+            mode="alpha",
+            resolution=self._alpha.resolution,
+            price=self._alpha.price,
+            fill=self._alpha.fill,
+        )
+        return BacktestResult(
+            portfolio=self._portfolio,
+            orders=self._orders,
+            settlements=self._settlements,
+            equity_curve=self._equity_curve,
+            cash_rejected=self._cash_rejected,
+            config=self._config,
+            targets=targets,
+            market_names={mid: m.question for mid, m in self._market_objs.items()},
+            periods_per_year=periods_per_year,
+        )

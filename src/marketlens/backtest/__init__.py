@@ -1,6 +1,8 @@
 """MarketLens backtesting engine for prediction market strategies."""
 
+from marketlens.backtest._bar import AlphaConfig, Bar
 from marketlens.backtest._engine import (
+    AlphaBacktestEngine,
     AsyncBacktestEngine,
     BacktestConfig,
     BacktestEngine,
@@ -8,7 +10,7 @@ from marketlens.backtest._engine import (
 )
 from marketlens.backtest._fees import FeeModel, FlatFeeModel, PolymarketFeeModel, ZeroFeeModel
 from marketlens.backtest._results import BacktestResult, MultiBacktestResult
-from marketlens.backtest._strategy import Strategy, StrategyContext
+from marketlens.backtest._strategy import AlphaContext, AlphaStrategy, Strategy, StrategyContext
 from marketlens.backtest._types import (
     Fill,
     Order,
@@ -21,7 +23,12 @@ from marketlens.backtest._types import (
 )
 
 __all__ = [
+    "AlphaBacktestEngine",
+    "AlphaConfig",
+    "AlphaContext",
+    "AlphaStrategy",
     "AsyncBacktestEngine",
+    "Bar",
     "BacktestConfig",
     "BacktestEngine",
     "BacktestResult",

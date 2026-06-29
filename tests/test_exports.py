@@ -52,6 +52,35 @@ def _series_404(mock_api, series_id: str) -> None:
     )
 
 
+# ── Bar batch download (download_market_bars_batch) ──────────────────
+
+
+class TestBarsBatchDownload:
+    def test_categorizes_ready_pending_not_found(self, mock_api, client, tmp_path):
+        body = b"PAR1" + b"x" * 64
+        url = f"{BUCKET_BASE}/metrics/r1-1m.parquet"
+        mock_api.get("/markets/r1/orderbook/metrics/export").mock(
+            return_value=httpx.Response(302, headers={"Location": url}))
+        mock_api.get(url).mock(return_value=httpx.Response(200, content=body))
+        mock_api.get("/markets/p1/orderbook/metrics/export").mock(
+            return_value=httpx.Response(
+                409, json={"error": {"code": "EXPORT_NOT_READY", "message": "pending"}}))
+        mock_api.get("/markets/n1/orderbook/metrics/export").mock(
+            return_value=httpx.Response(
+                404, json={"error": {"code": "NOT_FOUND", "message": "x"}}))
+
+        res = client.exports.download_market_bars_batch(
+            ["r1", "p1", "n1"], resolution="1m", price="mid",
+            data_dir=str(tmp_path), concurrency=1, progress=False,
+        )
+
+        assert res.ready == ["r1"]
+        assert res.pending == ["p1"]
+        assert res.not_found == ["n1"]
+        assert (tmp_path / "metrics-r1-1m.parquet").read_bytes() == body
+        assert os.fspath(res) == str(tmp_path)   # PathLike → usable as data_dir
+
+
 # ── Per-market download ────────────────────────────────────────────
 
 

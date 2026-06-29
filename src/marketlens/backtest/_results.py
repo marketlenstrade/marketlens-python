@@ -48,6 +48,7 @@ class BacktestResult:
         config: "BacktestConfig | None" = None,
         targets: dict | None = None,
         market_names: dict[str, str] | None = None,
+        periods_per_year: float | None = None,
     ) -> None:
         self._portfolio = portfolio
         self._orders = orders
@@ -197,6 +198,37 @@ class BacktestResult:
         else:
             self.capital_utilization = 0.0
 
+        # Turnover: total traded notional over average equity. Defined in both
+        # modes, so it is always a number (never None).
+        if equity_curve:
+            avg_equity = sum(float(p["equity"]) for p in equity_curve) / len(equity_curve)
+            self.turnover = total_volume / avg_equity if avg_equity > 0 else 0.0
+        else:
+            self.turnover = 0.0
+
+        # Time-series risk (alpha mode): annualized Sharpe/Sortino/volatility from
+        # the dense per-bar equity curve, replacing the per-settlement Sharpe and
+        # Sortino above (which suit the irregular tick curve). ``None`` for tick.
+        self.volatility: float | None = None
+        if periods_per_year is not None and equity_curve:
+            by_t: dict[int, float] = {}
+            for p in equity_curve:
+                by_t[int(p["t"])] = float(p["equity"])
+            eqs = [by_t[t] for t in sorted(by_t)]
+            rets = [
+                (eqs[i] - eqs[i - 1]) / eqs[i - 1]
+                for i in range(1, len(eqs)) if eqs[i - 1] > 0
+            ]
+            if len(rets) >= 2:
+                ann = periods_per_year ** 0.5
+                mean_r = sum(rets) / len(rets)
+                std_r = (sum((r - mean_r) ** 2 for r in rets) / (len(rets) - 1)) ** 0.5
+                self.volatility = std_r * ann
+                self.sharpe_ratio = (mean_r / std_r) * ann if std_r > 0 else None
+                downside = [r for r in rets if r < 0]
+                dd = (sum(r * r for r in downside) / len(rets)) ** 0.5 if downside else 0.0
+                self.sortino_ratio = (mean_r / dd) * ann if dd > 0 else None
+
     def summary(self) -> dict[str, Any]:
         s: dict[str, Any] = {
             "total_pnl": f"{self.total_pnl:.4f}",
@@ -210,6 +242,10 @@ class BacktestResult:
             "sortino_ratio": (
                 f"{self.sortino_ratio:.2f}" if self.sortino_ratio is not None else "N/A"
             ),
+            "volatility": (
+                f"{self.volatility:.2%}" if self.volatility is not None else "N/A"
+            ),
+            "turnover": f"{self.turnover:.2f}",
             "expectancy": f"{self.expectancy:.4f}",
             "avg_win": f"{self.avg_win:.4f}",
             "avg_loss": f"{self.avg_loss:.4f}",
@@ -456,6 +492,10 @@ class BacktestResult:
         obj._settlements = _read_settlements(src)
         obj._equity_curve = _read_equity(src)
 
+        # Defaults so runs saved before these fields existed still expose them.
+        obj.volatility = None
+        obj.turnover = None
+
         for key, val in (manifest.get("metrics") or {}).items():
             if key in ("profit_factor", "payoff_ratio"):
                 val = _restore_float(val)
@@ -483,6 +523,8 @@ class BacktestResult:
             "payoff_ratio": _json_float(self.payoff_ratio),
             "avg_holding_ms": self.avg_holding_ms,
             "capital_utilization": self.capital_utilization,
+            "volatility": self.volatility,
+            "turnover": self.turnover,
         }
 
 

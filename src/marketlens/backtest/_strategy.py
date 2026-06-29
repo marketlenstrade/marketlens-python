@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import bisect
 from abc import ABC
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from marketlens.backtest._types import (
     Fill,
@@ -12,6 +13,9 @@ from marketlens.backtest._types import (
 from marketlens.types.history import TradeEvent
 from marketlens.types.market import Market
 from marketlens.types.orderbook import OrderBook
+
+if TYPE_CHECKING:
+    from marketlens.backtest._bar import Bar
 
 
 class Strategy(ABC):
@@ -40,12 +44,88 @@ class Strategy(ABC):
         """Called when a market's data is exhausted, before settlement."""
 
 
+class _ContextBase:
+    """State queries shared by every backtest mode.
 
-class StrategyContext:
-    """Provided to strategy hooks for submitting orders and querying state."""
+    Both the tick-level :class:`StrategyContext` and the bar-level
+    :class:`AlphaContext` read position, cash, equity, time, and reference
+    prices the same way; only how you *act* (place orders vs set targets)
+    differs, so the verbs live on the subclasses.
+    """
 
     def __init__(self, engine: Any) -> None:
         self._engine = engine
+
+    # ── State queries ─────────────────────────────────────────────
+
+    def position(self, market_id: str | None = None) -> Position:
+        """Net position for the market (YES and NO legs combined)."""
+        mid = market_id or self._engine.current_market.id
+        return self._engine.portfolio.position(mid)
+
+    def yes_position(self, market_id: str | None = None) -> Position:
+        """The YES leg on its own. Useful with ``auto_merge=False``, where the
+        YES and NO legs are held separately; ``position()`` returns their net."""
+        mid = market_id or self._engine.current_market.id
+        return self._engine.portfolio.yes_position(mid)
+
+    def no_position(self, market_id: str | None = None) -> Position:
+        """The NO leg on its own. See :meth:`yes_position`."""
+        mid = market_id or self._engine.current_market.id
+        return self._engine.portfolio.no_position(mid)
+
+    @property
+    def cash(self) -> float:
+        return self._engine.portfolio.cash
+
+    @property
+    def equity(self) -> float:
+        return self._engine.portfolio.equity
+
+    @property
+    def market(self) -> Market:
+        return self._engine.current_market
+
+    @property
+    def time(self) -> int:
+        return self._engine.current_time
+
+    def reference_price(self, market_id: str | None = None) -> float | None:
+        """Return the latest reference price for the market's underlying at the current time."""
+        mid = market_id or self._engine.current_market.id
+        underlying = self._engine._market_underlying.get(mid)
+        return self._engine.get_reference_price(underlying, self._engine.current_time)
+
+    def reference_prices(self, market_id: str | None = None) -> list[tuple[int, float]]:
+        """Return the full reference price history as ``[(timestamp_ms, price), ...]``.
+
+        Only includes prices up to the current backtest time.
+        """
+        mid = market_id or self._engine.current_market.id
+        underlying = self._engine._market_underlying.get(mid)
+        if underlying is None or underlying not in self._engine._ref_prices:
+            return []
+        all_prices = self._engine._ref_prices[underlying]
+        # Only return prices up to current time to prevent lookahead.
+        end = bisect.bisect_right(all_prices, (self._engine.current_time, float("inf")))
+        return all_prices[:end]
+
+    def log_signal(self, **metadata: Any) -> None:
+        """No-op; lets a strategy record signal metadata without branching."""
+
+    # ── Backwards-compatible aliases ──────────────────────────────
+
+    @property
+    def current_market(self) -> Market:
+        return self.market
+
+    @property
+    def current_time(self) -> int:
+        return self.time
+
+
+class StrategyContext(_ContextBase):
+    """Provided to tick-level strategy hooks for submitting orders and querying state."""
 
     # ── Order submission ──────────────────────────────────────────
 
@@ -152,93 +232,81 @@ class StrategyContext:
 
     # ── State queries ─────────────────────────────────────────────
 
-    def position(self, market_id: str | None = None) -> Position:
-        """Net position for the market (YES and NO legs combined)."""
-        mid = market_id or self._engine.current_market.id
-        return self._engine.portfolio.position(mid)
-
-    def yes_position(self, market_id: str | None = None) -> Position:
-        """The YES leg on its own. Useful with ``auto_merge=False``, where the
-        YES and NO legs are held separately; ``position()`` returns their net."""
-        mid = market_id or self._engine.current_market.id
-        return self._engine.portfolio.yes_position(mid)
-
-    def no_position(self, market_id: str | None = None) -> Position:
-        """The NO leg on its own. See :meth:`yes_position`."""
-        mid = market_id or self._engine.current_market.id
-        return self._engine.portfolio.no_position(mid)
-
-    @property
-    def cash(self) -> float:
-        return self._engine.portfolio.cash
-
-    @property
-    def equity(self) -> float:
-        return self._engine.portfolio.equity
-
     @property
     def open_orders(self) -> list[Order]:
         return self._engine.open_orders
-
-    @property
-    def market(self) -> Market:
-        return self._engine.current_market
 
     @property
     def book(self) -> OrderBook:
         return self._engine.current_book
 
     @property
-    def time(self) -> int:
-        return self._engine.current_time
-
-    @property
     def books(self) -> dict[str, OrderBook]:
         return dict(self._engine._books)
 
-    def reference_price(self, market_id: str | None = None) -> float | None:
-        """Return the latest reference price for the market's underlying at the current time."""
-        mid = market_id or self._engine.current_market.id
-        underlying = self._engine._market_underlying.get(mid)
-        return self._engine.get_reference_price(underlying, self._engine.current_time)
-
-    def reference_prices(self, market_id: str | None = None) -> list[tuple[int, float]]:
-        """Return the full reference price history as ``[(timestamp_ms, price), ...]``.
-
-        Only includes prices up to the current backtest time.
-        """
-        mid = market_id or self._engine.current_market.id
-        underlying = self._engine._market_underlying.get(mid)
-        if underlying is None or underlying not in self._engine._ref_prices:
-            return []
-        all_prices = self._engine._ref_prices[underlying]
-        # Only return prices up to current time to prevent lookahead
-        import bisect
-        end = bisect.bisect_right(all_prices, (self._engine.current_time, float("inf")))
-        return all_prices[:end]
-
-    # ── Signal logging ──────────────────────────────────────────
-
-    def log_signal(self, **metadata: Any) -> None:
-        """No-op in backtest; live context attaches metadata to orders."""
-
     # ── Backwards-compatible aliases ──────────────────────────────
-
-    @property
-    def current_market(self) -> Market:
-        return self.market
 
     @property
     def current_book(self) -> OrderBook:
         return self.book
 
     @property
-    def current_time(self) -> int:
-        return self.time
-
-    @property
     def event_books(self) -> dict[str, OrderBook]:
         return self.books
+
+
+# ── Alpha (signal-level) ─────────────────────────────────────────────
+
+
+class AlphaStrategy(Strategy):
+    """Bar-cadence, signal-driven strategy.
+
+    Override :meth:`on_bar` and set a per-market *target* exposure; the engine
+    trades the delta to the target at the next bar's mid. You declare desired
+    state, not orders, mirroring ``order_target_percent`` in standard tooling.
+    """
+
+    def on_bar(self, ctx: AlphaContext, market: Market, bar: "Bar") -> None:
+        """Called once per market per bar at the configured resolution."""
+
+    def on_market_start(
+        self, ctx: AlphaContext, market: Market, bar: "Bar",
+    ) -> None:
+        """Called once when a new market begins, with its first bar."""
+
+    def on_market_end(self, ctx: AlphaContext, market: Market) -> None:
+        """Called when a market's bars are exhausted, before settlement."""
+
+
+class AlphaContext(_ContextBase):
+    """Provided to :class:`AlphaStrategy` hooks. Set targets; read state.
+
+    A *target* is signed YES exposure: positive holds YES, negative holds the
+    NO side (``|x|`` shares), zero is flat. Targets persist until changed, so
+    re-asserting the same target each bar trades nothing.
+    """
+
+    def target_weight(self, weight: float, *, market_id: str | None = None) -> None:
+        """Target signed position notional as a fraction of current equity.
+
+        ``+0.10`` => long YES worth 10% of equity at the fill mid; ``-0.10`` =>
+        the NO side; ``0`` => flat. Shares are recomputed from equity and the
+        fill-bar mid at each rebalance (the ``order_target_percent`` convention).
+        """
+        self._engine.set_target(market_id, weight=float(weight))
+
+    def target_position(self, shares: float, *, market_id: str | None = None) -> None:
+        """Target signed share count: ``+N`` => N YES shares, ``-N`` => N NO shares."""
+        self._engine.set_target(market_id, shares=float(shares))
+
+    @property
+    def bar(self) -> "Bar":
+        return self._engine.current_bar
+
+    @property
+    def bars(self) -> dict[str, "Bar"]:
+        """The latest bar for every market live at this timestamp."""
+        return dict(self._engine._bars)
 
 
 def _is_trade_only(strategy: Strategy) -> bool:
@@ -248,3 +316,8 @@ def _is_trade_only(strategy: Strategy) -> bool:
         type(strategy).on_book is Strategy.on_book
         and "on_book" not in vars(strategy)
     )
+
+
+def _is_alpha(strategy: Any) -> bool:
+    """True if the strategy is bar-cadence (alpha), routing to the bar engine."""
+    return isinstance(strategy, AlphaStrategy)

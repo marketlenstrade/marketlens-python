@@ -130,6 +130,42 @@ loaded.config, loaded.targets               # config + run inputs preserved
 
 The directory holds a JSON manifest plus four Parquet files (`trades`, `orders`, `settlements`, `equity`) — readable directly from pandas/duckdb.
 
+### Signal-level (alpha) backtest
+
+Subclass `AlphaStrategy` instead of `Strategy` for low-to-mid-frequency, signal-driven strategies over long windows. The engine reads one bar per market per `resolution` from order-book metrics (or trade candles), far cheaper than the full L2 firehose, so a multi-week or multi-month window stays tractable. You set a per-market **target** in `on_bar` and the engine trades the delta to it; there is no order, queue, or latency to model.
+
+```python
+from marketlens.backtest import AlphaStrategy
+
+class MomentumTilt(AlphaStrategy):
+    def on_market_start(self, ctx, market, bar):
+        self._prev = None
+
+    def on_bar(self, ctx, market, bar):
+        if self._prev is not None:
+            # Tilt toward YES on a rising mid, the NO side on a falling one.
+            ctx.target_weight(max(-1.0, min(1.0, 50 * (bar.mid - self._prev))))
+        self._prev = bar.mid
+
+result = client.backtest(
+    MomentumTilt(), "btc-up-or-down-5m",
+    initial_cash=10_000,
+    resolution="1m", price="mid", fill="next", slippage_bps=5,
+    after="2026-03-01T00:00:00Z", before="2026-03-08T00:00:00Z",
+)
+```
+
+`ctx` provides `target_weight()` (signed fraction of equity: `+0.1` long YES, `-0.1` the NO side, `0` flat), `target_position()` (signed shares), `bar` (mid, spread, depth, plus OHLCV when `price="close"`), `bars` (every market live this bar), and the same `position()`, `equity`, and `reference_price()` as the tick model. Targets persist until you change them, so re-asserting the same target trades nothing.
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `resolution` | `"1m"` | Bar cadence: `1m` to `1d` for `price="mid"`, `1s` to `1d` for `price="close"` |
+| `price` | `"mid"` | Bar price: `"mid"` (order-book metrics) or `"close"` (trade candles) |
+| `fill` | `"next"` | Fill at the next bar's mid (no look-ahead), or `"close"` (same bar) |
+| `slippage_bps` | `0` | Price penalty per fill; `5` is a realistic starting point |
+
+Results use the same `BacktestResult`, except `sharpe_ratio` and `sortino_ratio` are annualized time-series ratios from the per-bar equity curve (not per-settlement), plus `turnover` and `volatility`. The signal model drops what the tick model simulates (queue position, partial fills, latency, price impact, maker/taker, spread, intrabar path): it measures signal quality net of a stylized cost (slippage and fees), so confirm anything whose edge lives in the microstructure on the tick engine. The tick-only options (`latency_ms`, `queue_position`, `limit_fill_rate`, `settlement_delay_ms`, `include_trades`, `coalesce`) do not apply.
+
 ## Data
 
 All list methods return auto-paginating iterators with `.to_list()` and `.to_dataframe()`.
@@ -332,6 +368,7 @@ Async: use `AsyncMarketLens` — every method has an async counterpart.
 | [`backtest_limit_orders.py`](examples/backtest_limit_orders.py) | Market-making with CLOB queue position simulation |
 | [`backtest_surface.py`](examples/backtest_surface.py) | Surface mispricing with spot-distance filtering |
 | [`backtest_portfolio.py`](examples/backtest_portfolio.py) | Multi-series portfolio with shared capital |
+| [`backtest_alpha.py`](examples/backtest_alpha.py) | Signal-level momentum tilt with target weights |
 | [`execution_cost.py`](examples/execution_cost.py) | Book depth, spread, impact and slippage |
 | [`microstructure.py`](examples/microstructure.py) | Feature matrix — does imbalance predict outcome? |
 | [`implied_surfaces.py`](examples/implied_surfaces.py) | Survival, density, and barrier surfaces |

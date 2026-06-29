@@ -160,6 +160,12 @@ class _MarketMutablePosition:
         self._yes_position.mark_to_market(yes_price)
         self._no_position.mark_to_market(no_price)
 
+    def mark_to_mid(self, mid: float) -> None:
+        """Mark both legs to a single midpoint: YES at ``mid``, NO at ``1 - mid``.
+        The scalar analog of :meth:`mark_to_market` for the bar (alpha) engine."""
+        self._yes_position.mark_to_market(mid)
+        self._no_position.mark_to_market(1.0 - mid)
+
     def snapshot(self) -> Position:
         y = self._yes_position
         n = self._no_position
@@ -304,6 +310,9 @@ class Portfolio:
 
     def mark_to_market(self, market_id: str, book: OrderBook) -> None:
         self._get_or_create(market_id).mark_to_market(book)
+
+    def mark_to_mid(self, market_id: str, mid: float) -> None:
+        self._get_or_create(market_id).mark_to_mid(mid)
 
     def can_sell(self, market_id: str, side: OrderSide, size: float) -> bool:
         pos = self._get_or_create(market_id)

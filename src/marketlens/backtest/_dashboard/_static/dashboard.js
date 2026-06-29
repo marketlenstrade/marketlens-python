@@ -91,6 +91,7 @@ const METRIC_GROUPS = [
             { key: 'sharpe_ratio', label: 'Sharpe', fmt: fmtRatio },
             { key: 'sortino_ratio', label: 'Sortino', fmt: fmtRatio },
             { key: 'max_drawdown', label: 'Max DD', fmt: v => fmtPct(v != null ? -Math.abs(v) : null), signed: true, invertSign: true },
+            { key: 'volatility', label: 'Volatility', fmt: fmtPct, optional: true },
         ],
     },
     {
@@ -99,6 +100,7 @@ const METRIC_GROUPS = [
             { key: 'win_rate', label: 'Win Rate', fmt: fmtPct },
             { key: 'profit_factor', label: 'Profit Factor', fmt: fmtRatio },
             { key: 'total_trades', label: 'Trades', fmt: fmtInt },
+            { key: 'turnover', label: 'Turnover', fmt: fmtRatio },
         ],
     },
 ];
@@ -190,7 +192,7 @@ function renderHeader() {
 
 // ── KPI Groups (Returns / Risk / Trading) ─────────────────
 
-const LOWER_IS_BETTER = new Set(['max_drawdown']);
+const LOWER_IS_BETTER = new Set(['max_drawdown', 'volatility', 'turnover']);
 
 function bestRunIndex(key, runs) {
     let bestIdx = 0;
@@ -218,6 +220,7 @@ function renderKPIs(runs) {
 
     el.innerHTML = METRIC_GROUPS.map(group => {
         const rows = group.metrics.map(d => {
+            if (d.optional && runs.every(r => r.metrics[d.key] == null)) return '';
             if (!isCompare) {
                 const v = runs[0].metrics[d.key];
                 const formatted = d.fmt(v);
