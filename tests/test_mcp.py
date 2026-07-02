@@ -14,7 +14,7 @@ pytest.importorskip("mcp")
 
 import marketlens.mcp.server as srvmod
 from marketlens.mcp import _format as fmt
-from tests.conftest import (
+from conftest import (
     SAMPLE_MARKET,
     SAMPLE_ORDERBOOK,
 )
