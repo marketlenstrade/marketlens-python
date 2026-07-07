@@ -62,6 +62,12 @@ result = client.backtest(strategy, "btc-multi-strikes-weekly",
                          initial_cash=10_000,
                          after="2026-05-08T00:00:00Z")
 
+# Weather series replay like strikes: every temperature bucket of the
+# city's daily chain runs together.
+result = client.backtest(strategy, "nyc-daily-weather",
+                         initial_cash=10_000,
+                         after="2026-07-07T18:00:00Z", before="2026-07-08T02:00:00Z")
+
 # A sports league has several kinds of bets under one ticker (moneyline,
 # spread, totals, player props). Pass `subtype` to backtest just one of
 # them across the day's games.
@@ -255,7 +261,7 @@ for market, book in walk:
 | Type | Source | Stats |
 |------|--------|-------|
 | `survival` | "above $X" multi-strike markets | `implied_mean`, `implied_cv`, `implied_skew` |
-| `density` | Neg-risk range + tail markets | `implied_mean`, `implied_cv`, `implied_skew` |
+| `density` | Neg-risk range + tail markets (incl. daily weather) | `implied_mean`, `implied_cv`, `implied_skew` |
 | `barrier` | Hit-price reach/dip markets | `implied_peak`, `implied_trough` |
 
 Pre-computed surfaces updated every 5 minutes are also available via `client.signals.surfaces()`.
