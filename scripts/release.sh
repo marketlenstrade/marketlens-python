@@ -14,7 +14,7 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
-REPO="pawelsibyl/marketlens-python"
+REPO="marketlenstrade/marketlens-python"
 
 if ! command -v gh >/dev/null 2>&1; then
   echo "error: gh CLI not found (brew install gh)" >&2
