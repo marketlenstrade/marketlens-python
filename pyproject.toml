@@ -28,6 +28,11 @@ dev = [
     "mcp>=1.2",
 ]
 
+[project.urls]
+Homepage = "https://marketlens.trade"
+Repository = "https://github.com/pawelsibyl/marketlens-python"
+Changelog = "https://github.com/pawelsibyl/marketlens-python/blob/main/CHANGELOG.md"
+
 [project.scripts]
 marketlens-mcp = "marketlens.mcp:main"
 
