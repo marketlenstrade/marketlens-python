@@ -4,6 +4,11 @@ import os
 # accidentally exercise rich's Live renderer in non-TTY pytest output.
 os.environ.setdefault("MARKETLENS_PROGRESS", "0")
 
+# Pin a dummy key so the suite behaves identically with or without a real key
+# in the developer's shell: the run_backtest subprocess inherits this env, and
+# no test may ever reach the network with a real key.
+os.environ["MARKETLENS_API_KEY"] = "mk_test_key"
+
 import pytest
 import respx
 import httpx
