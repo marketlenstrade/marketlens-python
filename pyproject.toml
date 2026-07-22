@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "marketlens"
-version = "1.6.0"
+version = "1.6.1"
 description = "Python SDK for Polymarket order book data and backtesting. Tick-level L2 snapshots, billions of deltas, full book reconstruction, and a strategy backtesting engine with realistic execution."
 readme = "README.md"
 license = "MIT"

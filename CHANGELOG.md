@@ -2,6 +2,10 @@
 
 All notable changes to the `marketlens` Python SDK, version by version.
 
+## [1.6.1] 2026-07-22
+
+* Packaging only, no code changes. The package metadata now carries `[project.urls]` (Homepage, Repository, Changelog), so PyPI links to marketlens.trade and the GitHub repo from the project sidebar. The 1.6.0 wheel was built before those URLs were added and shipped without them.
+
 ## [1.6.0] 2026-06-29
 
 * New signal-level backtest for long-window, low-to-mid-frequency alphas. Subclass `AlphaStrategy` instead of `Strategy` and pass it to the same `client.backtest(...)`: the engine reads one bar per market per `resolution` from order-book metrics (or trade candles) rather than replaying every L2 update, so a multi-week or multi-month window stays tractable where the tick model would download and process far too much data. You set a per-market target in `on_bar` and the engine trades the delta to it; there is no order, queue, or latency to model.
