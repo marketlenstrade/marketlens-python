@@ -1,14 +1,16 @@
-# marketlens
+# Marketlens
 
-Backtest prediction market strategies on tick-level L2 order book data from Polymarket.
+Backtest prediction market strategies on tick-level L2 order book data from Polymarket. Marketlens records every book update, replays it through an execution-realistic engine, and hands you the results as metrics and DataFrames. Write a `Strategy`, point it at a market or series, and know whether it makes money.
+
+[PyPI](https://pypi.org/project/marketlens/) · [Documentation](https://marketlens.trade/docs) · [Changelog](CHANGELOG.md)
 
 ```bash
 pip install marketlens
 ```
 
-## Backtest
+Python 3.10+. Get a free API key at [marketlens.trade](https://marketlens.trade) and export it as `MARKETLENS_API_KEY`. Order book history starts 2026-03-01.
 
-Define a strategy, run it against any market or series — the engine replays full L2 book state tick-by-tick with realistic execution.
+## Quickstart
 
 ```python
 from marketlens import MarketLens
@@ -27,7 +29,7 @@ class OpeningFader(Strategy):
             ctx.buy_no(size=200)
         self._entered = True
 
-client = MarketLens()  # uses MARKETLENS_API_KEY env var
+client = MarketLens()  # reads MARKETLENS_API_KEY
 result = client.backtest(
     OpeningFader(), "btc-up-or-down-5m",
     initial_cash=10_000,
@@ -36,82 +38,131 @@ result = client.backtest(
 print(result.summary())
 ```
 
-Pass a market ID, series slug, or a list of series for multi-asset portfolios:
+## Two engines
 
-Always pass `after`/`before` — series and multi-strike runs are otherwise unbounded.
+`client.backtest()` runs one of two engines, chosen by your strategy's base class:
+
+- **Execution** (`Strategy`): replays the full L2 book tick by tick and simulates how your orders actually fill: latency, limit orders, CLOB queue position, fees, settlement. Use it when the edge lives in how you trade.
+- **Alpha** (`AlphaStrategy`): one bar per market per `resolution`, built from order book metrics or trade candles. You declare a target exposure and the engine trades the delta to it. Orders, queues, and latency are out of the model, so multi-week and multi-month windows stay fast. Use it to test whether a signal predicts price at all.
+
+A common loop: prove the signal on the alpha engine over a long window, then confirm the execution on the tick engine over a short one.
+
+Docs: [Execution](https://marketlens.trade/docs/backtesting) · [Alpha](https://marketlens.trade/docs/backtesting/alpha) · [Runs](https://marketlens.trade/docs/backtesting/runs) · [Examples](https://marketlens.trade/docs/backtesting/examples)
+
+## Execution backtests
+
+The target is a market UUID, a series slug, or a list of either. Always pass `after`/`before` on series runs, they are otherwise unbounded.
+
+One market, full lifetime by default:
 
 ```python
-# Single market — replays the full lifetime of the market by default
 result = client.backtest(strategy, market_id, initial_cash=10_000)
-
-# Rolling series — walks every market in [after, before)
-result = client.backtest(strategy, "btc-up-or-down-5m", initial_cash=10_000,
-                         after="2026-04-15T01:45:00Z",
-                         before="2026-04-15T02:00:00Z")
-
-# Multi-asset portfolio — shared capital across series
-result = client.backtest(strategy,
-    ["btc-up-or-down-5m", "eth-up-or-down-5m", "sol-up-or-down-5m"],
-    initial_cash=10_000,
-    after="2026-04-15T01:45:00Z", before="2026-04-15T02:00:00Z")
-
-# Structured product — replays every strike market in the matched event(s).
-# Pass `after` to pick a single recent event; events are typically week-long,
-# so a wide window can pull millions of book events.
-result = client.backtest(strategy, "btc-multi-strikes-weekly",
-                         initial_cash=10_000,
-                         after="2026-05-08T00:00:00Z")
-
-# Weather series replay like strikes: every temperature bucket of the
-# city's daily chain runs together.
-result = client.backtest(strategy, "nyc-daily-weather",
-                         initial_cash=10_000,
-                         after="2026-07-07T18:00:00Z", before="2026-07-08T02:00:00Z")
-
-# A sports league has several kinds of bets under one ticker (moneyline,
-# spread, totals, player props). Pass `subtype` to backtest just one of
-# them across the day's games.
-result = client.backtest(strategy, "mlb", subtype="moneyline",
-                         initial_cash=10_000,
-                         after="2026-06-21T17:30:00Z", before="2026-06-22T03:30:00Z")
 ```
 
-Rolling and structured series hold one kind of bet, so they run whole, no `subtype` needed. A sports league bundles several kinds of bets under one ticker (moneyline, spread, totals, player props), so pass `subtype` to pick one; leave it off and the run stops and lists the choices, so different kinds of bets never end up in the same backtest. List a series' bet types with `client.markets.list(series_id=..., subtype=...)` or by reading that error.
+A rolling series, every market in `[after, before)`:
 
-### Execution realism
+```python
+result = client.backtest(
+    strategy, "btc-up-or-down-5m", initial_cash=10_000,
+    after="2026-04-15T01:45:00Z", before="2026-04-15T02:00:00Z",
+)
+```
 
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `latency_ms` | `50` | Order-to-fill delay in milliseconds |
-| `queue_position` | `False` | CLOB queue modeling — fills only when queue-ahead is drained by trades |
-| `limit_fill_rate` | `0.1` | Fraction of trade size filling your limit (ignored when `queue_position=True`) |
-| `slippage_bps` | `0` | Extra price penalty on market order fills |
-| `fees` | `"polymarket"` | Auto-detects crypto vs sports fee schedule; `None` for zero fees |
-| `max_fill_fraction` | `1.0` | Max fraction of each book level consumed per order |
-| `include_trades` | `True` | Fetch trade data (required for limit fills and `on_trade`) |
-| `settlement_delay_ms` | `5000` | Delay before filled tokens become sellable (on-chain settlement) |
+A portfolio with shared capital across series:
 
-The portfolio automatically handles **CTF merge** (opposite-side netting): buying NO while holding YES nets matched pairs at $1 per share. No explicit merge call needed in backtests.
+```python
+result = client.backtest(
+    strategy, ["btc-up-or-down-5m", "eth-up-or-down-5m", "sol-up-or-down-5m"],
+    initial_cash=10_000,
+    after="2026-04-15T01:45:00Z", before="2026-04-15T02:00:00Z",
+)
+```
 
-### Strategy hooks
+A structured product, every strike in the matched event replayed together (`ctx.books` holds all of them). Weather series run the same way, every temperature bucket of the day's chain at once:
 
-| Hook | Called when |
-|------|------------|
-| `on_book(ctx, market, book)` | Every book state change (snapshot or delta) |
-| `on_trade(ctx, market, book, trade)` | Every executed trade |
-| `on_fill(ctx, market, fill)` | Your order is filled |
-| `on_market_start(ctx, market, book)` | A new market begins |
-| `on_market_end(ctx, market)` | A market ends, before settlement |
+```python
+result = client.backtest(
+    strategy, "btc-multi-strikes-weekly", initial_cash=10_000,
+    after="2026-05-08T00:00:00Z",  # picks the next event ending after this
+)
+```
 
-`ctx` provides: `buy_yes()`, `sell_yes()`, `buy_no()`, `sell_no()`, `cancel()`, `cancel_all()`, `position()`, `open_orders`, `books` (all active order books), and `reference_price()` (Binance spot for crypto underlyings).
+A sports league, one bet type across the day's games:
 
-### Results
+```python
+result = client.backtest(
+    strategy, "mlb", subtype="moneyline", initial_cash=10_000,
+    after="2026-06-21T17:30:00Z", before="2026-06-22T03:30:00Z",
+)
+```
+
+Rolling and structured series hold one kind of bet and run whole. A sports league bundles several under one ticker (moneyline, spread, totals, player props), so pass `subtype` to pick one; leave it off and the run stops and lists the choices, so different kinds of bets never mix in one backtest.
+
+The portfolio handles CTF merge automatically: buying NO while holding YES nets matched pairs back to cash at $1 per share.
+
+## Alpha backtests
+
+Subclass `AlphaStrategy`, read the bar, set a target:
+
+```python
+from marketlens.backtest import AlphaStrategy
+
+class MomentumTilt(AlphaStrategy):
+    def on_market_start(self, ctx, market, bar):
+        self._prev = None
+
+    def on_bar(self, ctx, market, bar):
+        if self._prev is not None:
+            ctx.target_weight(max(-1.0, min(1.0, 50 * (bar.mid - self._prev))))
+        self._prev = bar.mid
+
+result = client.backtest(
+    MomentumTilt(), "btc-up-or-down-5m",
+    initial_cash=10_000,
+    resolution="1m", price="mid", fill="next", slippage_bps=5,
+    after="2026-03-01T00:00:00Z", before="2026-03-08T00:00:00Z",
+)
+```
+
+A target is signed YES exposure: `ctx.target_weight(+0.1)` holds YES worth 10% of equity, `-0.1` holds the NO side, `0` goes flat. `ctx.target_position(n)` targets share counts instead. Targets persist until changed, so re-asserting the same target trades nothing.
+
+Alpha results add annualized time-series `sharpe_ratio`, `sortino_ratio`, `volatility`, and `turnover` from the per-bar equity curve. The signal model measures signal quality net of a stylized cost (slippage and fees); anything whose edge lives in the microstructure (queue position, partial fills, latency, spread capture) needs confirming on the tick engine.
+
+## Download once, iterate offline
+
+Pass `data_dir=` to any backtest. Missing files download on the first run and are reused after, so editing a strategy and re-running costs no API events:
+
+```python
+result = client.backtest(
+    strategy, "btc-up-or-down-5m",
+    data_dir="data/btc-5m",
+    initial_cash=10_000,
+    after="2026-03-01", before="2026-03-08",
+)
+# tweak the strategy, run again: replays entirely from disk
+```
+
+This works for both engines (tick history and alpha bars). To prefetch explicitly, use exports; the result is `os.PathLike` and passes straight into `data_dir=`:
+
+```python
+data = client.exports.download_series(
+    "btc-up-or-down-5m", after="2026-03-01", before="2026-03-08")
+print(data.ready, data.pending, data.failed, data.events_charged)
+
+result = client.backtest(strategy, "btc-up-or-down-5m", data_dir=data,
+                         initial_cash=10_000,
+                         after="2026-03-01", before="2026-03-08")
+```
+
+Exports are Parquet files (snapshots, deltas, trades, and reference prices for the underlying), built server-side. A single market comes via `client.exports.download(market_id)`, which raises `ExportNotReadyError` until its file is built; `download_series` lists such markets under `result.pending` and skips them.
+
+## Results
 
 ```python
 result.total_pnl            # net P&L
 result.total_return         # as decimal (0.12 = 12%)
 result.win_rate             # fraction of profitable settlements
-result.sharpe_ratio         # per-settlement Sharpe
+result.sharpe_ratio         # per-settlement (annualized time-series in alpha runs)
 result.sortino_ratio        # downside-adjusted
 result.max_drawdown         # peak-to-trough as fraction
 result.profit_factor        # gross wins / gross losses
@@ -124,79 +175,35 @@ result.equity_df()          # equity curve time series
 result.by_series()          # per-series P&L attribution
 ```
 
-Persist a result to disk and reload it later:
+`result.show()` opens an interactive dashboard in the browser. Persist runs and reload or compare them later:
 
 ```python
 from marketlens.backtest import BacktestResult
 
-result.save("runs/spread-timer")            # or overwrite=True
-loaded = BacktestResult.load("runs/spread-timer")
-loaded.config, loaded.targets               # config + run inputs preserved
+result.save("runs/spread-timer")
+loaded = BacktestResult.load("runs/spread-timer")     # config + run inputs preserved
+BacktestResult.dashboard("runs/a", "runs/b")          # compare saved runs
 ```
 
-The directory holds a JSON manifest plus four Parquet files (`trades`, `orders`, `settlements`, `equity`) — readable directly from pandas/duckdb.
+The saved directory holds a JSON manifest plus four Parquet files (`trades`, `orders`, `settlements`, `equity`), readable directly from pandas or duckdb.
 
-### Signal-level (alpha) backtest
-
-Subclass `AlphaStrategy` instead of `Strategy` for low-to-mid-frequency, signal-driven strategies over long windows. The engine reads one bar per market per `resolution` from order-book metrics (or trade candles), far cheaper than the full L2 firehose, so a multi-week or multi-month window stays tractable. You set a per-market **target** in `on_bar` and the engine trades the delta to it; there is no order, queue, or latency to model.
+Pass a list of strategies to race them over the same window; you get a `MultiBacktestResult` with overlaid equity curves:
 
 ```python
-from marketlens.backtest import AlphaStrategy
-
-class MomentumTilt(AlphaStrategy):
-    def on_market_start(self, ctx, market, bar):
-        self._prev = None
-
-    def on_bar(self, ctx, market, bar):
-        if self._prev is not None:
-            # Tilt toward YES on a rising mid, the NO side on a falling one.
-            ctx.target_weight(max(-1.0, min(1.0, 50 * (bar.mid - self._prev))))
-        self._prev = bar.mid
-
 result = client.backtest(
-    MomentumTilt(), "btc-up-or-down-5m",
-    initial_cash=10_000,
-    resolution="1m", price="mid", fill="next", slippage_bps=5,
-    after="2026-03-01T00:00:00Z", before="2026-03-08T00:00:00Z",
+    [maker, fader], "btc-up-or-down-5m",
+    labels=["maker", "fader"], initial_cash=10_000,
+    after="2026-04-15T01:45:00Z", before="2026-04-15T02:00:00Z",
 )
+result.show()
 ```
 
-`ctx` provides `target_weight()` (signed fraction of equity: `+0.1` long YES, `-0.1` the NO side, `0` flat), `target_position()` (signed shares), `bar` (mid, spread, depth, plus OHLCV when `price="close"`), `bars` (every market live this bar), and the same `position()`, `equity`, and `reference_price()` as the tick model. Targets persist until you change them, so re-asserting the same target trades nothing.
+## Market data
 
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `resolution` | `"1m"` | Bar cadence: `1m` to `1d` for `price="mid"`, `1s` to `1d` for `price="close"` |
-| `price` | `"mid"` | Bar price: `"mid"` (order-book metrics) or `"close"` (trade candles) |
-| `fill` | `"next"` | Fill at the next bar's mid (no look-ahead), or `"close"` (same bar) |
-| `slippage_bps` | `0` | Price penalty per fill; `5` is a realistic starting point |
-
-Results use the same `BacktestResult`, except `sharpe_ratio` and `sortino_ratio` are annualized time-series ratios from the per-bar equity curve (not per-settlement), plus `turnover` and `volatility`. The signal model drops what the tick model simulates (queue position, partial fills, latency, price impact, maker/taker, spread, intrabar path): it measures signal quality net of a stylized cost (slippage and fees), so confirm anything whose edge lives in the microstructure on the tick engine. The tick-only options (`latency_ms`, `queue_position`, `limit_fill_rate`, `settlement_delay_ms`, `include_trades`, `coalesce`) do not apply.
-
-## Data
-
-All list methods return auto-paginating iterators with `.to_list()` and `.to_dataframe()`.
-
-### Order book replay
-
-`walk()` replays full L2 book state for any market or series. Pass a market ID, series slug, or condition ID — the same interface for everything.
+Everything the backtester replays is also queryable directly. List methods return auto-paginating iterators with `.to_list()` and `.to_dataframe()`; pass `take=N` to cap total items (iterators otherwise follow cursors to the end).
 
 ```python
-walk = client.orderbook.walk(
-    "btc-up-or-down-5m",
-    after="2026-04-15T01:45:00Z", before="2026-04-15T01:50:00Z",
-)
-for market, book in walk:
-    print(market.question, book.midpoint, book.spread_bps())
-
-# As a DataFrame
-df = client.orderbook.walk(
-    market_id, after=start, before=end,
-).to_dataframe()
-```
-
-### Candles, trades, markets
-
-```python
+active = client.markets.list(status="active", sort="-volume", take=10)
 candles = client.markets.candles(
     market_id, resolution="1m",
     after="2026-04-15T01:45:00Z", before="2026-04-15T01:50:00Z",
@@ -205,70 +212,17 @@ trades = client.markets.trades(
     market_id,
     after="2026-04-15T01:45:00Z", before="2026-04-15T01:50:00Z",
 ).to_list()
-active = client.markets.list(status="active", sort="-volume", take=10)
+book = client.orderbook.get(market_id, at="2026-04-15T01:45:00Z")  # point-in-time L2
 ```
 
-### Bulk export
-
-Download full history as Parquet — snapshots, deltas, trades, and reference prices.
+To stream reconstructed book states over a window, `client.orderbook.walk()` takes the same targets as the backtester (market ID, series slug, condition ID):
 
 ```python
-# Single market (includes reference trades for the underlying)
-data_dir = client.exports.download(market_id)
-
-# All markets in a series — returns a result with ready / pending / failed
-result = client.exports.download_series(
-    "btc-up-or-down-5m", after="2026-03-01", before="2026-03-08")
-print(result.ready, result.pending, result.failed, result.events_charged)
+for market, book in client.orderbook.walk(market_id, after=start, before=end):
+    print(book.midpoint, book.spread_bps())
 ```
 
-Markets are pre-built server-side. If a market isn't ready yet, `download(market_id)` raises `ExportNotReadyError`; `download_series(...)` returns it under `result.pending` and skips the file.
-
-### Offline backtesting
-
-Download once, run many backtests without API calls:
-
-```python
-result = client.exports.download_series(
-    "btc-up-or-down-5m", after="2026-03-01", before="2026-03-08")
-
-backtest = client.backtest(
-    strategy, "btc-up-or-down-5m",
-    data_dir=result,                      # PathLike — passes straight through
-    after="2026-03-01", before="2026-03-08",
-    initial_cash=10_000,
-)
-```
-
-## Structured Products & Surfaces
-
-For multi-strike series (survival, density, barrier), all sibling markets replay in parallel. `walk.books` holds the latest book for every strike, and `walk.surface()` fits the implied probability distribution at each tick.
-
-```python
-walk = client.orderbook.walk(
-    "btc-multi-strikes-weekly",
-    after="2026-05-08T00:00:00Z",  # picks the next event ending after this
-)
-for market, book in walk:
-    surface = walk.surface()
-    if surface:
-        for s in surface.survival_strikes():
-            print(f"${s.strike:,.0f} P(above)={s.fitted_prob:.3f}")
-        print(f"implied_mean=${surface.implied_mean:,.0f}")
-        break  # the loop fires per book tick — break to print one fit
-```
-
-| Type | Source | Stats |
-|------|--------|-------|
-| `survival` | "above $X" multi-strike markets | `implied_mean`, `implied_cv`, `implied_skew` |
-| `density` | Neg-risk range + tail markets (incl. daily weather) | `implied_mean`, `implied_cv`, `implied_skew` |
-| `barrier` | Hit-price reach/dip markets | `implied_peak`, `implied_trough` |
-
-Pre-computed surfaces updated every 5 minutes are also available via `client.signals.surfaces()`.
-
-## OrderBook
-
-Every `OrderBook` instance — live or replayed — carries analytical methods:
+Every `OrderBook`, live or replayed, carries analytics:
 
 ```python
 book.microprice()              # size-weighted mid from best level
@@ -280,50 +234,42 @@ book.slippage("BUY", 1000)     # slippage from mid
 book.depth_within(0.02)        # (bid, ask) depth within 2c of mid
 ```
 
-## Numeric types
-
-All numeric fields (prices, sizes, volumes, fees, OHLCV, depths, strikes, statistics) are `float`. Defaults are picked so call sites don't need defensive guards:
-
-- **Polymarket prices** — `best_bid`, `best_ask`, `midpoint`, `Outcome.last_price` — default to `0.5` (the neutral [0, 1] prior). `if book.midpoint < 0.4` and `if book.best_ask > 0.7` both behave correctly when the side is missing.
-- **Sizes & rates** — `spread`, `bid_depth`, `ask_depth`, `volume`, `liquidity`, `vwap`, `fee_rate_bps` — default to `0.0`. Absence reads as zero magnitude.
-- **Genuinely optional** — an unresolved market's `winning_outcome`, a non-structured market's `strike`, and helper methods like `book.spread_bps()` / `book.impact(...)` still return `None` when the book itself is empty or insufficient.
-
-```python
-book.best_bid * 0.99           # works directly — no Decimal wrap
-if book.midpoint < 0.35:       # cheap → consider buying YES
-    ctx.buy_yes(size=200)
-```
-
-Detect a truly empty book with `book.bid_levels` / `book.ask_levels` rather than comparing the price defaults against `0`:
-
-```python
-if book.bid_levels and book.ask_levels:
-    print(book.spread_bps())
-```
-
-## Reference Prices
-
-Binance spot at 1-second resolution for crypto underlyings (BTC, ETH, SOL, XRP, etc.). Available directly or inside backtests via `ctx.reference_price()`.
+Binance spot at 1-second resolution is available for crypto underlyings (BTC, ETH, SOL, XRP, etc.), directly or inside backtests via `ctx.reference_price()`:
 
 ```python
 candles = client.reference.candles(
-    "BTC",
+    "BTC", resolution="1s",
     after="2026-04-15T01:45:00Z", before="2026-04-15T01:50:00Z",
-    resolution="1s",
 )
-for candle in candles:
-    print(candle.timestamp, candle.close)
 ```
+
+## Surfaces
+
+Multi-strike series imply a probability distribution over the underlying. Pre-computed surfaces, refreshed every 5 minutes, come from `client.signals.surfaces()`; during a walk over a structured series, `walk.surface()` fits the distribution at the current tick:
+
+```python
+walk = client.orderbook.walk("btc-multi-strikes-weekly",
+                             after="2026-05-08T00:00:00Z")
+for market, book in walk:
+    surface = walk.surface()
+    if surface:
+        print(f"implied_mean=${surface.implied_mean:,.0f}")
+        break
+```
+
+| Type | Source | Stats |
+|------|--------|-------|
+| `survival` | "above $X" multi-strike markets | `implied_mean`, `implied_cv`, `implied_skew` |
+| `density` | Neg-risk range and tail markets (incl. daily weather) | `implied_mean`, `implied_cv`, `implied_skew` |
+| `barrier` | Hit-price reach/dip markets | `implied_peak`, `implied_trough` |
 
 ## Agentic access (MCP)
 
-Expose the SDK to any MCP client (Claude Code, Claude Desktop, Cursor) so an agent can research markets, pull order book data and surfaces, and author and run backtests in natural language. The server runs locally over stdio with your own API key.
+Expose the SDK to any MCP client (Claude Code, Claude Desktop, Cursor) so an agent can research markets, pull book data and surfaces, and author and run backtests in natural language. The server runs locally over stdio with your own API key.
 
 ```bash
 pip install 'marketlens[mcp]'
 ```
-
-Add it to your MCP client config:
 
 ```json
 {
@@ -348,23 +294,67 @@ Add it to your MCP client config:
 | `strategy_reference` `run_backtest` | Author a `Strategy` and run it through the engine |
 | `compare_backtests` `open_backtest` | Score strategies side by side, inspect a saved run |
 
-Tools that bill events (`get_trades`, `get_candles`, `get_orderbook_metrics`, `get_reference_candles`) require both `after` and `before`. `run_backtest` executes agent-authored strategy code in a subprocess on your machine and returns metrics plus a saved result path; disable it with `MARKETLENS_MCP_DISABLE_BACKTEST=1`. Compose alongside other MCP servers (web search, arxiv, filesystem) for a full research loop.
+Tools that bill events (`get_trades`, `get_candles`, `get_orderbook_metrics`, `get_reference_candles`) require both `after` and `before`. `run_backtest` executes agent-authored strategy code in a subprocess on your machine; disable it with `MARKETLENS_MCP_DISABLE_BACKTEST=1`. See the [MCP docs](https://marketlens.trade/docs/mcp).
 
-A typical flow: ask your agent to find liquid BTC 5m markets, pull their recent book metrics, draft a maker strategy with `strategy_reference`, and backtest it with `run_backtest`.
+## Reference
 
-## API Reference
+### Strategy hooks
 
-| Resource | Methods |
-|----------|---------|
-| `client.markets` | `list()` `get()` `trades()` `candles()` |
-| `client.events` | `list()` `get()` `markets()` |
-| `client.series` | `list()` `get()` `markets()` `walk()` `events()` |
-| `client.orderbook` | `get()` `history()` `metrics()` `walk()` |
-| `client.signals` | `surfaces()` `surface()` `history()` |
-| `client.reference` | `candles()` `trades()` |
-| `client.exports` | `download()` `download_series()` |
+| Hook | Called when |
+|------|------------|
+| `on_book(ctx, market, book)` | Every book state change (snapshot or delta) |
+| `on_trade(ctx, market, book, trade)` | Every executed trade |
+| `on_fill(ctx, market, fill)` | Your order is filled |
+| `on_reject(ctx, market, order)` | Your order is rejected |
+| `on_market_start(ctx, market, book)` | A new market begins |
+| `on_market_end(ctx, market)` | A market ends, before settlement |
 
-Async: use `AsyncMarketLens` — every method has an async counterpart.
+Execution `ctx` provides `buy_yes()`, `sell_yes()`, `buy_no()`, `sell_no()`, `cancel()`, `cancel_all()`, `position()`, `open_orders`, `cash`, `equity`, `books` (all active order books), and `reference_price()` (Binance spot for crypto underlyings).
+
+`AlphaStrategy` replaces `on_book`/`on_trade` with `on_bar(ctx, market, bar)`, called once per market per bar. Alpha `ctx` provides `target_weight()`, `target_position()`, `bar` (mid, spread, depth, plus OHLCV when `price="close"`), `bars` (every market live this bar), and the same `position()`, `equity`, and `reference_price()`.
+
+### Execution engine parameters
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `latency_ms` | `50` | Order-to-fill delay in milliseconds |
+| `queue_position` | `False` | CLOB queue modeling: fills only when queue-ahead is drained by trades |
+| `limit_fill_rate` | `0.1` | Fraction of trade size filling your limit (ignored when `queue_position=True`) |
+| `slippage_bps` | `0` | Extra price penalty on market order fills |
+| `fees` | `"polymarket"` | Auto-detects crypto vs sports fee schedule; `None` for zero fees |
+| `max_fill_fraction` | `1.0` | Max fraction of each book level consumed per order |
+| `include_trades` | `True` | Fetch trade data (required for limit fills and `on_trade`) |
+| `settlement_delay_ms` | `5000` | Delay before filled tokens become sellable (on-chain settlement) |
+| `auto_merge` | `True` | Merge matched YES+NO pairs back to cash after each fill (CTF merge) |
+
+### Alpha engine parameters
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `resolution` | `"1m"` | Bar cadence: `1m` to `1d` for `price="mid"`, `1s` to `1d` for `price="close"` |
+| `price` | `"mid"` | Bar price: `"mid"` (order book metrics) or `"close"` (trade candles) |
+| `fill` | `"next"` | Fill at the next bar's mid (no look-ahead), or `"close"` (same bar) |
+| `slippage_bps` | `0` | Price penalty per fill; `5` is a realistic starting point |
+
+The tick-only options (`latency_ms`, `queue_position`, `limit_fill_rate`, `settlement_delay_ms`, `include_trades`) do not apply to alpha runs.
+
+### Numeric conventions
+
+All numeric fields (prices, sizes, volumes, fees, statistics) are `float`, with defaults picked so call sites need no guards: Polymarket prices (`best_bid`, `best_ask`, `midpoint`) default to `0.5` when the side is missing, sizes and rates default to `0.0`. Genuinely optional values (`winning_outcome` before resolution, `strike` on non-structured markets, `book.spread_bps()` on an empty book) return `None`. Detect a truly empty book with `book.bid_levels` / `book.ask_levels`, not by comparing prices to defaults.
+
+### Resources
+
+| Resource | Methods | Docs |
+|----------|---------|------|
+| `client.markets` | `list()` `get()` `trades()` `candles()` | [Markets](https://marketlens.trade/docs/markets), [Trades & Candles](https://marketlens.trade/docs/trades-candles) |
+| `client.events` | `list()` `get()` `markets()` | [Events & Series](https://marketlens.trade/docs/events-series) |
+| `client.series` | `list()` `get()` `markets()` `events()` `walk()` | [Events & Series](https://marketlens.trade/docs/events-series) |
+| `client.orderbook` | `get()` `history()` `metrics()` `walk()` | [Order Book](https://marketlens.trade/docs/orderbook) |
+| `client.signals` | `surfaces()` `surface()` `history()` | [Signals & Surfaces](https://marketlens.trade/docs/signals-surfaces) |
+| `client.reference` | `candles()` `trades()` | [Reference Prices](https://marketlens.trade/docs/reference-prices) |
+| `client.exports` | `download()` `download_series()` `download_market_bars()` `download_market_bars_batch()` | [Exports](https://marketlens.trade/docs/exports) |
+
+Async: use `AsyncMarketLens`, every method has an async counterpart. See also [Pagination](https://marketlens.trade/docs/pagination) and [Errors & Rate Limits](https://marketlens.trade/docs/errors).
 
 ## Examples
 
@@ -376,7 +366,7 @@ Async: use `AsyncMarketLens` — every method has an async counterpart.
 | [`backtest_portfolio.py`](examples/backtest_portfolio.py) | Multi-series portfolio with shared capital |
 | [`backtest_alpha.py`](examples/backtest_alpha.py) | Signal-level momentum tilt with target weights |
 | [`execution_cost.py`](examples/execution_cost.py) | Book depth, spread, impact and slippage |
-| [`microstructure.py`](examples/microstructure.py) | Feature matrix — does imbalance predict outcome? |
+| [`microstructure.py`](examples/microstructure.py) | Feature matrix: does imbalance predict outcome? |
 | [`implied_surfaces.py`](examples/implied_surfaces.py) | Survival, density, and barrier surfaces |
 | [`event_strikes.py`](examples/event_strikes.py) | Structured product walk with live surface fitting |
 
