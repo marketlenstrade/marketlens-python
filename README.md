@@ -204,14 +204,17 @@ Everything the backtester replays is also queryable directly. List methods retur
 
 ```python
 active = client.markets.list(status="active", sort="-volume", take=10)
+
 candles = client.markets.candles(
     market_id, resolution="1m",
     after="2026-04-15T01:45:00Z", before="2026-04-15T01:50:00Z",
 ).to_dataframe()
+
 trades = client.markets.trades(
     market_id,
     after="2026-04-15T01:45:00Z", before="2026-04-15T01:50:00Z",
 ).to_list()
+
 book = client.orderbook.get(market_id, at="2026-04-15T01:45:00Z")  # point-in-time L2
 ```
 
