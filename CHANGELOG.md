@@ -2,6 +2,10 @@
 
 All notable changes to the `marketlens` Python SDK, version by version.
 
+## [1.6.2] 2026-07-23
+
+* Packaging only, no code changes. The README now carries the MCP Registry ownership marker (`mcp-name`), and the repo gains a `server.json`, so the MCP server can be published to the official MCP Registry. The registry verifies the marker against the package description on PyPI, which is why this needs a release.
+
 ## [1.6.1] 2026-07-22
 
 * Packaging only, no code changes. The package metadata now carries `[project.urls]` (Homepage, Repository, Changelog), so PyPI links to marketlens.trade and the GitHub repo from the project sidebar. The 1.6.0 wheel was built before those URLs were added and shipped without them.

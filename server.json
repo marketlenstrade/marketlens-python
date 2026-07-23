@@ -1,0 +1,30 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.marketlenstrade/marketlens",
+  "title": "Marketlens",
+  "description": "Polymarket prediction market data for agents: market search, tick-level historical order books, trades, candles, and an execution-realistic backtest engine.",
+  "version": "1.6.2",
+  "websiteUrl": "https://marketlens.trade/docs/mcp",
+  "repository": {
+    "url": "https://github.com/marketlenstrade/marketlens-python",
+    "source": "github"
+  },
+  "packages": [
+    {
+      "registryType": "pypi",
+      "identifier": "marketlens",
+      "version": "1.6.2",
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [
+        {
+          "name": "MARKETLENS_API_KEY",
+          "description": "Marketlens API key, free at marketlens.trade",
+          "isRequired": true,
+          "isSecret": true
+        }
+      ]
+    }
+  ]
+}
