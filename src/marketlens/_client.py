@@ -54,7 +54,7 @@ def _check_series_complete(result: Any, series_id: str, data_dir: str) -> None:
         f" delivered because unlocking them needs {rows_needed:,} data rows"
         " and the account's remaining allowance does not cover it. A backtest"
         " on the partial set would be silently wrong. Narrow the window, wait"
-        " for the allowance reset, or add an archive pack, then rerun with"
+        " for the allowance reset, or upgrade the plan, then rerun with"
         " the same data_dir: markets already downloaded are unlocked and"
         " re-download free.",
         missing=missing,

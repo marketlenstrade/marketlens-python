@@ -53,8 +53,7 @@ class DailyBudgetExceededError(APIError):
 class RowLimitExceededError(APIError):
     """429 Monthly data row allowance exhausted (paid tiers).
 
-    Resets on the first of the month (UTC); archive packs top the balance up
-    immediately. Not auto-retried by the SDK.
+    Resets on the first of the month (UTC). Not auto-retried by the SDK.
     """
 
     def __init__(self, status_code: int, code: str, message: str, retry_after: int | None = None) -> None:
@@ -97,7 +96,7 @@ class IncompleteExportError(MarketLensError):
     a partial market set (which would produce plausible but wrong results).
     ``missing`` lists the market ids the server rate limited; ``rows_needed``
     is the unlock cost of those files. Narrow the window, wait for the
-    allowance reset, or add an archive pack, then rerun with the same
+    allowance reset, or upgrade the plan, then rerun with the same
     ``data_dir``: markets already downloaded are unlocked and free.
     """
 

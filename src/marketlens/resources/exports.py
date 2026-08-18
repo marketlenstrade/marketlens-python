@@ -204,7 +204,7 @@ class Exports:
             ``events_charged`` alias.
             ``rate_limited`` lists markets that were skipped because unlocking
             them would have exceeded the caller's remaining row balance; retry
-            after the balance resets, after an archive pack top-up, or with a
+            after the balance resets, after a plan upgrade, or with a
             narrower ``after``/``before`` window. The result is
             ``os.PathLike`` (its ``__fspath__`` returns the data directory),
             so it can be passed directly to

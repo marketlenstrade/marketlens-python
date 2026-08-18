@@ -2,6 +2,13 @@
 
 All notable changes to the `marketlens` Python SDK, version by version.
 
+## [1.7.3] 2026-08-18
+
+* Server-side, no SDK change needed: the tier allowances went up. Free is now 25M data rows per day (was 5M) at 600 requests/minute (was 180), Pro is 5B rows per calendar month (was 3B), and Scale is 50B (was 16B). Request unit budgets are unchanged. `DailyBudgetExceededError`, `RowLimitExceededError`, and `RateLimitError` are raised on the same conditions as before, just far later.
+* Server-side, no SDK change needed: `GET /markets` now returns 500 rows per page by default (was 100) and accepts `limit` up to 2000 (was 500). Iterating `client.markets.list()` therefore makes about five times fewer round trips for the same result, with no code change. Pass a smaller `limit` if you only want a few rows and want the page to match, or a larger one to walk the catalog in fewer calls.
+* The MCP list tools (`search_markets`, `search_events`, `search_series`, `get_signals`) now send an explicit page size to the server. They previously passed only `take`, a client-side total cap, so each search fetched one server page at whatever the endpoint's default was and discarded the remainder. Harmless while the markets default was 100, wasteful now that it is 500. Results are unchanged; the call just stops fetching rows it throws away.
+* Error text no longer points at archive packs as a way to clear the monthly row wall. `RowLimitExceededError`, `IncompleteExportError`, and the `download_series` docstring now name the allowance reset and a plan upgrade instead, matching what the site offers.
+
 ## [1.7.2] 2026-08-16
 
 * `Market` gains `collection_tier`: `"streamed"` markets carry the full snapshot and delta chain, `"polled"` markets carry periodic order book snapshots without deltas (the new low-frequency collection tier for long-dated markets), and `None` means the market predates tiers and was collected streamed.
