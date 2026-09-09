@@ -8,6 +8,7 @@ from marketlens.exceptions import (
     ConnectionError,
     DailyBudgetExceededError,
     ExportNotReadyError,
+    StoreUnavailableError,
     ForbiddenError,
     IncompleteExportError,
     InvalidParameterError,
@@ -105,6 +106,7 @@ __all__ = [
     "RequestUnitsExceededError",
     "IncompleteExportError",
     "ExportNotReadyError",
+    "StoreUnavailableError",
     "ConnectionError",
     "TimeoutError",
     # Version

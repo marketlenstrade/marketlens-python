@@ -12,7 +12,7 @@ import pyarrow.parquet as pq
 
 from marketlens._base import _coerce_timestamp
 from marketlens._progress import _ProgressReporter, make_reporter
-from marketlens.exceptions import NotFoundError, ExportNotReadyError
+from marketlens.exceptions import NotFoundError, ExportNotReadyError, StoreUnavailableError
 from marketlens.backtest._bar import (
     _RESOLUTION_MS,
     AlphaConfig,
@@ -1333,6 +1333,8 @@ class _EngineCore:
                         yield market, event, book
                 except ExportNotReadyError as exc:
                     self._record_skip(market, _export_skip_reason(exc))
+                except StoreUnavailableError:
+                    self._record_skip(market, "history store unavailable")
                 if not yielded and market.id not in self._skipped:
                     self._record_skip(market, "no events in window")
                 reporter.market_finished(market.id)
@@ -2166,6 +2168,8 @@ class AsyncBacktestEngine(_EngineCore):
                         yield market, event, book
                 except ExportNotReadyError as exc:
                     self._record_skip(market, _export_skip_reason(exc))
+                except StoreUnavailableError:
+                    self._record_skip(market, "history store unavailable")
                 if not yielded and market.id not in self._skipped:
                     self._record_skip(market, "no events in window")
                 reporter.market_finished(market.id)

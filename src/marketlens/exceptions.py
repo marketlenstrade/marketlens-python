@@ -116,6 +116,18 @@ class ExportNotReadyError(APIError):
         self.last_error = last_error
 
 
+class StoreUnavailableError(APIError):
+    """503 STORE_UNAVAILABLE — the history file store did not answer in time.
+
+    Transient: the transport already retried, honoring ``Retry-After``.
+    Backtests skip the market and list it under ``result.skipped``.
+    """
+
+    def __init__(self, status_code: int, code: str, message: str, retry_after: int | None = None) -> None:
+        super().__init__(status_code, code, message)
+        self.retry_after = retry_after
+
+
 class IncompleteExportError(MarketLensError):
     """A series export could not deliver every market in the window because
     the remaining data-row balance did not cover the missing files.
@@ -164,6 +176,7 @@ _CODE_TO_EXCEPTION: dict[str, type[APIError]] = {
     "RATE_LIMITED": RateLimitError,
     "DAILY_BUDGET_EXCEEDED": DailyBudgetExceededError,
     "ROW_LIMIT_EXCEEDED": RowLimitExceededError,
+    "STORE_UNAVAILABLE": StoreUnavailableError,
     "UNIT_LIMIT_EXCEEDED": RequestUnitsExceededError,
     "EXPORT_NOT_READY": ExportNotReadyError,
 }

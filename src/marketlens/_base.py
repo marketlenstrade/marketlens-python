@@ -28,6 +28,7 @@ from marketlens.exceptions import (
     NON_RETRYABLE_429_CODES,
     RateLimitError,
     RequestUnitsExceededError,
+    StoreUnavailableError,
     RowLimitExceededError,
     TimeoutError,
     _CODE_TO_EXCEPTION,
@@ -152,6 +153,7 @@ def _raise_for_error(response: httpx.Response) -> None:
         DailyBudgetExceededError,
         RowLimitExceededError,
         RequestUnitsExceededError,
+        StoreUnavailableError,
     ):
         retry_after_raw = response.headers.get("Retry-After")
         retry_after = int(retry_after_raw) if retry_after_raw else None
@@ -243,10 +245,9 @@ class SyncHTTPClient:
 
             if _should_retry(response) and attempt < self.max_retries:
                 delay = 2**attempt
-                if response.status_code == 429:
-                    retry_after = response.headers.get("Retry-After")
-                    if retry_after:
-                        delay = max(delay, int(retry_after))
+                retry_after = response.headers.get("Retry-After")
+                if retry_after:
+                    delay = max(delay, int(retry_after))
                 time.sleep(delay)
                 continue
 
@@ -308,10 +309,9 @@ class SyncHTTPClient:
                         response.read()
                     if _should_retry(response) and attempt < self.max_retries:
                         delay = 2**attempt
-                        if response.status_code == 429:
-                            retry_after = response.headers.get("Retry-After")
-                            if retry_after:
-                                delay = max(delay, int(retry_after))
+                        retry_after = response.headers.get("Retry-After")
+                        if retry_after:
+                            delay = max(delay, int(retry_after))
                         time.sleep(delay)
                         continue
                     _raise_for_error(response)
@@ -467,10 +467,9 @@ class AsyncHTTPClient:
 
             if _should_retry(response) and attempt < self.max_retries:
                 delay = 2**attempt
-                if response.status_code == 429:
-                    retry_after = response.headers.get("Retry-After")
-                    if retry_after:
-                        delay = max(delay, int(retry_after))
+                retry_after = response.headers.get("Retry-After")
+                if retry_after:
+                    delay = max(delay, int(retry_after))
                 await asyncio.sleep(delay)
                 continue
 
@@ -523,10 +522,9 @@ class AsyncHTTPClient:
                         await response.aread()
                     if _should_retry(response) and attempt < self.max_retries:
                         delay = 2**attempt
-                        if response.status_code == 429:
-                            retry_after = response.headers.get("Retry-After")
-                            if retry_after:
-                                delay = max(delay, int(retry_after))
+                        retry_after = response.headers.get("Retry-After")
+                        if retry_after:
+                            delay = max(delay, int(retry_after))
                         await asyncio.sleep(delay)
                         continue
                     _raise_for_error(response)

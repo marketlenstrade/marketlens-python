@@ -11,6 +11,7 @@ from marketlens import (
     RateLimitError,
     RequestUnitsExceededError,
     RowLimitExceededError,
+    StoreUnavailableError,
 )
 from marketlens import TimeoutError as MarketlensTimeoutError
 
@@ -60,6 +61,32 @@ class TestErrorMapping:
 
 
 _EMPTY_PAGE = {"data": [], "meta": {"cursor": None, "has_more": False}}
+
+
+class TestStoreUnavailable503:
+    """The history store timing out is a 503 STORE_UNAVAILABLE with
+    Retry-After: retried like any 5xx, but sleeping the server's hint rather
+    than the 1s/2s ladder, and surfacing as its own exception."""
+
+    def test_retried_with_retry_after_then_typed(self, mock_api, client, monkeypatch):
+        import marketlens._base as base
+        sleeps: list[float] = []
+        monkeypatch.setattr(base.time, "sleep", sleeps.append)
+        route = mock_api.get("/markets/m1/orderbook/history").mock(
+            return_value=httpx.Response(
+                503,
+                json={"error": {"code": "STORE_UNAVAILABLE",
+                                "message": "The history store did not respond in time.",
+                                "status": 503}},
+                headers={"Retry-After": "5"},
+            )
+        )
+        with pytest.raises(StoreUnavailableError) as exc_info:
+            client.orderbook.history("m1", after=1, before=2).first_page()
+        assert route.call_count == 1 + client._http.max_retries
+        assert sleeps == [5, 5]
+        assert exc_info.value.retry_after == 5
+        assert exc_info.value.status_code == 503
 
 
 def _budget_429(code: str) -> httpx.Response:

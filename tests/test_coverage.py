@@ -234,6 +234,26 @@ def test_pending_export_mid_series_is_skipped_not_fatal(mock_api, client):
     assert routes["m-ok"].call_count == 1
 
 
+def test_store_stall_mid_series_is_skipped_not_fatal(mock_api, client, monkeypatch):
+    """A 503 from the history store on one market (after the transport's own
+    retries) skips that market like a pending export, instead of aborting a
+    run that may be many markets deep."""
+    import marketlens._base as base
+    monkeypatch.setattr(base.time, "sleep", lambda _s: None)
+    ok = _m("m-ok", data_start=T_OPEN - 5, data_end=T_CLOSE + 5)
+    stalled = _m("m-stalled", open_time=T_CLOSE, close_time=T_CLOSE + 300_000,
+                 resolved_at=T_CLOSE + 300_000, data_start=T_CLOSE + 5, data_end=T_CLOSE + 300_000)
+    routes = _series_mocks(mock_api, [ok, stalled], {"m-ok": [_SNAP]})
+    stalled_route = mock_api.get("/markets/m-stalled/orderbook/history").mock(return_value=httpx.Response(
+        503, json={"error": {"code": "STORE_UNAVAILABLE", "message": "The history store did not respond in time."}},
+        headers={"Retry-After": "5"}))
+    result = client.backtest(_Noop(), "btc-up-or-down-5m", after=T_OPEN, before=T_CLOSE + 300_000,
+                             initial_cash=1000, progress=False)
+    assert [(sk.market_id, sk.reason) for sk in result.skipped] == [("m-stalled", "history store unavailable")]
+    assert routes["m-ok"].call_count == 1
+    assert stalled_route.call_count == 1 + client._http.max_retries
+
+
 def test_old_server_payload_skips_nothing(mock_api, client):
     m1 = _m("m-1")  # no coverage fields at all
     routes = _series_mocks(mock_api, [m1], {"m-1": [_SNAP]})

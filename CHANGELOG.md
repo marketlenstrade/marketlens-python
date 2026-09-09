@@ -2,6 +2,11 @@
 
 All notable changes to the `marketlens` Python SDK, version by version.
 
+## [1.8.2] 2026-09-09
+
+* `StoreUnavailableError` (503 `STORE_UNAVAILABLE`, carries `retry_after`): the server's history file store did not answer in time. The transport retries it like any 5xx and now waits the server's `Retry-After` before every retry, not only on 429.
+* A backtest that meets it on one market skips that market ("history store unavailable" under `result.skipped`) and carries on instead of aborting the run.
+
 ## [1.8.1] 2026-09-09
 
 * Offline backtests (`data_dir=`) over a window with no market now report the series' data span (`result.coverage` entry and the "No markets for ..." line) when the directory already holds files from an earlier download, the same as a fresh directory and streaming mode. Before, the reused directory skipped the download that carried the span and the result said nothing.
