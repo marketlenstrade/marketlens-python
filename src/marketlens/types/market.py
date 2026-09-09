@@ -62,6 +62,12 @@ class Market(BaseModel):
     neg_risk: bool | None = None
     # Short label of this market within its event, e.g. the candidate name.
     group_item_title: str | None = None
+    # The span in which the market was live in our data (ms epoch): the
+    # first non-empty book (not before open_time) to the platform's
+    # resolution or the last non-empty book; data_end is None while the
+    # market is still open. Both None against servers that predate them.
+    data_start: int | None = None
+    data_end: int | None = None
     created_at: int
     updated_at: int
 

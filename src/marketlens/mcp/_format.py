@@ -39,6 +39,8 @@ def market_brief(m: Any) -> dict:
         "resolved_at": m.resolved_at,
         "winning_outcome": m.winning_outcome,
         "outcomes": [{"name": o.name, "last_price": o.last_price} for o in m.outcomes],
+        "data_start": getattr(m, "data_start", None),
+        "data_end": getattr(m, "data_end", None),
     }
 
 
@@ -89,6 +91,8 @@ def book_view(b: Any, *, depth: int) -> dict:
     out: dict[str, Any] = {
         "market_id": b.market_id,
         "as_of": b.as_of,
+        "requested_at": getattr(b, "requested_at", None),
+        "nearest": getattr(b, "nearest", None),
         "empty": not (has_bids or has_asks),
         "two_sided": two_sided,
         "best_bid": b.best_bid if has_bids else None,
@@ -102,6 +106,11 @@ def book_view(b: Any, *, depth: int) -> dict:
         "bids": [{"price": lv.price, "size": lv.size} for lv in b.bids[:depth]],
         "asks": [{"price": lv.price, "size": lv.size} for lv in b.asks[:depth]],
     }
+    if getattr(b, "nearest", None) == "after":
+        out["note"] = (
+            "The requested time is before this market's data_start; this is the "
+            "book at data_start (as_of is later than requested_at)."
+        )
     # Analytics need both sides; only include them when present.
     if two_sided:
         out["spread_bps"] = _num(b.spread_bps())

@@ -60,12 +60,27 @@ class Orderbook:
         self._markets = markets
         self._events = events
 
-    def get(self, market_id: str, *, at: Any = None, depth: int | None = None) -> OrderBook:
+    def get(
+        self, market_id: str, *, at: Any = None, depth: int | None = None,
+        nearest: str | None = None,
+    ) -> OrderBook:
+        """L2 book at ``at`` (latest when omitted).
+
+        Answered as of ``at`` clamped into the market's live span: inside
+        it the latest state at or before ``at`` (``nearest == "before"``),
+        after it the book at ``data_end``, before it the book at
+        ``data_start`` with ``nearest == "after"`` and ``as_of > at``; pass
+        ``nearest="before"`` to get :class:`DataNotAvailableError` there
+        instead, carrying ``data_start`` and ``data_end``. A market that
+        never had a live book raises it in both directions.
+        """
         params: dict[str, Any] = {}
         if at is not None:
             params["at"] = _coerce_timestamp(at)
         if depth is not None:
             params["depth"] = depth
+        if nearest is not None:
+            params["nearest"] = nearest
         raw = self._client.get(f"/markets/{market_id}/orderbook", params=params)
         return OrderBook.model_validate(raw)
 
@@ -195,12 +210,18 @@ class AsyncOrderbook:
         self._markets = markets
         self._events = events
 
-    async def get(self, market_id: str, *, at: Any = None, depth: int | None = None) -> OrderBook:
+    async def get(
+        self, market_id: str, *, at: Any = None, depth: int | None = None,
+        nearest: str | None = None,
+    ) -> OrderBook:
+        """See :meth:`Orderbook.get`."""
         params: dict[str, Any] = {}
         if at is not None:
             params["at"] = _coerce_timestamp(at)
         if depth is not None:
             params["depth"] = depth
+        if nearest is not None:
+            params["nearest"] = nearest
         raw = await self._client.get(f"/markets/{market_id}/orderbook", params=params)
         return OrderBook.model_validate(raw)
 

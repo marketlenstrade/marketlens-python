@@ -65,7 +65,15 @@ Timestamps (after / before / at): epoch ms or an ISO 8601 string like
 "2026-03-01T12:00:00Z".
 
 Coverage: history runs from 2026-03-01 up to roughly 3 hours ago; the most
-recent few hours are not built yet, so keep windows within that range.
+recent few hours are not built yet, so keep windows within that range. Every
+market from get_market / search_markets carries data_start and data_end,
+the span in which it was live in our data (data_end is null while it is
+still open on the platform), so choose windows from those instead of
+guessing. get_orderbook answers inside the market's live span: the latest
+book at or before `at`, the book at data_end for a later `at`, and for an
+`at` before data_start the book at data_start with nearest="after" and a
+later as_of, so check `nearest` before treating the book as the state at `at`. A backtest lists markets it could not replay under
+markets_skipped / skipped.
 
 Budget: get_trades, get_candles, get_orderbook_metrics and get_reference_candles
 bill one data row per returned row against the account's row balance, so pass a
@@ -99,6 +107,24 @@ def _get_client() -> MarketLens:
     return _client
 
 
+def _coverage_hint(exc: Any) -> str:
+    """One line telling the model what data exists for the market."""
+    start = getattr(exc, "data_start", None)
+    end = getattr(exc, "data_end", None)
+    requested = getattr(exc, "requested_at", None)
+    if start is not None and requested is not None and requested < start:
+        return (
+            f"This market's data starts at {start}; call get_orderbook at or "
+            "after it, or drop nearest='before' to receive that first book."
+        )
+    if start is None:
+        return (
+            "No live order book was ever recorded for this market, so it has no "
+            "book, trades or candles; pick a market whose data_start is set."
+        )
+    return f"This market's data runs {start} to {end or 'now (still open)'}."
+
+
 def _safe(fn: Callable) -> Callable:
     """Return known SDK errors as a clean dict instead of raising.
 
@@ -113,7 +139,12 @@ def _safe(fn: Callable) -> Callable:
         except MarketLensError as exc:
             # Log for the operator watching stderr; hand the model a clean dict.
             _log.info("%s -> %s: %s", fn.__name__, type(exc).__name__, exc)
-            return {"error": type(exc).__name__, "message": str(exc)}
+            out: dict[str, Any] = {"error": type(exc).__name__, "message": str(exc)}
+            details = getattr(exc, "details", None)
+            if isinstance(details, dict) and details:
+                out.update(details)
+                out["hint"] = _coverage_hint(exc)
+            return out
 
     return wrapper
 

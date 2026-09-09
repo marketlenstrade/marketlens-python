@@ -18,6 +18,12 @@ class OrderBook(BaseModel):
     market_id: str
     platform: str
     as_of: int
+    # The ``at`` this book was requested for, and which side of it the book
+    # sits on: "before" (as_of <= at, the normal case) or "after" (nothing
+    # existed at or before ``at``; this is the first later book). None
+    # against servers that predate these fields.
+    requested_at: int | None = None
+    nearest: str | None = None
     bids: list[PriceLevel]
     asks: list[PriceLevel]
     best_bid: float = 0.5

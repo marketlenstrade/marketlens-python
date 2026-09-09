@@ -41,6 +41,27 @@ class SeriesRateLimited:
 
 
 @dataclass(frozen=True)
+class SeriesCoverage:
+    """The series' data span, in the same terms as every other coverage
+    block: ``data_start`` / ``data_end`` span all its markets' data
+    (``data_end`` is None while any market is still open on the platform),
+    ``collection_tier`` is "streamed", "polled", or "mixed". None against
+    servers that predate the field."""
+    data_start: int | None
+    data_end: int | None
+    collection_tier: str | None
+
+
+def _parse_coverage(raw: Any) -> SeriesCoverage | None:
+    if not isinstance(raw, dict):
+        return None
+    return SeriesCoverage(
+        data_start=raw.get("data_start"), data_end=raw.get("data_end"),
+        collection_tier=raw.get("collection_tier"),
+    )
+
+
+@dataclass(frozen=True)
 class SeriesDownloadResult:
     """Outcome of ``client.exports.download_series``.
 
@@ -63,6 +84,8 @@ class SeriesDownloadResult:
     rate_limited: list[SeriesRateLimited] = field(default_factory=list)
     events_charged: int = 0
     rows_charged: int = 0
+    # The series' data span. None against older servers.
+    coverage: SeriesCoverage | None = None
 
     def __fspath__(self) -> str:
         return str(self.data_dir)
@@ -240,6 +263,7 @@ class Exports:
         ]
         events_charged = int(body.get("events_charged", 0))
         rows_charged = int(body.get("rows_charged", events_charged))
+        coverage = _parse_coverage(body.get("coverage"))
 
         if dry_run:
             return SeriesDownloadResult(
@@ -250,6 +274,7 @@ class Exports:
                 rate_limited=rate_limited,
                 events_charged=events_charged,
                 rows_charged=rows_charged,
+                coverage=coverage,
             )
 
         targets = [(e["market_id"], e["url"]) for e in body.get("ready", [])]
@@ -301,6 +326,7 @@ class Exports:
             rate_limited=rate_limited,
             events_charged=events_charged,
             rows_charged=rows_charged,
+            coverage=coverage,
         )
 
     def download_market_bars(
@@ -489,6 +515,7 @@ class AsyncExports:
         ]
         events_charged = int(body.get("events_charged", 0))
         rows_charged = int(body.get("rows_charged", events_charged))
+        coverage = _parse_coverage(body.get("coverage"))
 
         if dry_run:
             return SeriesDownloadResult(
@@ -499,6 +526,7 @@ class AsyncExports:
                 rate_limited=rate_limited,
                 events_charged=events_charged,
                 rows_charged=rows_charged,
+                coverage=coverage,
             )
 
         targets = [(e["market_id"], e["url"]) for e in body.get("ready", [])]
@@ -553,6 +581,7 @@ class AsyncExports:
             rate_limited=rate_limited,
             events_charged=events_charged,
             rows_charged=rows_charged,
+            coverage=coverage,
         )
 
     async def _ensure_reference(

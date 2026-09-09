@@ -23,6 +23,7 @@ from marketlens.exceptions import (
     AuthenticationError,
     ConnectionError,
     DailyBudgetExceededError,
+    DataNotAvailableError,
     ExportNotReadyError,
     NON_RETRYABLE_429_CODES,
     RateLimitError,
@@ -133,9 +134,10 @@ def _raise_for_error(response: httpx.Response) -> None:
     if response.status_code < 400:
         return
 
+    error: dict = {}
     try:
         body = orjson.loads(response.content)
-        error = body.get("error", {})
+        error = body.get("error", {}) or {}
         code = error.get("code", str(response.status_code))
         message = error.get("message", response.text)
     except Exception:
@@ -166,6 +168,10 @@ def _raise_for_error(response: httpx.Response) -> None:
             response.status_code, code, message,
             export_status=export_status, last_error=last_error,
         )
+
+    if exc_cls is DataNotAvailableError:
+        details = {k: v for k, v in error.items() if k not in ("code", "message", "status")}
+        raise DataNotAvailableError(response.status_code, code, message, details=details)
 
     raise exc_cls(response.status_code, code, message)
 

@@ -27,6 +27,34 @@ class NotFoundError(APIError):
     """404 Not Found."""
 
 
+class DataNotAvailableError(NotFoundError):
+    """404 DATA_NOT_AVAILABLE: the market holds no order book at all, or
+    ``orderbook.get(nearest="before")`` found nothing at or before ``at``.
+
+    Carries what IS available so the caller never has to parse the message:
+    ``data_start`` / ``data_end`` bound the span in which the market was
+    live in our data (``data_start`` is where a book becomes available;
+    ``data_end`` is None while the market is still open on the platform) and
+    ``collection_tier`` is "streamed" or "polled". ``details`` keeps the raw
+    fields the server sent.
+    """
+
+    def __init__(
+        self,
+        status_code: int,
+        code: str,
+        message: str,
+        details: dict | None = None,
+    ) -> None:
+        super().__init__(status_code, code, message)
+        self.details: dict = dict(details or {})
+        coverage = self.details.get("coverage") or {}
+        self.requested_at: int | None = self.details.get("requested_at")
+        self.data_start: int | None = coverage.get("data_start")
+        self.data_end: int | None = coverage.get("data_end")
+        self.collection_tier: str | None = coverage.get("collection_tier")
+
+
 class InvalidParameterError(APIError):
     """400 Invalid Parameter."""
 
@@ -128,7 +156,7 @@ _CODE_TO_EXCEPTION: dict[str, type[APIError]] = {
     "MARKET_NOT_FOUND": NotFoundError,
     "EVENT_NOT_FOUND": NotFoundError,
     "SERIES_NOT_FOUND": NotFoundError,
-    "DATA_NOT_AVAILABLE": NotFoundError,
+    "DATA_NOT_AVAILABLE": DataNotAvailableError,
     "KEY_NOT_FOUND": NotFoundError,
     "INVALID_PARAMETER": InvalidParameterError,
     "RANGE_TOO_LARGE": InvalidParameterError,
