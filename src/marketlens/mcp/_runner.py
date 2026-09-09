@@ -85,11 +85,35 @@ def _warnings(result: Any) -> list:
     fees = getattr(result, "total_fees", 0.0) or 0.0
     cash = getattr(result, "initial_cash", 0.0) or 0.0
 
-    if trades == 0:
+    skipped = getattr(result, "skipped", None) or []
+    n_skipped = getattr(result, "markets_skipped", 0) or 0
+    if n_skipped:
+        reasons: dict[str, int] = {}
+        for sk in skipped:
+            reasons[sk.reason] = reasons.get(sk.reason, 0) + 1
         w.append(
-            "0 trades: the strategy never filled an order in this window. Check the "
-            "entry condition, the window, or that the book was two-sided."
+            f"{n_skipped} market(s) in the window contributed no data and were "
+            f"skipped ({', '.join(f'{k}: {v}' for k, v in reasons.items())}); "
+            "the result covers the remaining markets only. See skipped."
         )
+    coverage = getattr(result, "coverage", None) or {}
+    if trades == 0 and coverage and not (getattr(result, "market_names", None) or {}):
+        spans = "; ".join(
+            f"{t}: {c.get('data_start')} to {c.get('data_end') if c.get('data_end') is not None else 'now'}"
+            for t, c in coverage.items()
+        )
+        w.append(f"0 trades: the window held no market. Data for the target runs {spans}.")
+    elif trades == 0:
+        if n_skipped and n_skipped >= len(getattr(result, "market_names", {}) or {}):
+            w.append(
+                "0 trades: no market in this window had collected order book data, "
+                "so nothing was replayed. Move the window into the markets' coverage."
+            )
+        else:
+            w.append(
+                "0 trades: the strategy never filled an order in this window. Check the "
+                "entry condition, the window, or that the book was two-sided."
+            )
     if markets and orders / markets > 100:
         w.append(
             f"High order rate: {orders} orders across {markets} markets "
@@ -182,6 +206,12 @@ def _error_payload(exc: Exception) -> dict:
             "retry later."
         )
 
+    details = getattr(exc, "details", None)
+    if isinstance(details, dict) and details:
+        payload.update(details)
+        from marketlens.mcp.server import _coverage_hint
+        payload["hint"] = _coverage_hint(exc)
+
     # Expected API conditions (budget, not-ready, bad param) are self-explanatory
     # from the message; skip the noisy SDK-internal traceback. Keep the full
     # traceback for unexpected failures, which are usually bugs in the strategy
@@ -200,6 +230,15 @@ def _result_block(result: Any, client: Any) -> dict:
     warnings = _warnings(result)
     if warnings:
         block["warnings"] = warnings
+    if getattr(result, "coverage", None):
+        block["coverage"] = dict(result.coverage)
+    skipped = getattr(result, "skipped", None) or []
+    if skipped:
+        block["markets_skipped"] = getattr(result, "markets_skipped", 0)
+        block["skipped"] = [
+            {k: v for k, v in sk.model_dump().items() if v is not None}
+            for sk in skipped[:50]
+        ]
     return block
 
 

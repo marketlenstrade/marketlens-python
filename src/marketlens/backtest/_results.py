@@ -49,6 +49,8 @@ class BacktestResult:
         targets: dict | None = None,
         market_names: dict[str, str] | None = None,
         periods_per_year: float | None = None,
+        skipped: list | None = None,
+        coverage: dict | None = None,
     ) -> None:
         self._portfolio = portfolio
         self._orders = orders
@@ -60,6 +62,13 @@ class BacktestResult:
         self.targets = dict(targets) if targets else {}
         self.market_names: dict[str, str] = dict(market_names) if market_names else {}
         self.initial_cash = portfolio.initial_cash
+        # Markets inside the window that contributed no events (SkippedMarket
+        # rows), and per target the span of the data it replayed (the series'
+        # own span when the window held nothing):
+        # {target: {"kind", "data_start", "data_end", "collection_tier"}}.
+        self.skipped: list = list(skipped) if skipped else []
+        self.markets_skipped = len(self.skipped)
+        self.coverage: dict[str, dict] = dict(coverage) if coverage else {}
 
         initial = portfolio.initial_cash
         final_equity = portfolio.equity
@@ -261,6 +270,13 @@ class BacktestResult:
         }
         if self.cash_rejected > 0:
             s["cash_rejected"] = self.cash_rejected
+        if self.markets_skipped > 0:
+            s["markets_skipped"] = self.markets_skipped
+        if self.coverage:
+            s["coverage"] = {
+                t: f"{c.get('kind')} {c.get('data_start')} to {c.get('data_end') if c.get('data_end') is not None else 'now'} ({c.get('collection_tier')})"
+                for t, c in self.coverage.items()
+            }
         return s
 
     def __repr__(self) -> str:
@@ -454,6 +470,8 @@ class BacktestResult:
             "cash_rejected": self.cash_rejected,
             "initial_cash": self.initial_cash,
             "market_names": self.market_names,
+            "skipped": [sk.model_dump() for sk in self.skipped],
+            "coverage": self.coverage,
         }
         with open(out / "manifest.json", "w") as f:
             json.dump(manifest, f, indent=2)
@@ -487,6 +505,10 @@ class BacktestResult:
         obj.config = _deserialize_config(manifest.get("config"))
         obj.targets = manifest.get("targets") or {}
         obj.market_names = manifest.get("market_names") or {}
+        from marketlens.backtest._types import SkippedMarket
+        obj.skipped = [SkippedMarket.model_validate(sk) for sk in manifest.get("skipped") or []]
+        obj.markets_skipped = len(obj.skipped)
+        obj.coverage = dict(manifest.get("coverage") or {})
 
         obj._orders, obj._fills = _read_orders_and_fills(src)
         obj._settlements = _read_settlements(src)

@@ -177,6 +177,7 @@ result.sortino_ratio        # downside-adjusted
 result.max_drawdown         # peak-to-trough as fraction
 result.profit_factor        # gross wins / gross losses
 result.expectancy           # avg net P&L per settlement
+result.skipped              # markets in the window with no replayable data, and why
 
 result.trades_df()          # per-fill DataFrame
 result.orders_df()          # per-order DataFrame
@@ -226,6 +227,7 @@ trades = client.markets.trades(
 ).to_list()
 
 book = client.orderbook.get(market_id, at="2026-04-15T01:45:00Z")  # point-in-time L2
+book.nearest  # "before": latest book at or before `at` (clamped to data_end); "after": `at` was before data_start, this is the book there
 ```
 
 To stream reconstructed book states over a window, `client.orderbook.walk()` takes the same targets as the backtester (market ID, series slug, condition ID):
@@ -362,10 +364,12 @@ All numeric fields (prices, sizes, volumes, fees, statistics) are `float`, with 
 | `client.markets` | `list()` `get()` `trades()` `candles()` | [Markets](https://marketlens.trade/docs/markets), [Trades & Candles](https://marketlens.trade/docs/trades-candles) |
 | `client.events` | `list()` `get()` `markets()` | [Events & Series](https://marketlens.trade/docs/events-series) |
 | `client.series` | `list()` `get()` `markets()` `events()` `walk()` | [Events & Series](https://marketlens.trade/docs/events-series) |
-| `client.orderbook` | `get()` `history()` `metrics()` `walk()` | [Order Book](https://marketlens.trade/docs/orderbook) |
+| `client.orderbook` | `get(nearest=)` `history()` `metrics()` `walk()` | [Order Book](https://marketlens.trade/docs/orderbook) |
 | `client.signals` | `surfaces()` `surface()` `history()` | [Signals & Surfaces](https://marketlens.trade/docs/signals-surfaces) |
 | `client.reference` | `candles()` `trades()` | [Reference Prices](https://marketlens.trade/docs/reference-prices) |
 | `client.exports` | `download()` `download_series()` `download_market_bars()` `download_market_bars_batch()` | [Exports](https://marketlens.trade/docs/exports) |
+
+Every `Market` carries `data_start` and `data_end`, the span in which it was live in our data (`data_end` is `None` while it is still open on the platform). `DataNotAvailableError` (a `NotFoundError`) carries `requested_at`, `data_start`, `data_end`, and `collection_tier`.
 
 Async: use `AsyncMarketLens`, every method has an async counterpart. See also [Pagination](https://marketlens.trade/docs/pagination) and [Errors & Rate Limits](https://marketlens.trade/docs/errors).
 

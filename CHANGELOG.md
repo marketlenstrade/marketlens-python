@@ -2,6 +2,15 @@
 
 All notable changes to the `marketlens` Python SDK, version by version.
 
+## [1.8.0] 2026-09-04
+
+* `Market` gains `data_start` and `data_end`, the span in which the market was live in our data: `data_start` is the first non-empty order book, never before `open_time` on a well formed life; `data_end` is the platform's resolution when known, else the last non-empty book, and `None` while the market is still open. `close_time` is never used, so rolling markets overlap by the minutes between close and resolution. Both are `None` against servers that predate them.
+* `DataNotAvailableError` (a `NotFoundError` subclass) carries `requested_at`, `data_start`, `data_end` and `collection_tier`; the raw server fields stay on `.details`.
+* `client.orderbook.get(market_id, at=...)` answers as of `at` clamped into the live span: the book at `data_start` with `book.nearest == "after"` for an earlier `at`, the book at `data_end` for a later one, the latest state at or before `at` inside (`nearest == "before"`). Pass `nearest="before"` to get `DataNotAvailableError` instead of a later book. A market that never had a live book raises it in both directions. `OrderBook` gains `requested_at` and `nearest`.
+* `client.exports.download_series()` returns an empty `SeriesDownloadResult` for a window with no market in it. `SeriesDownloadResult.coverage` (`SeriesCoverage`) is the span of the markets in the manifest, or the series' own span when the window holds none, with `collection_tier` `"mixed"` when they differ.
+* Backtests replay every market inside its life clamped to `data_end`, identically in streaming, offline and async mode; a collapsed life (`close_time` at or before `open_time`) falls back to the user window. Markets that contribute no events are listed on `result.skipped` (`SkippedMarket`: reason, life and span) and counted by `result.markets_skipped`; a pending export mid-series is a reported skip, not an abort. `result.coverage` holds one `{kind, data_start, data_end, collection_tier}` entry per target, the span of what a series replayed (its own span when the window was empty) and each directly targeted market's span. Status lines: one per series target with nothing in the window, one per series for markets skipped inside it, one per directly targeted market, never repeated across the strategies of a multi-strategy run.
+* MCP: data tool errors include the coverage fields and a `hint`; `get_orderbook` output carries `requested_at`, `nearest` and a `note` for a book at `data_start`; market rows carry the span; `run_backtest` results include `markets_skipped`, `skipped` and `coverage`.
+
 ## [1.7.3] 2026-08-18
 
 * Server-side, no SDK change needed: the tier allowances went up. Free is now 25M data rows per day (was 5M) at 600 requests/minute (was 180), Pro is 5B rows per calendar month (was 3B), and Scale is 50B (was 16B). Request unit budgets are unchanged. `DailyBudgetExceededError`, `RowLimitExceededError`, and `RateLimitError` are raised on the same conditions as before, just far later.

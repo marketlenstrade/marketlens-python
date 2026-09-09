@@ -87,3 +87,24 @@ class SettlementRecord(BaseModel):
     fees: float
     winning_outcome: str | None
     resolved_at: int
+
+
+class SkippedMarket(BaseModel):
+    """A market inside the backtest window that contributed no events.
+
+    ``reason``: "outside window" (its life misses the window), "no coverage
+    in window" (its data span misses the window), "no events in window",
+    "no history file", "export pending", "export failed", or "bar export
+    not built". ``data_start`` / ``data_end`` are the market's data span
+    when the server reported one.
+    """
+    model_config = ConfigDict(frozen=True)
+
+    market_id: str
+    reason: str
+    question: str | None = None
+    open_time: int | None = None
+    close_time: int | None = None
+    data_start: int | None = None
+    data_end: int | None = None
+

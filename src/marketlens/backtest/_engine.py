@@ -12,7 +12,7 @@ import pyarrow.parquet as pq
 
 from marketlens._base import _coerce_timestamp
 from marketlens._progress import _ProgressReporter, make_reporter
-from marketlens.exceptions import NotFoundError
+from marketlens.exceptions import NotFoundError, ExportNotReadyError
 from marketlens.backtest._bar import (
     _RESOLUTION_MS,
     AlphaConfig,
@@ -29,6 +29,7 @@ from marketlens.backtest._prefetch import AsyncPrefetchedIterator, PrefetchedIte
 from marketlens.backtest._results import BacktestResult, MultiBacktestResult
 from marketlens.backtest._strategy import AlphaContext, Strategy, StrategyContext, _is_trade_only
 from marketlens.backtest._types import (
+    SkippedMarket,
     Fill,
     Order,
     OrderSide,
@@ -55,6 +56,89 @@ def _prep_status(message: str) -> None:
         sys.stderr.flush()
     except Exception:
         pass
+
+
+def _fmt_ts(value: Any) -> str:
+    """ISO 8601 for a ms epoch (or the raw value when it is not one)."""
+    ms = _coerce_timestamp(value)
+    if not isinstance(ms, int):
+        return "?" if ms is None else str(ms)
+    from datetime import datetime, timezone
+    return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _market_life(market: Market) -> tuple[int | None, int | None]:
+    """The market's declared life, or ``(None, None)`` when ``close_time``
+    is at or before ``open_time`` (Polymarket collapses endDate to game
+    start on some sports markets), in which case callers fall back to the
+    user window."""
+    o, c = market.open_time, market.close_time
+    if o is not None and c is not None and c <= o:
+        return (None, None)
+    return (o, c)
+
+
+def _effective_window(market: Market, after_ms: int | None, before_ms: int | None) -> tuple[int | None, int | None]:
+    """``[after, before)`` clamped to the market's declared life when that
+    life is well formed: the same clamp in streaming, offline, and the
+    coverage skip, so the three agree on which events a market contributes."""
+    life_open, life_close = _market_life(market)
+    lo = life_open if after_ms is None else max(after_ms, life_open or after_ms)
+    hi = life_close if before_ms is None else min(before_ms, life_close or before_ms)
+    return (lo, hi)
+
+
+def _stream_window(market: Market, after_ms: int | None, before_ms: int | None) -> tuple[int | None, int | None]:
+    """The window a market's events are replayed in: :func:`_effective_window`
+    ending no later than ``data_end`` (the platform's resolution or the last
+    non-empty book); rows after it are settled books nothing trades against."""
+    lo, hi = _effective_window(market, after_ms, before_ms)
+    end = market.data_end
+    if end is not None and (hi is None or end < hi):
+        hi = end
+    return (lo, hi)
+
+
+def _span(markets: list[Market], kind: str) -> dict:
+    """The coverage block for a set of markets: earliest data_start, latest
+    data_end (None while any is still open), tier ``mixed`` when they differ."""
+    live = [m for m in markets if m.data_start is not None]
+    if not live:
+        return {"kind": kind, "data_start": None, "data_end": None, "collection_tier": None}
+    tiers = {m.collection_tier for m in live}
+    open_end = any(m.data_end is None for m in live)
+    return {
+        "kind": kind,
+        "data_start": min(m.data_start for m in live),
+        "data_end": None if open_end else max(m.data_end for m in live),
+        "collection_tier": "mixed" if len(tiers) > 1 else next(iter(tiers)),
+    }
+
+
+def _export_skip_reason(exc: ExportNotReadyError) -> str:
+    return "export failed" if exc.export_status == "failed" else "export pending"
+
+
+def _coverage_gap(market: Market, after_ms: int | None, before_ms: int | None) -> str | None:
+    """Why a market cannot contribute to the window, or None when it can.
+
+    Decided from metadata only: the market's life intersected with the user
+    window (the clamp the streams apply) and the data span the server
+    reports. A null ``data_start`` is unknown, never proof of absence, so
+    the stream decides; a market whose data starts inside the window is
+    replayed as is.
+    """
+    lo, hi = _effective_window(market, after_ms, before_ms)
+    if lo is not None and hi is not None and hi <= lo:
+        return "outside window"
+    start, end = market.data_start, market.data_end
+    if start is None:
+        return None
+    if hi is not None and start >= hi:
+        return "no coverage in window"
+    if end is not None and lo is not None and end <= lo:
+        return "no coverage in window"
+    return None
 from marketlens.types.market import Market
 from marketlens.types.orderbook import OrderBook, PriceLevel
 
@@ -308,6 +392,21 @@ class _EngineCore:
         # the market whose event triggered the drain).
         self._market_objs: dict[str, Market] = {}
         self._market_series: dict[str, str] = {}  # market_id → series_id (for settlement attribution)
+        # Empty-data reporting (result.skipped / result.coverage, one status
+        # line per series target or directly targeted market): ids the caller
+        # named themselves, every resolved market, ids already announced,
+        # series targets already reported, and the announce gate a
+        # multi-strategy run turns off after its first strategy.
+        self._skipped: dict[str, SkippedMarket] = {}
+        self._coverage: dict[str, dict] = {}
+        self._direct_targets: set[str] = set()
+        self._target_series: dict[str, str] = {}  # series target as passed -> series id
+        self._resolved_markets: dict[str, Market] = {}
+        self._announced: set[str] = set()
+        self._reported_targets: set[str] = set()
+        self._announce: bool = True
+        self._window: tuple[Any, Any] = (None, None)
+        self._download_results: list = []  # (target, SeriesDownloadResult) from autodownload
         self._market_group: dict[str, str] = {}    # market_id → group key (for sequential slot tracking)
         self._ref_prices: dict[str, list[tuple[int, float]]] = {}  # symbol → sorted (timestamp, price)
         self._market_underlying: dict[str, str | None] = {}  # market_id → underlying symbol
@@ -402,6 +501,11 @@ class _EngineCore:
         dir_path = Path(data_dir)
         groups: dict[str, dict] = {}
         present_total = 0
+        pending_ids: set[str] = set()
+        failed_ids: set[str] = set()
+        for _target, result in self._download_results:
+            pending_ids.update(e.market_id for e in getattr(result, "pending", []) or [])
+            failed_ids.update(e.market_id for e in getattr(result, "failed", []) or [])
         for m in markets:
             has = (
                 (dir_path / f"history-{m.id}.parquet").exists()
@@ -417,7 +521,18 @@ class _EngineCore:
                 present_total += 1
             else:
                 g["missing"] += 1
-        if announce:
+                if m.id in pending_ids:
+                    self._record_skip(m, "export pending")
+                elif m.id in failed_ids:
+                    self._record_skip(m, "export failed")
+                else:
+                    self._record_skip(m, "no history file")
+                if m.id in self._direct_targets:
+                    self._report_empty_market(m, self._skipped[m.id].reason, announce=announce)
+                    g["missing"] -= 1
+                else:
+                    self._announced.add(m.id)
+        if announce and self._announce:
             for g in groups.values():
                 if g["missing"]:
                     total = g["present"] + g["missing"]
@@ -426,6 +541,159 @@ class _EngineCore:
                         f"'{g['label']}': no history file in {dir_path}"
                     )
         return present_total
+
+    def _record_skip(self, market: Market, reason: str) -> None:
+        if market.id in self._skipped:
+            return
+        self._skipped[market.id] = SkippedMarket(
+            market_id=market.id, reason=reason, question=market.question,
+            open_time=market.open_time, close_time=market.close_time,
+            data_start=market.data_start, data_end=market.data_end,
+        )
+
+    def _keep_covered(
+        self, markets: list[Market], *, after: Any = None, before: Any = None,
+        announce: bool = True,
+    ) -> list[Market]:
+        """Drop markets whose collected order book cannot contribute to the
+        window, record them, and announce one line per series.
+
+        Coverage is metadata about when collection ran, never price data, so
+        this only decides which markets to replay; the replay itself and the
+        per-market windows are unchanged. Markets from a server that predates
+        the data span (both bounds None) are never skipped.
+        """
+        after_ms = _coerce_timestamp(after)
+        before_ms = _coerce_timestamp(before)
+        kept: list[Market] = []
+        groups: dict[str, dict] = {}
+        for m in markets:
+            reason = _coverage_gap(m, after_ms, before_ms)
+            if reason is None:
+                kept.append(m)
+                continue
+            self._record_skip(m, reason)
+            if m.id in self._direct_targets:
+                self._report_empty_market(m, reason, announce=announce)
+                continue
+            sid = m.series_id or m.id
+            g = groups.setdefault(
+                sid, {"skipped": 0, "ids": [], "label": m.series_title or m.underlying or sid},
+            )
+            g["skipped"] += 1
+            g["ids"].append(m.id)
+        for sid, g in groups.items():
+            total = sum(1 for m in markets if (m.series_id or m.id) == sid)
+            if announce and self._announce:
+                _prep_status(
+                    f"Skipping {g['skipped']} of {total} markets for "
+                    f"'{g['label']}': no order book coverage in window"
+                )
+            self._announced.update(g["ids"])
+        return kept
+
+    def _fill_target_coverage(self) -> None:
+        """One ``result.coverage`` entry per target: the span of the markets a
+        series target replayed (an empty window keeps the series' own span
+        from the manifest), and each directly targeted market's span."""
+        for target, sid in self._target_series.items():
+            markets = [m for m in self._resolved_markets.values() if self._market_series.get(m.id) == sid]
+            if markets:
+                self._coverage[target] = _span(markets, "series")
+        for mid in self._direct_targets:
+            m = self._resolved_markets.get(mid)
+            if m is not None:
+                self._coverage.setdefault(mid, _span([m], "market"))
+
+    def _report_empty_market(self, m: Market, reason: str, *, announce: bool = True) -> None:
+        """One line for a directly targeted market that contributes nothing,
+        plus its span on ``result.coverage`` so the result says why."""
+        if m.id in self._announced:
+            return
+        self._announced.add(m.id)
+        self._coverage.setdefault(m.id, {
+            "kind": "market",
+            "data_start": m.data_start, "data_end": m.data_end, "collection_tier": m.collection_tier,
+        })
+        if not (announce and self._announce):
+            return
+        after, before = self._window
+        line = f"Market '{m.question}' ({m.id[:8]}): {reason} between {_fmt_ts(after)} and {_fmt_ts(before)}"
+        if m.data_start is not None:
+            # A null span is either an older server or a market that never
+            # had a book; neither is worth a claim.
+            end = _fmt_ts(m.data_end) if m.data_end is not None else "now (still open)"
+            line += f"; its data runs {_fmt_ts(m.data_start)} to {end}"
+        _prep_status(line)
+
+    def _announce_unreported_skips(self) -> None:
+        """End of run: markets skipped while streaming (no events, export
+        pending or failed) that no earlier line covered. Grouped per series;
+        one line per directly targeted market."""
+        pending = [sk for mid, sk in self._skipped.items() if mid not in self._announced]
+        if not pending:
+            return
+        groups: dict[str, dict] = {}
+        for sk in pending:
+            m = self._resolved_markets.get(sk.market_id)
+            if m is not None and m.id in self._direct_targets:
+                self._report_empty_market(m, sk.reason)
+                continue
+            sid = (m.series_id if m is not None else None) or sk.market_id
+            g = groups.setdefault(sid, {"reasons": {}, "ids": [], "label": (m.series_title or m.underlying if m is not None else None) or sid})
+            g["reasons"][sk.reason] = g["reasons"].get(sk.reason, 0) + 1
+            g["ids"].append(sk.market_id)
+        for sid, g in groups.items():
+            total = sum(1 for m in self._resolved_markets.values() if (m.series_id or m.id) == sid)
+            self._announced.update(g["ids"])
+            if not self._announce:
+                continue
+            reasons = ", ".join(f"{n} {r}" for r, n in g["reasons"].items())
+            _prep_status(
+                f"'{g['label']}': {len(g['ids'])} of {total} markets contributed no data "
+                f"in the window ({reasons})"
+            )
+
+    def _note_empty_window(self, target: str, cov: Any, after: Any, before: Any) -> None:
+        """Record and announce the series' data span for a window that held
+        no market, so the result can say why it is empty."""
+        if cov is not None:
+            self._coverage[str(target)] = {
+                "kind": "series",
+                "data_start": getattr(cov, "data_start", None),
+                "data_end": getattr(cov, "data_end", None),
+                "collection_tier": getattr(cov, "collection_tier", None),
+            }
+        if not self._announce or str(target) in self._reported_targets:
+            return
+        self._reported_targets.add(str(target))
+        parts = [f"No markets for '{target}' between {_fmt_ts(after)} and {_fmt_ts(before)}"]
+        if cov is not None and cov.data_start is not None:
+            parts.append(
+                f"its data runs {_fmt_ts(cov.data_start)} to "
+                f"{_fmt_ts(cov.data_end) if cov.data_end is not None else 'now (still open)'}"
+            )
+        _prep_status("; ".join(parts))
+
+    def _empty_series_coverage(self, client: Any, target: str, after: Any, before: Any) -> None:
+        """Streaming mode has no manifest, so an empty ``series.walk`` asks
+        the export manifest (dry run, nothing billed) for the series' data
+        span; offline mode gets it from the download it already made."""
+        try:
+            manifest = client.exports.download_series(
+                target, after=after, before=before, dry_run=True, progress=False,
+            )
+        except Exception:
+            self._note_empty_window(target, None, after, before)
+            return
+        self._note_empty_window(target, getattr(manifest, "coverage", None), after, before)
+
+    def _announce_empty_manifests(self, after: Any, before: Any) -> None:
+        for target, result in self._download_results:
+            cov = getattr(result, "coverage", None)
+            if result.ready or result.pending or result.failed or result.rate_limited:
+                continue
+            self._note_empty_window(target, cov, after, before)
 
     def _maybe_autodownload(
         self,
@@ -454,13 +722,14 @@ class _EngineCore:
         ):
             return
         concurrency = max(1, min(self._config.download_concurrency, os.cpu_count() or 1))
-        client._ensure_exports_downloaded(
+        self._download_results = client._ensure_exports_downloaded(
             id, data_dir,
             after=after, before=before,
             coalesce=self._resolve_compact_mode(),
             progress=self._config.progress,
             concurrency=concurrency,
-        )
+        ) or []
+        self._announce_empty_manifests(after, before)
 
     def _with_reporter(self, n_markets: int, *, replay: bool = False, label: str | None = None):
         """Context manager that installs a progress reporter for the run.
@@ -1021,12 +1290,7 @@ class _EngineCore:
             # ``[user.after, user.before)``. Snapshot anchor lookup is still
             # extended ``_ANCHOR_LOWER_MARGIN_MS`` past ``open_time`` server-
             # side, so a pre-open anchor is still picked up.
-            eff_after = market.open_time if user_after_ms is None else max(
-                user_after_ms, market.open_time or user_after_ms,
-            )
-            eff_before = market.close_time if user_before_ms is None else min(
-                user_before_ms, market.close_time or user_before_ms,
-            )
+            eff_after, eff_before = _stream_window(market, user_after_ms, user_before_ms)
             history = client.orderbook.history(
                 market.id,
                 after=eff_after,
@@ -1054,15 +1318,23 @@ class _EngineCore:
                     current, market_id=market.id, platform=market.platform,
                     lazy_deltas=self._lazy_book,
                 )
-                for event, book in replay:
-                    if user_before_ms is not None and event.t >= user_before_ms:
-                        break
-                    if user_after_ms is not None and event.t < user_after_ms:
-                        # Silent replay: the API delivers an anchor snapshot
-                        # at t <= after so the book can seed; don't surface
-                        # pre-window events to the strategy.
-                        continue
-                    yield market, event, book
+                eff_after, eff_before = _stream_window(market, user_after_ms, user_before_ms)
+                yielded = False
+                try:
+                    for event, book in replay:
+                        if eff_before is not None and event.t >= eff_before:
+                            break
+                        if eff_after is not None and event.t < eff_after:
+                            # Silent replay: the anchor snapshot and any
+                            # pre-open events seed the book; the strategy
+                            # sees nothing before the market's window.
+                            continue
+                        yielded = True
+                        yield market, event, book
+                except ExportNotReadyError as exc:
+                    self._record_skip(market, _export_skip_reason(exc))
+                if not yielded and market.id not in self._skipped:
+                    self._record_skip(market, "no events in window")
                 reporter.market_finished(market.id)
 
                 current = next_prefetcher
@@ -1097,6 +1369,9 @@ class _EngineCore:
 
         Missing parquets stay non-fatal: collector downtime can leave gaps,
         and a backtest should still run on the markets it has data for.
+
+        The end is clamped per market like the streaming path, so bulk and
+        streaming replays see the same events.
         """
         reporter = self._reporter
         dir_path = Path(data_dir)
@@ -1106,20 +1381,27 @@ class _EngineCore:
         for market, path in resolved:
             if path is None:
                 continue
-            events = _iter_history_parquet(path, after_ms=after_ms, before_ms=before_ms)
+            # The same window the streaming path requests from the server:
+            # the parquet carries pre-open rows and the post-close tail.
+            eff_after, eff_before = _stream_window(market, after_ms, before_ms)
+            events = _iter_history_parquet(path, after_ms=eff_after, before_ms=eff_before)
             reporter.market_started(market.id, market.id)
             replay = OrderBookReplay(
                 events, market_id=market.id, platform=market.platform,
                 lazy_deltas=self._lazy_book,
             )
+            yielded = False
             for event, book in replay:
-                if before_ms is not None and event.t >= before_ms:
+                if eff_before is not None and event.t >= eff_before:
                     break
-                if after_ms is not None and event.t < after_ms:
+                if eff_after is not None and event.t < eff_after:
                     # Silent replay: book state advances inside ``replay``;
                     # we just don't yield this pre-window event to the engine.
                     continue
+                yielded = True
                 yield market, event, book
+            if not yielded:
+                self._record_skip(market, "no events in window")
             reporter.market_finished(market.id)
 
     def get_reference_price(self, symbol: str | None, at_time: int) -> float | None:
@@ -1195,6 +1477,7 @@ class _EngineCore:
         )
 
     def _register_market(self, market: Market) -> None:
+        self._resolved_markets[market.id] = market
         self._market_underlying[market.id] = market.underlying
         if market.underlying and (market.open_time or market.close_time):
             sym = market.underlying
@@ -1207,6 +1490,8 @@ class _EngineCore:
                 self._underlying_bounds[sym] = (min(prev[0], lo), max(prev[1], hi))
 
     def _build_result(self) -> BacktestResult:
+        self._announce_unreported_skips()
+        self._fill_target_coverage()
         return BacktestResult(
             portfolio=self._portfolio,
             orders=self._orders,
@@ -1216,6 +1501,8 @@ class _EngineCore:
             config=self._config,
             targets=dict(self._targets),
             market_names={mid: m.question for mid, m in self._market_objs.items()},
+            skipped=list(self._skipped.values()),
+            coverage=dict(self._coverage),
         )
 
     def _capture_targets(
@@ -1254,6 +1541,8 @@ class BacktestEngine(_EngineCore):
         # run (which replays the same targets once per strategy) logs them once.
         # ``label`` names this run's "Backtesting" bar (multi-strategy runs).
         self._capture_targets(id, after=after, before=before, data_dir=data_dir)
+        self._announce = announce
+        self._window = (after, before)
         # Reference prices are fetched lazily by get_reference_price() on
         # first call — strategies that don't query them pay zero cost.
         # Loaders run on background threads so the engine never blocks.
@@ -1285,7 +1574,8 @@ class BacktestEngine(_EngineCore):
             if announce:
                 _prep_status(f"Resolving {len(id)} target(s)…")
             streams, n_markets, all_markets = self._resolve_list(
-                client, id, after=after, before=before, data_dir=data_dir, **params,
+                client, id, after=after, before=before, data_dir=data_dir,
+                announce=announce, **params,
             )
             self._maybe_autodownload(client, id, after=after, before=before, data_dir=data_dir)
             if data_dir is not None:
@@ -1299,13 +1589,15 @@ class BacktestEngine(_EngineCore):
             market = client.markets.get(id)
             self._market_series[market.id] = market.series_id or market.id
             self._register_market(market)
+            self._direct_targets.add(market.id)
+            kept = self._keep_covered([market], after=after, before=before, announce=announce)
             self._maybe_autodownload(client, id, after=after, before=before, data_dir=data_dir)
             n_one = (
-                self._prelog_file_skips([market], data_dir, announce=announce)
-                if data_dir is not None else 1
+                self._prelog_file_skips(kept, data_dir, announce=announce)
+                if data_dir is not None else len(kept)
             )
             with self._with_reporter(n_one, replay=replay, label=label):
-                self._run_merged([_stream([market])])
+                self._run_merged([_stream(kept)])
             return self._build_result()
         except NotFoundError:
             pass
@@ -1313,6 +1605,7 @@ class BacktestEngine(_EngineCore):
         # 2. Try as a series
         try:
             series = client.series.get(id)
+            self._target_series[str(id)] = series.id
         except NotFoundError:
             series = None
 
@@ -1327,6 +1620,9 @@ class BacktestEngine(_EngineCore):
                     self._market_series[m.id] = series.id
                     self._market_group[m.id] = series.id
                     self._register_market(m)
+                markets = self._keep_covered(markets, after=after, before=before, announce=announce)
+                if not markets and data_dir is None:
+                    self._empty_series_coverage(client, id, after, before)
                 self._maybe_autodownload(client, id, after=after, before=before, data_dir=data_dir)
                 n_markets = (
                     self._prelog_file_skips(markets, data_dir, announce=announce)
@@ -1360,6 +1656,12 @@ class BacktestEngine(_EngineCore):
                     client, id, series, None, after=after, before=before, **params,
                 )
 
+            lanes = [
+                self._keep_covered(lane, after=after, before=before, announce=announce)
+                for lane in lanes
+            ]
+            if not any(lanes) and data_dir is None:
+                self._empty_series_coverage(client, id, after, before)
             n_markets = sum(len(lane) for lane in lanes)
             streams = [_stream(lane) for lane in lanes]
             self._maybe_autodownload(client, id, after=after, before=before, data_dir=data_dir)
@@ -1376,13 +1678,15 @@ class BacktestEngine(_EngineCore):
         if found:
             self._market_series[found[0].id] = found[0].series_id or found[0].id
             self._register_market(found[0])
+            self._direct_targets.add(found[0].id)
+            kept = self._keep_covered([found[0]], after=after, before=before, announce=announce)
             self._maybe_autodownload(client, id, after=after, before=before, data_dir=data_dir)
             n_one = (
-                self._prelog_file_skips([found[0]], data_dir, announce=announce)
-                if data_dir is not None else 1
+                self._prelog_file_skips(kept, data_dir, announce=announce)
+                if data_dir is not None else len(kept)
             )
             with self._with_reporter(n_one, replay=replay, label=label):
-                self._run_merged([_stream([found[0]])])
+                self._run_merged([_stream(kept)])
             return self._build_result()
 
         raise NotFoundError(404, "NOT_FOUND", f"No market or series found for '{id}'")
@@ -1395,6 +1699,7 @@ class BacktestEngine(_EngineCore):
         after: Any = None,
         before: Any = None,
         data_dir: str | None = None,
+        announce: bool = True,
         **params: Any,
     ) -> tuple[list[Iterator[tuple[Market, HistoryEvent, OrderBook]]], int, list[Market]]:
         after_ms = _coerce_timestamp(after)
@@ -1415,18 +1720,27 @@ class BacktestEngine(_EngineCore):
                 market = client.markets.get(item_id)
                 self._market_series[market.id] = market.series_id or market.id
                 self._register_market(market)
-                streams.append(_stream([market]))
-                all_markets.append(market)
+                self._direct_targets.add(market.id)
+                kept = self._keep_covered([market], after=after, before=before, announce=announce)
+                streams.append(_stream(kept))
+                all_markets.extend(kept)
                 continue
             except NotFoundError:
                 pass
 
             # Try series
             series = client.series.get(item_id)
+            self._target_series[str(item_id)] = series.id
             if series.structured_type:
                 lanes = self._resolve_structured(
                     client, item_id, series, after=after, before=before, **params,
                 )
+                lanes = [
+                    self._keep_covered(lane, after=after, before=before, announce=announce)
+                    for lane in lanes
+                ]
+                if not any(lanes) and data_dir is None:
+                    self._empty_series_coverage(client, item_id, after, before)
                 streams.extend(_stream(lane) for lane in lanes)
                 for lane in lanes:
                     all_markets.extend(lane)
@@ -1436,6 +1750,9 @@ class BacktestEngine(_EngineCore):
                     self._market_series[m.id] = series.id
                     self._market_group[m.id] = series.id
                     self._register_market(m)
+                markets = self._keep_covered(markets, after=after, before=before, announce=announce)
+                if not markets and data_dir is None:
+                    self._empty_series_coverage(client, item_id, after, before)
                 streams.append(_stream(markets))
                 all_markets.extend(markets)
             else:
@@ -1620,6 +1937,7 @@ class AsyncBacktestEngine(_EngineCore):
         **params: Any,
     ) -> BacktestResult:
         self._capture_targets(id, after=after, before=before, data_dir=data_dir)
+        self._window = (after, before)
         # Async path supports parquet-only reference loading (no API
         # fallback — the sync iterator can't be driven from an async hook).
         # get_reference_price() loads on first call.
@@ -1644,8 +1962,10 @@ class AsyncBacktestEngine(_EngineCore):
             market = await client.markets.get(id)
             self._market_series[market.id] = market.series_id or market.id
             self._register_market(market)
-            with self._with_reporter(1):
-                await self._run_merged([self._async_make_market_stream(client, [market], after=after, before=before)])
+            self._direct_targets.add(market.id)
+            kept = self._keep_covered([market], after=after, before=before)
+            with self._with_reporter(len(kept)):
+                await self._run_merged([self._async_make_market_stream(client, kept, after=after, before=before)])
             return self._build_result()
         except NotFoundError:
             pass
@@ -1653,6 +1973,7 @@ class AsyncBacktestEngine(_EngineCore):
         # 2. Try as a series
         try:
             series = await client.series.get(id)
+            self._target_series[str(id)] = series.id
         except NotFoundError:
             series = None
 
@@ -1665,6 +1986,9 @@ class AsyncBacktestEngine(_EngineCore):
                     self._market_series[m.id] = series.id
                     self._market_group[m.id] = series.id
                     self._register_market(m)
+                markets = self._keep_covered(markets, after=after, before=before)
+                if not markets:
+                    await self._async_empty_series_coverage(client, id, after, before)
                 with self._with_reporter(len(markets)):
                     await self._run_merged([self._async_make_market_stream(client, markets, after=after, before=before)])
                 return self._build_result()
@@ -1682,6 +2006,9 @@ class AsyncBacktestEngine(_EngineCore):
                     client, id, series, None, after=after, before=before, **params,
                 )
 
+            lanes = [self._keep_covered(lane, after=after, before=before) for lane in lanes]
+            if not any(lanes):
+                await self._async_empty_series_coverage(client, id, after, before)
             n_markets = sum(len(lane) for lane in lanes)
             streams = [
                 self._async_make_market_stream(client, lane, after=after, before=before)
@@ -1696,11 +2023,24 @@ class AsyncBacktestEngine(_EngineCore):
         if found:
             self._market_series[found[0].id] = found[0].series_id or found[0].id
             self._register_market(found[0])
-            with self._with_reporter(1):
-                await self._run_merged([self._async_make_market_stream(client, [found[0]], after=after, before=before)])
+            self._direct_targets.add(found[0].id)
+            kept = self._keep_covered([found[0]], after=after, before=before)
+            with self._with_reporter(len(kept)):
+                await self._run_merged([self._async_make_market_stream(client, kept, after=after, before=before)])
             return self._build_result()
 
         raise NotFoundError(404, "NOT_FOUND", f"No market or series found for '{id}'")
+
+    async def _async_empty_series_coverage(self, client: Any, target: str, after: Any, before: Any) -> None:
+        """Async twin of ``_empty_series_coverage``."""
+        try:
+            manifest = await client.exports.download_series(
+                target, after=after, before=before, dry_run=True, progress=False,
+            )
+        except Exception:
+            self._note_empty_window(target, None, after, before)
+            return
+        self._note_empty_window(target, getattr(manifest, "coverage", None), after, before)
 
     async def _resolve_list(
         self,
@@ -1719,18 +2059,24 @@ class AsyncBacktestEngine(_EngineCore):
                 market = await client.markets.get(item_id)
                 self._market_series[market.id] = market.series_id or market.id
                 self._register_market(market)
-                streams.append(self._async_make_market_stream(client, [market], after=after, before=before))
-                n_markets += 1
+                self._direct_targets.add(market.id)
+                kept = self._keep_covered([market], after=after, before=before)
+                streams.append(self._async_make_market_stream(client, kept, after=after, before=before))
+                n_markets += len(kept)
                 continue
             except NotFoundError:
                 pass
 
             # Try series
             series = await client.series.get(item_id)
+            self._target_series[str(item_id)] = series.id
             if series.structured_type:
                 lanes = await self._async_resolve_structured(
                     client, item_id, series, after=after, before=before, **params,
                 )
+                lanes = [self._keep_covered(lane, after=after, before=before) for lane in lanes]
+                if not any(lanes):
+                    await self._async_empty_series_coverage(client, item_id, after, before)
                 streams.extend(
                     self._async_make_market_stream(client, lane, after=after, before=before)
                     for lane in lanes
@@ -1744,6 +2090,9 @@ class AsyncBacktestEngine(_EngineCore):
                     self._market_series[m.id] = series.id
                     self._market_group[m.id] = series.id
                     self._register_market(m)
+                markets = self._keep_covered(markets, after=after, before=before)
+                if not markets:
+                    await self._async_empty_series_coverage(client, item_id, after, before)
                 streams.append(self._async_make_market_stream(client, markets, after=after, before=before))
                 n_markets += len(markets)
             else:
@@ -1779,12 +2128,7 @@ class AsyncBacktestEngine(_EngineCore):
         user_before_ms = _coerce_timestamp(before)
 
         def _make_prefetcher(market: Market) -> AsyncPrefetchedIterator:
-            eff_after = market.open_time if user_after_ms is None else max(
-                user_after_ms, market.open_time or user_after_ms,
-            )
-            eff_before = market.close_time if user_before_ms is None else min(
-                user_before_ms, market.close_time or user_before_ms,
-            )
+            eff_after, eff_before = _stream_window(market, user_after_ms, user_before_ms)
             history = client.orderbook.history(
                 market.id,
                 after=eff_after,
@@ -1810,8 +2154,20 @@ class AsyncBacktestEngine(_EngineCore):
 
                 reporter.market_started(market.id, market.id)
                 replay = AsyncOrderBookReplay(current, market_id=market.id, platform=market.platform)
-                async for event, book in replay:
-                    yield market, event, book
+                eff_after, eff_before = _stream_window(market, user_after_ms, user_before_ms)
+                yielded = False
+                try:
+                    async for event, book in replay:
+                        if eff_before is not None and event.t >= eff_before:
+                            break
+                        if eff_after is not None and event.t < eff_after:
+                            continue
+                        yielded = True
+                        yield market, event, book
+                except ExportNotReadyError as exc:
+                    self._record_skip(market, _export_skip_reason(exc))
+                if not yielded and market.id not in self._skipped:
+                    self._record_skip(market, "no events in window")
                 reporter.market_finished(market.id)
 
                 current = next_prefetcher
@@ -2041,6 +2397,11 @@ class AlphaBacktestEngine(BacktestEngine):
             progress=self._alpha.progress,
         )
         self._n_bars_pending = len(result.pending)
+        by_id = {m.id: m for m in markets}
+        for entry in result.pending:
+            mid = getattr(entry, "market_id", entry)
+            if mid in by_id:
+                self._record_skip(by_id[mid], "bar export not built")
         return len(markets)
 
     def _make_market_stream(self, client, markets, *, after=None, before=None):  # type: ignore[override]
@@ -2062,12 +2423,7 @@ class AlphaBacktestEngine(BacktestEngine):
         concurrency = max(1, self._alpha.download_concurrency)
 
         def _load(market):
-            eff_after = market.open_time if user_after is None else (
-                max(user_after, market.open_time) if market.open_time else user_after
-            )
-            eff_before = market.close_time if user_before is None else (
-                min(user_before, market.close_time) if market.close_time else user_before
-            )
+            eff_after, eff_before = _stream_window(market, user_after, user_before)
             if eff_after is None or eff_before is None or eff_after >= eff_before:
                 return market, None, None, []
             bars = list(self._market_bars(client, market, eff_after, eff_before, res, price, data_dir))
@@ -2235,6 +2591,8 @@ class AlphaBacktestEngine(BacktestEngine):
     # ── result ────────────────────────────────────────────────────
 
     def _build_result(self) -> BacktestResult:
+        self._announce_unreported_skips()
+        self._fill_target_coverage()
         res_ms = _RESOLUTION_MS.get(self._alpha.resolution)
         periods_per_year = (_YEAR_MS / res_ms) if res_ms else None
         targets = dict(self._targets)
@@ -2254,4 +2612,6 @@ class AlphaBacktestEngine(BacktestEngine):
             targets=targets,
             market_names={mid: m.question for mid, m in self._market_objs.items()},
             periods_per_year=periods_per_year,
+            skipped=list(self._skipped.values()),
+            coverage=dict(self._coverage),
         )

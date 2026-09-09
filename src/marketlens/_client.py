@@ -249,8 +249,9 @@ class MarketLens:
         coalesce: bool,
         progress: bool,
         concurrency: int = 1,
-    ) -> None:
+    ) -> list:
         ids = id if isinstance(id, list) else [id]
+        results: list = []
         for one in ids:
             try:
                 self.exports.download(
@@ -263,6 +264,8 @@ class MarketLens:
                     concurrency=concurrency,
                 )
                 _check_series_complete(result, one, data_dir)
+                results.append((one, result))
+        return results
 
     def close(self) -> None:
         self._http.close()
@@ -394,8 +397,9 @@ class AsyncMarketLens:
         coalesce: bool,
         progress: bool,
         concurrency: int = 1,
-    ) -> None:
+    ) -> list:
         ids = id if isinstance(id, list) else [id]
+        results: list = []
         for one in ids:
             try:
                 await self.exports.download(
@@ -408,6 +412,8 @@ class AsyncMarketLens:
                     concurrency=concurrency,
                 )
                 _check_series_complete(result, one, data_dir)
+                results.append((one, result))
+        return results
 
     async def close(self) -> None:
         await self._http.close()

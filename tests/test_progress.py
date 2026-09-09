@@ -200,7 +200,7 @@ class TestEngineIntegration:
         from conftest import SAMPLE_MARKET
         from marketlens.backtest import Strategy
 
-        market = {**SAMPLE_MARKET, "id": "mkt-1", "underlying": None}
+        market = {**SAMPLE_MARKET, "id": "mkt-1", "underlying": None, "open_time": 900, "close_time": 10_000}
         snapshot = {
             "type": "snapshot", "t": 1000, "is_reseed": False,
             "bids": [{"price": "0.6500", "size": "100.0000"}],

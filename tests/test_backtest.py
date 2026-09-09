@@ -1237,7 +1237,7 @@ class TestBacktestResult:
             "expectancy", "avg_win", "avg_loss", "payoff_ratio",
             "avg_holding_ms", "capital_utilization", "max_drawdown_duration_ms",
             "total_trades", "markets_traded",
-            "total_fees", "fee_drag_bps", "avg_entry_price",
+            "total_fees", "fee_drag_bps", "avg_entry_price", "coverage",
         }
         assert set(s.keys()) == expected_keys
 
@@ -2129,7 +2129,7 @@ class TestLazyReferencePrices:
     def _setup_market(self, mock_api, with_underlying: bool):
         """Create a 1-event market market that may or may not have an underlying."""
         market = {
-            **SAMPLE_MARKET, "id": "m1",
+            **SAMPLE_MARKET, "id": "m1", "open_time": 900, "close_time": 10_000,
             "underlying": "BTC" if with_underlying else None,
         }
         snapshot = {
