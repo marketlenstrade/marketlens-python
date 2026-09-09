@@ -272,6 +272,25 @@ def test_empty_manifest_finishes_with_zero_markets_and_a_hint(mock_api, client, 
     assert "coverage" in result.summary()
 
 
+def test_reused_data_dir_empty_window_carries_coverage(mock_api, client, tmp_path, status_lines):
+    """A data_dir that already holds files skips the download, so the span
+    comes from a dry-run manifest, as in streaming mode; one line, once."""
+    _series_mocks(mock_api, [], {})
+    manifest = mock_api.get("/series/btc-up-or-down-5m/export").mock(return_value=httpx.Response(200, json={
+        "ready": [], "pending": [], "failed": [], "rate_limited": [], "events_charged": 0, "rows_charged": 0,
+        "coverage": {"data_start": T_OPEN - 7_200_000, "data_end": None, "collection_tier": "streamed"},
+    }))
+    d = tmp_path / "d"
+    d.mkdir()
+    (d / "history-m-0.parquet").write_bytes(b"")
+    result = client.backtest(_Noop(), "btc-up-or-down-5m", after=T_OPEN, before=T_CLOSE,
+                             initial_cash=1000, data_dir=str(d), progress=False)
+    assert manifest.call_count == 1
+    assert manifest.calls[0].request.url.params.get("dry_run") == "true"
+    assert result.coverage == {"btc-up-or-down-5m": {"kind": "series", "data_start": T_OPEN - 7_200_000, "data_end": None, "collection_tier": "streamed"}}
+    assert sum(1 for l in status_lines if l.startswith("No markets for 'btc-up-or-down-5m'")) == 1
+
+
 def test_streaming_empty_window_carries_coverage_from_a_dry_run_manifest(mock_api, client, status_lines):
     """Streaming has no download, so an empty series.walk asks the manifest
     (dry run, nothing billed) for the series' data span."""

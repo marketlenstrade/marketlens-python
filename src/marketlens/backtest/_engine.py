@@ -676,9 +676,9 @@ class _EngineCore:
         _prep_status("; ".join(parts))
 
     def _empty_series_coverage(self, client: Any, target: str, after: Any, before: Any) -> None:
-        """Streaming mode has no manifest, so an empty ``series.walk`` asks
-        the export manifest (dry run, nothing billed) for the series' data
-        span; offline mode gets it from the download it already made."""
+        """A window with no market asks the export manifest (dry run, nothing
+        billed) for the series' data span, in every mode: a reused
+        ``data_dir`` skips the download that would otherwise report it."""
         try:
             manifest = client.exports.download_series(
                 target, after=after, before=before, dry_run=True, progress=False,
@@ -1621,7 +1621,7 @@ class BacktestEngine(_EngineCore):
                     self._market_group[m.id] = series.id
                     self._register_market(m)
                 markets = self._keep_covered(markets, after=after, before=before, announce=announce)
-                if not markets and data_dir is None:
+                if not markets:
                     self._empty_series_coverage(client, id, after, before)
                 self._maybe_autodownload(client, id, after=after, before=before, data_dir=data_dir)
                 n_markets = (
@@ -1660,7 +1660,7 @@ class BacktestEngine(_EngineCore):
                 self._keep_covered(lane, after=after, before=before, announce=announce)
                 for lane in lanes
             ]
-            if not any(lanes) and data_dir is None:
+            if not any(lanes):
                 self._empty_series_coverage(client, id, after, before)
             n_markets = sum(len(lane) for lane in lanes)
             streams = [_stream(lane) for lane in lanes]
@@ -1739,7 +1739,7 @@ class BacktestEngine(_EngineCore):
                     self._keep_covered(lane, after=after, before=before, announce=announce)
                     for lane in lanes
                 ]
-                if not any(lanes) and data_dir is None:
+                if not any(lanes):
                     self._empty_series_coverage(client, item_id, after, before)
                 streams.extend(_stream(lane) for lane in lanes)
                 for lane in lanes:
@@ -1751,7 +1751,7 @@ class BacktestEngine(_EngineCore):
                     self._market_group[m.id] = series.id
                     self._register_market(m)
                 markets = self._keep_covered(markets, after=after, before=before, announce=announce)
-                if not markets and data_dir is None:
+                if not markets:
                     self._empty_series_coverage(client, item_id, after, before)
                 streams.append(_stream(markets))
                 all_markets.extend(markets)

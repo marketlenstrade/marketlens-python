@@ -2,6 +2,10 @@
 
 All notable changes to the `marketlens` Python SDK, version by version.
 
+## [1.8.1] 2026-09-09
+
+* Offline backtests (`data_dir=`) over a window with no market now report the series' data span (`result.coverage` entry and the "No markets for ..." line) when the directory already holds files from an earlier download, the same as a fresh directory and streaming mode. Before, the reused directory skipped the download that carried the span and the result said nothing.
+
 ## [1.8.0] 2026-09-04
 
 * `Market` gains `data_start` and `data_end`, the span in which the market was live in our data: `data_start` is the first non-empty order book, never before `open_time` on a well formed life; `data_end` is the platform's resolution when known, else the last non-empty book, and `None` while the market is still open. `close_time` is never used, so rolling markets overlap by the minutes between close and resolution. Both are `None` against servers that predate them.
