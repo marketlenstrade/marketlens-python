@@ -144,7 +144,7 @@ result = client.backtest(
 # tweak the strategy, run again: replays entirely from disk
 ```
 
-A ready-made `data_dir`: [polymarket-historical-data](https://github.com/marketlenstrade/polymarket-historical-data) holds ten complete events in this format (the March 2026 FOMC meeting, the World Cup final day, a full day of BTC 5 minute markets, a Wimbledon weekend, MLB, UFC, Counter-Strike, New York weather, Apple), free to clone; each folder's README carries the exact replay call, which needs only a free key since metadata routes cost no rows.
+A ready-made `data_dir`: [polymarket-historical-data](https://github.com/marketlenstrade/polymarket-historical-data) holds seven complete events in this format (a full day of BTC 5 minute markets, an MLB day, the World Cup final, UFC 330, Counter-Strike, New York weather, Apple), free to clone; each folder's README carries the exact replay call, which needs only a free key since metadata routes cost no rows.
 
 This works for both engines (tick history and alpha bars). To prefetch explicitly, use exports; the result is `os.PathLike` and passes straight into `data_dir=`:
 
