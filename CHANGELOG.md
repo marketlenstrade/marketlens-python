@@ -2,6 +2,10 @@
 
 All notable changes to the `marketlens` Python SDK, version by version.
 
+## [1.8.3] 2026-09-12
+
+* README and package summary open with what the package is for: Polymarket historical data and backtesting. No code changes.
+
 ## [1.8.2] 2026-09-09
 
 * `StoreUnavailableError` (503 `STORE_UNAVAILABLE`, carries `retry_after`): the server's history file store did not answer in time. The transport retries it like any 5xx and now waits the server's `Retry-After` before every retry, not only on 429.
