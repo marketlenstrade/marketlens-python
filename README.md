@@ -2,7 +2,7 @@
 
 <!-- mcp-name: io.github.marketlenstrade/marketlens -->
 
-Backtest prediction market strategies on tick-level L2 order book data from Polymarket. Marketlens records every book update, replays it through an execution-realistic engine, and hands you the results as metrics and DataFrames. Write a `Strategy`, point it at a market or series, and know whether it makes money.
+Polymarket historical data and backtesting in Python. Marketlens records every order book update on Polymarket, tick by tick, and serves the history as L2 snapshots and deltas, trades, and candles, then replays it through an execution-realistic backtesting engine and hands you the results as metrics and DataFrames. Write a `Strategy`, point it at a market or series, and know whether it makes money.
 
 [PyPI](https://pypi.org/project/marketlens/) · [Documentation](https://marketlens.trade/docs) · [Changelog](CHANGELOG.md)
 
