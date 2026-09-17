@@ -4,13 +4,13 @@
 
 Polymarket historical data and backtesting in Python. Marketlens records every order book update on Polymarket, tick by tick, and serves the history as L2 snapshots and deltas, trades, and candles, then replays it through an execution-realistic backtesting engine and hands you the results as metrics and DataFrames. Write a `Strategy`, point it at a market or series, and know whether it makes money.
 
-[PyPI](https://pypi.org/project/marketlens/) · [Documentation](https://marketlens.trade/docs) · [Changelog](CHANGELOG.md)
+[PyPI](https://pypi.org/project/marketlens/) · [Documentation](https://marketlens.trade/docs?utm_source=github&utm_medium=repo&utm_campaign=marketlens-python) · [Changelog](CHANGELOG.md)
 
 ```bash
 pip install marketlens
 ```
 
-Python 3.10+. Get a free API key at [marketlens.trade](https://marketlens.trade) and export it as `MARKETLENS_API_KEY`. Order book history starts 2026-03-01.
+Python 3.10+. Get a free API key at [marketlens.trade](https://marketlens.trade/?utm_source=github&utm_medium=repo&utm_campaign=marketlens-python) and export it as `MARKETLENS_API_KEY`. Order book history starts 2026-03-01.
 
 ## Quickstart
 
@@ -49,7 +49,7 @@ print(result.summary())
 
 A common loop: prove the signal on the alpha engine over a long window, then confirm the execution on the tick engine over a short one.
 
-Docs: [Execution](https://marketlens.trade/docs/backtesting) · [Alpha](https://marketlens.trade/docs/backtesting/alpha) · [Runs](https://marketlens.trade/docs/backtesting/runs) · [Examples](https://marketlens.trade/docs/backtesting/examples)
+Docs: [Execution](https://marketlens.trade/docs/backtesting?utm_source=github&utm_medium=repo&utm_campaign=marketlens-python) · [Alpha](https://marketlens.trade/docs/backtesting/alpha?utm_source=github&utm_medium=repo&utm_campaign=marketlens-python) · [Runs](https://marketlens.trade/docs/backtesting/runs?utm_source=github&utm_medium=repo&utm_campaign=marketlens-python) · [Examples](https://marketlens.trade/docs/backtesting/examples?utm_source=github&utm_medium=repo&utm_campaign=marketlens-python)
 
 ## Execution backtests
 
@@ -311,7 +311,7 @@ pip install 'marketlens[mcp]'
 | `strategy_reference` `run_backtest` | Author a `Strategy` and run it through the engine |
 | `compare_backtests` `open_backtest` | Score strategies side by side, inspect a saved run |
 
-Tools that bill data rows (`get_trades`, `get_candles`, `get_orderbook_metrics`, `get_reference_candles`) require both `after` and `before`. `run_backtest` executes agent-authored strategy code in a subprocess on your machine; disable it with `MARKETLENS_MCP_DISABLE_BACKTEST=1`. See the [MCP docs](https://marketlens.trade/docs/mcp).
+Tools that bill data rows (`get_trades`, `get_candles`, `get_orderbook_metrics`, `get_reference_candles`) require both `after` and `before`. `run_backtest` executes agent-authored strategy code in a subprocess on your machine; disable it with `MARKETLENS_MCP_DISABLE_BACKTEST=1`. See the [MCP docs](https://marketlens.trade/docs/mcp?utm_source=github&utm_medium=repo&utm_campaign=marketlens-python).
 
 ## Reference
 
@@ -363,17 +363,17 @@ All numeric fields (prices, sizes, volumes, fees, statistics) are `float`, with 
 
 | Resource | Methods | Docs |
 |----------|---------|------|
-| `client.markets` | `list()` `get()` `trades()` `candles()` | [Markets](https://marketlens.trade/docs/markets), [Trades & Candles](https://marketlens.trade/docs/trades-candles) |
-| `client.events` | `list()` `get()` `markets()` | [Events & Series](https://marketlens.trade/docs/events-series) |
-| `client.series` | `list()` `get()` `markets()` `events()` `walk()` | [Events & Series](https://marketlens.trade/docs/events-series) |
-| `client.orderbook` | `get(nearest=)` `history()` `metrics()` `walk()` | [Order Book](https://marketlens.trade/docs/orderbook) |
-| `client.signals` | `surfaces()` `surface()` `history()` | [Signals & Surfaces](https://marketlens.trade/docs/signals-surfaces) |
-| `client.reference` | `candles()` `trades()` | [Reference Prices](https://marketlens.trade/docs/reference-prices) |
-| `client.exports` | `download()` `download_series()` `download_market_bars()` `download_market_bars_batch()` | [Exports](https://marketlens.trade/docs/exports) |
+| `client.markets` | `list()` `get()` `trades()` `candles()` | [Markets](https://marketlens.trade/docs/markets?utm_source=github&utm_medium=repo&utm_campaign=marketlens-python), [Trades & Candles](https://marketlens.trade/docs/trades-candles?utm_source=github&utm_medium=repo&utm_campaign=marketlens-python) |
+| `client.events` | `list()` `get()` `markets()` | [Events & Series](https://marketlens.trade/docs/events-series?utm_source=github&utm_medium=repo&utm_campaign=marketlens-python) |
+| `client.series` | `list()` `get()` `markets()` `events()` `walk()` | [Events & Series](https://marketlens.trade/docs/events-series?utm_source=github&utm_medium=repo&utm_campaign=marketlens-python) |
+| `client.orderbook` | `get(nearest=)` `history()` `metrics()` `walk()` | [Order Book](https://marketlens.trade/docs/orderbook?utm_source=github&utm_medium=repo&utm_campaign=marketlens-python) |
+| `client.signals` | `surfaces()` `surface()` `history()` | [Signals & Surfaces](https://marketlens.trade/docs/signals-surfaces?utm_source=github&utm_medium=repo&utm_campaign=marketlens-python) |
+| `client.reference` | `candles()` `trades()` | [Reference Prices](https://marketlens.trade/docs/reference-prices?utm_source=github&utm_medium=repo&utm_campaign=marketlens-python) |
+| `client.exports` | `download()` `download_series()` `download_market_bars()` `download_market_bars_batch()` | [Exports](https://marketlens.trade/docs/exports?utm_source=github&utm_medium=repo&utm_campaign=marketlens-python) |
 
 Every `Market` carries `data_start` and `data_end`, the span in which it was live in our data (`data_end` is `None` while it is still open on the platform). `DataNotAvailableError` (a `NotFoundError`) carries `requested_at`, `data_start`, `data_end`, and `collection_tier`.
 
-Async: use `AsyncMarketLens`, every method has an async counterpart. See also [Pagination](https://marketlens.trade/docs/pagination) and [Errors & Rate Limits](https://marketlens.trade/docs/errors).
+Async: use `AsyncMarketLens`, every method has an async counterpart. See also [Pagination](https://marketlens.trade/docs/pagination?utm_source=github&utm_medium=repo&utm_campaign=marketlens-python) and [Errors & Rate Limits](https://marketlens.trade/docs/errors?utm_source=github&utm_medium=repo&utm_campaign=marketlens-python).
 
 ## Examples
 

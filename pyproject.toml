@@ -29,7 +29,7 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://marketlens.trade"
+Homepage = "https://marketlens.trade/?utm_source=pypi.org&utm_medium=package&utm_campaign=marketlens-python"
 Repository = "https://github.com/marketlenstrade/marketlens-python"
 Changelog = "https://github.com/marketlenstrade/marketlens-python/blob/main/CHANGELOG.md"
 
