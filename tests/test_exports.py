@@ -18,6 +18,7 @@ from conftest import BASE_URL
 from marketlens import (
     AsyncMarketLens,
     ExportNotReadyError,
+    IncompleteExportError,
     MarketLens,
     NotFoundError,
     RateLimitError,
@@ -314,13 +315,48 @@ class TestSeriesDownload:
         )
         _series_404(mock_api, "btc-daily")
 
-        result = client.exports.download_series(
-            "btc-daily", data_dir=str(tmp_path), progress=False,
-        )
+        with pytest.raises(IncompleteExportError) as exc:
+            client.exports.download_series(
+                "btc-daily", data_dir=str(tmp_path), progress=False,
+            )
+        result = exc.value.result
         assert result.rows_charged == 40
         assert result.events_charged == 100
         rl = result.rate_limited[0]
         assert (rl.market_id, rl.events, rl.rows) == ("m9", 70, 60)
+        assert (exc.value.missing, exc.value.rows_needed) == (["m9"], 60)
+        assert (tmp_path / "history-m1-compact.parquet").read_bytes() == b"PAR1-m1"
+        assert (tmp_path / ".incomplete").read_text() == "m9\n"
+
+    def test_wall_block_is_parsed_and_raised(self, mock_api, client, tmp_path):
+        manifest = self._manifest(ready_ids=["m1"], events=100)
+        manifest["rate_limited"] = [{"market_id": "m9", "events": 70, "rows": 60}]
+        manifest["wall"] = {
+            "reason": "daily_rows", "markets_withheld": 1, "rows_needed": 60,
+            "resets_at": 1783728000000,
+            "upgrade_url": "https://marketlens.trade/console/billing?checkout=pro",
+        }
+        mock_api.get("/series/btc-daily/export").mock(
+            return_value=httpx.Response(200, json=manifest)
+        )
+        mock_api.get(f"{BUCKET_BASE}/history/m1-compact.parquet").mock(
+            return_value=httpx.Response(200, content=b"PAR1-m1")
+        )
+        _series_404(mock_api, "btc-daily")
+
+        with pytest.raises(IncompleteExportError) as exc:
+            client.exports.download_series(
+                "btc-daily", data_dir=str(tmp_path), progress=False,
+            )
+        assert exc.value.upgrade_url == "https://marketlens.trade/console/billing?checkout=pro"
+        assert exc.value.resets_at == 1783728000000
+        assert exc.value.result.wall.markets_withheld == 1
+        assert "checkout=pro" in str(exc.value)
+
+        quote = client.exports.download_series(
+            "btc-daily", data_dir=str(tmp_path), progress=False, dry_run=True,
+        )
+        assert quote.wall.rows_needed == 60
 
     def test_result_is_pathlike(self, mock_api, client, tmp_path):
         mock_api.get("/series/btc-daily/export").mock(
@@ -420,9 +456,11 @@ class TestSeriesDownload:
         )
         _series_404(mock_api, "btc-daily")
 
-        result = client.exports.download_series(
-            "btc-daily", data_dir=str(tmp_path), progress=False,
-        )
+        with pytest.raises(IncompleteExportError) as exc:
+            client.exports.download_series(
+                "btc-daily", data_dir=str(tmp_path), progress=False,
+            )
+        result = exc.value.result
 
         assert result.ready == ["m1"]
         assert result.events_charged == 100
@@ -633,32 +671,30 @@ class TestIncompleteBacktestDownload:
     """The backtest autodownload must refuse a partial market set instead of
     silently backtesting whatever the row allowance let through."""
 
-    def _result(self, limited):
-        from types import SimpleNamespace
-        return SimpleNamespace(rate_limited=limited)
+    def _result(self, limited, data_dir):
+        return SeriesDownloadResult(data_dir=Path(data_dir), rate_limited=limited)
 
     def test_rate_limited_series_raises_and_marks_dir(self, tmp_path):
-        from marketlens import IncompleteExportError
-        from marketlens._client import _check_series_complete
-        from marketlens.resources.exports import SeriesRateLimited
+        from marketlens.resources.exports import _finish_series
 
         limited = [
             SeriesRateLimited(market_id="m-1", events=500, rows=400),
             SeriesRateLimited(market_id="m-2", events=300, rows=300),
         ]
         with pytest.raises(IncompleteExportError) as exc_info:
-            _check_series_complete(self._result(limited), "btc-5m", str(tmp_path))
+            _finish_series("btc-5m", tmp_path, self._result(limited, tmp_path))
         assert exc_info.value.missing == ["m-1", "m-2"]
         assert exc_info.value.rows_needed == 700
+        assert exc_info.value.result.rate_limited == limited
         marker = tmp_path / ".incomplete"
         assert marker.read_text().splitlines() == ["m-1", "m-2"]
 
     def test_complete_series_clears_the_marker(self, tmp_path):
-        from marketlens._client import _check_series_complete
+        from marketlens.resources.exports import _finish_series
 
         (tmp_path / ".incomplete").write_text("m-1\n")
-        _check_series_complete(self._result([]), "btc-5m", str(tmp_path))
-        assert not (tmp_path / ".incomplete").exists()
+        result = _finish_series("btc-5m", tmp_path, self._result([], tmp_path))
+        assert result.rate_limited == [] and not (tmp_path / ".incomplete").exists()
 
     def test_engine_retries_download_for_marked_dir(self, tmp_path):
         from types import SimpleNamespace

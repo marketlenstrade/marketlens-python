@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 
 class MarketLensError(Exception):
     """Base exception for all SDK errors."""
@@ -132,17 +134,27 @@ class IncompleteExportError(MarketLensError):
     """A series export could not deliver every market in the window because
     the remaining data-row balance did not cover the missing files.
 
-    Raised by the backtest autodownload path instead of silently running on
-    a partial market set (which would produce plausible but wrong results).
-    ``missing`` lists the market ids the server rate limited; ``rows_needed``
-    is the unlock cost of those files. Narrow the window, wait for the
-    allowance reset, or upgrade the plan, then rerun with the same
-    ``data_dir``: markets already downloaded are unlocked and free.
+    Raised by ``download_series`` after the ready files were downloaded, on a
+    plain download and inside a backtest alike, instead of silently running
+    on a partial market set (which would produce plausible but wrong
+    results). ``missing`` lists the market ids the server withheld;
+    ``rows_needed`` is the unlock cost of those files; ``upgrade_url`` and
+    ``resets_at`` (epoch ms) come from the server's ``wall`` block;
+    ``result`` is the ``SeriesDownloadResult`` for what was delivered.
+    Narrow the window, wait for the reset, or upgrade the plan, then rerun
+    with the same ``data_dir``: markets already downloaded are unlocked and
+    free.
     """
 
-    def __init__(self, message: str, missing: list[str], rows_needed: int) -> None:
+    def __init__(
+        self, message: str, missing: list[str], rows_needed: int, *,
+        upgrade_url: str | None = None, resets_at: int | None = None, result: Any = None,
+    ) -> None:
         self.missing = missing
         self.rows_needed = rows_needed
+        self.upgrade_url = upgrade_url
+        self.resets_at = resets_at
+        self.result = result
         super().__init__(message)
 
 

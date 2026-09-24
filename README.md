@@ -158,7 +158,7 @@ result = client.backtest(strategy, "btc-up-or-down-5m", data_dir=data,
                          after="2026-03-01", before="2026-03-08")
 ```
 
-Exports are Parquet files (snapshots, deltas, trades, and reference prices for the underlying), built server-side. A single market comes via `client.exports.download(market_id)`, which raises `ExportNotReadyError` until its file is built; `download_series` lists such markets under `result.pending` and skips them.
+Exports are Parquet files (snapshots, deltas, trades, and reference prices for the underlying), built server-side. A single market comes via `client.exports.download(market_id)`, which raises `ExportNotReadyError` until its file is built; `download_series` lists such markets under `result.pending` and skips them. When your remaining row allowance does not cover the whole window, the ready files are downloaded and then `IncompleteExportError` is raised with the rows needed to finish, the reset time and the upgrade link; rerun with the same `data_dir` after upgrading, since downloaded files re-download free.
 
 Downloads charge data rows against your plan's row balance the first time you take each file; a file you already unlocked charges zero rows on every later download, so polling a series or re-downloading is free. To see the cost of a window before spending it, pass `dry_run=True`: the same result comes back with `rows_charged` as an exact price quote (already accounting for files you own) and `ready` naming the markets a real call would download, but nothing is downloaded, billed, or unlocked.
 

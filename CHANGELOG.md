@@ -2,6 +2,11 @@
 
 All notable changes to the `marketlens` Python SDK, version by version.
 
+## [1.8.4] 2026-09-24
+
+* `download_series` raises `IncompleteExportError` on a plain download too, not only inside a backtest, after the ready files are on disk. The server now states the wall once on the manifest (`wall`: reason, markets withheld, rows needed to finish, reset time, upgrade link); the exception carries those as `rows_needed`, `resets_at` and `upgrade_url`, plus the partial `result`. `dry_run` never raises and its result exposes `wall` as the quote.
+* `SeriesDownloadResult.wall` (`SeriesWall`), `None` when nothing was withheld or against older servers.
+
 ## [1.8.3] 2026-09-12
 
 * README and package summary open with what the package is for: Polymarket historical data and backtesting. No code changes.

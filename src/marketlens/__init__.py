@@ -25,6 +25,7 @@ from marketlens.resources.exports import (
     SeriesFailed,
     SeriesPending,
     SeriesRateLimited,
+    SeriesWall,
 )
 from marketlens.backtest import BacktestConfig, BacktestEngine, BacktestResult, Strategy
 from marketlens.helpers.walk import AsyncOrderBookWalk, OrderBookWalk
@@ -93,6 +94,7 @@ __all__ = [
     "SeriesPending",
     "SeriesFailed",
     "SeriesRateLimited",
+    "SeriesWall",
     # Exceptions
     "MarketLensError",
     "APIError",

@@ -8,7 +8,7 @@ import httpx
 
 from marketlens._base import AsyncHTTPClient, SyncHTTPClient
 from marketlens._constants import DEFAULT_BASE_URL, DEFAULT_MAX_RETRIES, DEFAULT_TIMEOUT
-from marketlens.exceptions import IncompleteExportError, NotFoundError
+from marketlens.exceptions import NotFoundError
 from marketlens.resources.events import AsyncEvents, Events
 from marketlens.resources.exports import AsyncExports, Exports
 from marketlens.resources.markets import AsyncMarkets, Markets
@@ -24,42 +24,6 @@ def _needs_download(data_dir: str) -> bool:
     if not path.exists():
         return True
     return not any(path.glob("history-*.parquet"))
-
-
-# Marker left in a data_dir whose series download was cut short by the
-# data-row allowance. The backtest autodownload refuses to trust such a
-# directory and retries the download on the next run (already-unlocked
-# files are free), instead of silently backtesting a partial market set.
-INCOMPLETE_MARKER = ".incomplete"
-
-
-def _check_series_complete(result: Any, series_id: str, data_dir: str) -> None:
-    """Raise instead of handing the backtest engine a partial market set."""
-    marker = Path(data_dir) / INCOMPLETE_MARKER
-    limited = getattr(result, "rate_limited", None) or []
-    if not limited:
-        try:
-            marker.unlink()
-        except OSError:
-            pass
-        return
-    missing = [e.market_id for e in limited]
-    rows_needed = sum(e.rows or e.events for e in limited)
-    try:
-        marker.write_text("\n".join(missing) + "\n")
-    except OSError:
-        pass
-    raise IncompleteExportError(
-        f"Series '{series_id}': {len(missing)} markets in the window were not"
-        f" delivered because unlocking them needs {rows_needed:,} data rows"
-        " and the account's remaining allowance does not cover it. A backtest"
-        " on the partial set would be silently wrong. Narrow the window, wait"
-        " for the allowance reset, or upgrade the plan, then rerun with"
-        " the same data_dir: markets already downloaded are unlocked and"
-        " re-download free.",
-        missing=missing,
-        rows_needed=rows_needed,
-    )
 
 
 class MarketLens:
@@ -263,7 +227,6 @@ class MarketLens:
                     data_dir=data_dir, coalesce=coalesce, progress=progress,
                     concurrency=concurrency,
                 )
-                _check_series_complete(result, one, data_dir)
                 results.append((one, result))
         return results
 
@@ -411,7 +374,6 @@ class AsyncMarketLens:
                     data_dir=data_dir, coalesce=coalesce, progress=progress,
                     concurrency=concurrency,
                 )
-                _check_series_complete(result, one, data_dir)
                 results.append((one, result))
         return results
 

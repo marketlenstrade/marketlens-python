@@ -8,7 +8,7 @@ from typing import Any
 
 from marketlens._base import AsyncHTTPClient, SyncHTTPClient, _coerce_timestamp
 from marketlens._progress import make_reporter
-from marketlens.exceptions import ExportNotReadyError, NotFoundError
+from marketlens.exceptions import ExportNotReadyError, IncompleteExportError, NotFoundError
 
 # Reference trades are fetched a touch before the first market opens so a price
 # at/before the open is always available. Without it, a market opening on the
@@ -86,9 +86,71 @@ class SeriesDownloadResult:
     rows_charged: int = 0
     # The series' data span. None against older servers.
     coverage: SeriesCoverage | None = None
+    # Why the export stopped short. None when nothing was withheld or
+    # against older servers.
+    wall: SeriesWall | None = None
 
     def __fspath__(self) -> str:
         return str(self.data_dir)
+
+
+@dataclass(frozen=True)
+class SeriesWall:
+    """Why a series export stopped short, stated once by the server."""
+    reason: str
+    markets_withheld: int
+    rows_needed: int
+    resets_at: int | None
+    upgrade_url: str | None
+
+
+def _parse_wall(raw: Any) -> SeriesWall | None:
+    if not raw:
+        return None
+    return SeriesWall(
+        reason=str(raw.get("reason", "")),
+        markets_withheld=int(raw.get("markets_withheld", 0)),
+        rows_needed=int(raw.get("rows_needed", 0)),
+        resets_at=raw.get("resets_at"),
+        upgrade_url=raw.get("upgrade_url"),
+    )
+
+
+# Written into data_dir when the export stopped short, one withheld market id
+# per line, so a partial directory is recognisable on disk.
+INCOMPLETE_MARKER = ".incomplete"
+
+
+def _finish_series(series_id: str, data_dir: Path, result: "SeriesDownloadResult") -> "SeriesDownloadResult":
+    """Return the result, or raise ``IncompleteExportError`` once the ready
+    files are on disk when the server withheld markets."""
+    marker = data_dir / INCOMPLETE_MARKER
+    if not result.rate_limited:
+        try:
+            marker.unlink()
+        except OSError:
+            pass
+        return result
+    missing = [e.market_id for e in result.rate_limited]
+    wall = result.wall
+    rows_needed = wall.rows_needed if wall else sum(e.rows or e.events for e in result.rate_limited)
+    try:
+        marker.write_text("\n".join(missing) + "\n")
+    except OSError:
+        pass
+    raise IncompleteExportError(
+        f"Series '{series_id}': {len(missing)} markets in the window were not"
+        f" delivered because unlocking them needs {rows_needed:,} data rows"
+        " and the account's remaining allowance does not cover it. Files"
+        f" already downloaded are in {data_dir} and re-download free. Narrow"
+        " the window, wait for the allowance reset, or upgrade the plan"
+        + (f" at {wall.upgrade_url}" if wall and wall.upgrade_url else "") + ".",
+        missing=missing,
+        rows_needed=rows_needed,
+        upgrade_url=wall.upgrade_url if wall else None,
+        resets_at=wall.resets_at if wall else None,
+        result=result,
+    )
 
 
 @dataclass(frozen=True)
@@ -225,10 +287,11 @@ class Exports:
             ``SeriesDownloadResult`` with ``data_dir``, ``ready``, ``pending``,
             ``failed``, ``rate_limited``, ``rows_charged``, and the legacy
             ``events_charged`` alias.
-            ``rate_limited`` lists markets that were skipped because unlocking
-            them would have exceeded the caller's remaining row balance; retry
-            after the balance resets, after a plan upgrade, or with a
-            narrower ``after``/``before`` window. The result is
+            When the server withheld markets because unlocking them would
+            exceed the remaining row balance, the ready files are downloaded
+            and then ``IncompleteExportError`` is raised, carrying the
+            server's ``wall`` (rows needed, reset time, upgrade link) and
+            the partial result; ``dry_run`` never raises. The result is
             ``os.PathLike`` (its ``__fspath__`` returns the data directory),
             so it can be passed directly to
             ``client.backtest(..., data_dir=result)``. With ``dry_run=True``
@@ -264,6 +327,7 @@ class Exports:
         events_charged = int(body.get("events_charged", 0))
         rows_charged = int(body.get("rows_charged", events_charged))
         coverage = _parse_coverage(body.get("coverage"))
+        wall = _parse_wall(body.get("wall"))
 
         if dry_run:
             return SeriesDownloadResult(
@@ -275,6 +339,7 @@ class Exports:
                 events_charged=events_charged,
                 rows_charged=rows_charged,
                 coverage=coverage,
+                wall=wall,
             )
 
         targets = [(e["market_id"], e["url"]) for e in body.get("ready", [])]
@@ -318,7 +383,7 @@ class Exports:
                 except Exception:
                     pass
 
-        return SeriesDownloadResult(
+        return _finish_series(series_id, data_dir, SeriesDownloadResult(
             data_dir=data_dir,
             ready=ready,
             pending=pending,
@@ -327,7 +392,8 @@ class Exports:
             events_charged=events_charged,
             rows_charged=rows_charged,
             coverage=coverage,
-        )
+            wall=wall,
+        ))
 
     def download_market_bars(
         self, market_id: str, *, resolution: str, price: str, data_dir: str | Path,
@@ -516,6 +582,7 @@ class AsyncExports:
         events_charged = int(body.get("events_charged", 0))
         rows_charged = int(body.get("rows_charged", events_charged))
         coverage = _parse_coverage(body.get("coverage"))
+        wall = _parse_wall(body.get("wall"))
 
         if dry_run:
             return SeriesDownloadResult(
@@ -527,6 +594,7 @@ class AsyncExports:
                 events_charged=events_charged,
                 rows_charged=rows_charged,
                 coverage=coverage,
+                wall=wall,
             )
 
         targets = [(e["market_id"], e["url"]) for e in body.get("ready", [])]
@@ -573,7 +641,7 @@ class AsyncExports:
                 except Exception:
                     pass
 
-        return SeriesDownloadResult(
+        return _finish_series(series_id, data_dir, SeriesDownloadResult(
             data_dir=data_dir,
             ready=ready,
             pending=pending,
@@ -582,7 +650,8 @@ class AsyncExports:
             events_charged=events_charged,
             rows_charged=rows_charged,
             coverage=coverage,
-        )
+            wall=wall,
+        ))
 
     async def _ensure_reference(
         self, data_dir: Path, symbol: str, after: int, before: int,
