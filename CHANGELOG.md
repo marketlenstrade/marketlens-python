@@ -2,10 +2,13 @@
 
 All notable changes to the `marketlens` Python SDK, version by version.
 
+## [1.8.6] 2026-09-27
+
+* An alpha backtest with `data_dir` raises `FreeAllowanceExhaustedError` and `HistoryWindowError` instead of skipping the market as a missing bar file (every earlier version since 1.6.0 dropped it silently).
+
 ## [1.8.5] 2026-09-26
 
 * The free plan changed server side: 2M data rows once per account (it no longer resets daily) and the last 7 days of data. Two new errors, both raised by every SDK version and retried by none: `FREE_ALLOWANCE_EXHAUSTED` (402) raises `marketlens.FreeAllowanceExhaustedError` when the free allowance is used up, naming the rows the request needed; `HISTORY_WINDOW_EXCEEDED` (403) raises `marketlens.HistoryWindowError` (a `ForbiddenError`) when a request reaches before the last 7 days, naming the range the account can read. Older SDKs raise `APIError` and `ForbiddenError` with the same code and message. A free series export that does not fit now raises instead of returning a partial manifest; `dry_run` still quotes.
-* An alpha backtest with `data_dir` raises those two errors instead of skipping the market as a missing bar file (every earlier version since 1.6.0 dropped it silently).
 * `DailyBudgetExceededError` now only covers the legacy daily budget of grandfathered paid seats.
 * MCP: the instructions say a free account reads the last 7 days on a one time allowance.
 
