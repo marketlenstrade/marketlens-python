@@ -8,7 +8,13 @@ from typing import Any
 
 from marketlens._base import AsyncHTTPClient, SyncHTTPClient, _coerce_timestamp
 from marketlens._progress import make_reporter
-from marketlens.exceptions import ExportNotReadyError, IncompleteExportError, NotFoundError
+from marketlens.exceptions import (
+    ExportNotReadyError,
+    FreeAllowanceExhaustedError,
+    HistoryWindowError,
+    IncompleteExportError,
+    NotFoundError,
+)
 
 # Reference trades are fetched a touch before the first market opens so a price
 # at/before the open is always available. Without it, a market opening on the
@@ -457,6 +463,8 @@ class Exports:
                     state = "pending"
                 except NotFoundError:
                     state = "not_found"
+                except (FreeAllowanceExhaustedError, HistoryWindowError):
+                    raise  # a plan wall, not a missing file: the caller must see it
                 except Exception:
                     state = "not_found"
                 reporter.batch_download_advance()
