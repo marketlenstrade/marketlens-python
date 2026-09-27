@@ -4,6 +4,7 @@ import bisect
 import json
 import os
 import sys
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, AsyncIterator, Iterator
@@ -503,9 +504,11 @@ class _EngineCore:
         present_total = 0
         pending_ids: set[str] = set()
         failed_ids: set[str] = set()
+        outside_ids: set[str] = set()
         for _target, result in self._download_results:
             pending_ids.update(e.market_id for e in getattr(result, "pending", []) or [])
             failed_ids.update(e.market_id for e in getattr(result, "failed", []) or [])
+            outside_ids.update(getattr(result, "outside_window", []) or [])
         for m in markets:
             has = (
                 (dir_path / f"history-{m.id}.parquet").exists()
@@ -513,7 +516,7 @@ class _EngineCore:
             )
             sid = m.series_id or m.id
             g = groups.setdefault(
-                sid, {"present": 0, "missing": 0,
+                sid, {"present": 0, "missing": 0, "reasons": Counter(),
                       "label": m.series_title or m.underlying or sid},
             )
             if has:
@@ -525,6 +528,8 @@ class _EngineCore:
                     self._record_skip(m, "export pending")
                 elif m.id in failed_ids:
                     self._record_skip(m, "export failed")
+                elif m.id in outside_ids:
+                    self._record_skip(m, "outside the free 7 day window")
                 else:
                     self._record_skip(m, "no history file")
                 if m.id in self._direct_targets:
@@ -532,14 +537,17 @@ class _EngineCore:
                     g["missing"] -= 1
                 else:
                     self._announced.add(m.id)
+                    g["reasons"][self._skipped[m.id].reason] += 1
         if announce and self._announce:
             for g in groups.values():
                 if g["missing"]:
                     total = g["present"] + g["missing"]
-                    _prep_status(
-                        f"Skipping {g['missing']} of {total} markets for "
-                        f"'{g['label']}': no history file in {dir_path}"
+                    why = ", ".join(
+                        (f"no history file in {dir_path}" if r == "no history file" else r)
+                        + (f" ({n})" if len(g["reasons"]) > 1 else "")
+                        for r, n in g["reasons"].items()
                     )
+                    _prep_status(f"Skipping {g['missing']} of {total} markets for '{g['label']}': {why}")
         return present_total
 
     def _record_skip(self, market: Market, reason: str) -> None:
@@ -691,7 +699,7 @@ class _EngineCore:
     def _announce_empty_manifests(self, after: Any, before: Any) -> None:
         for target, result in self._download_results:
             cov = getattr(result, "coverage", None)
-            if result.ready or result.pending or result.failed or result.rate_limited:
+            if result.ready or result.pending or result.failed or result.rate_limited or getattr(result, "outside_window", None):
                 continue
             self._note_empty_window(target, cov, after, before)
 

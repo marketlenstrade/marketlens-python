@@ -88,6 +88,9 @@ class SeriesDownloadResult:
     pending: list[SeriesPending] = field(default_factory=list)
     failed: list[SeriesFailed] = field(default_factory=list)
     rate_limited: list[SeriesRateLimited] = field(default_factory=list)
+    # Markets the window holds that the account's plan cannot read (Free reads
+    # the last 7 days); no file is downloaded for them.
+    outside_window: list[str] = field(default_factory=list)
     events_charged: int = 0
     rows_charged: int = 0
     # The series' data span. None against older servers.
@@ -334,6 +337,7 @@ class Exports:
         rows_charged = int(body.get("rows_charged", events_charged))
         coverage = _parse_coverage(body.get("coverage"))
         wall = _parse_wall(body.get("wall"))
+        outside_window = list(body.get("outside_window") or [])
 
         if dry_run:
             return SeriesDownloadResult(
@@ -342,6 +346,7 @@ class Exports:
                 pending=pending,
                 failed=failed,
                 rate_limited=rate_limited,
+                outside_window=outside_window,
                 events_charged=events_charged,
                 rows_charged=rows_charged,
                 coverage=coverage,
@@ -395,6 +400,7 @@ class Exports:
             pending=pending,
             failed=failed,
             rate_limited=rate_limited,
+            outside_window=outside_window,
             events_charged=events_charged,
             rows_charged=rows_charged,
             coverage=coverage,
@@ -591,6 +597,7 @@ class AsyncExports:
         rows_charged = int(body.get("rows_charged", events_charged))
         coverage = _parse_coverage(body.get("coverage"))
         wall = _parse_wall(body.get("wall"))
+        outside_window = list(body.get("outside_window") or [])
 
         if dry_run:
             return SeriesDownloadResult(
@@ -599,6 +606,7 @@ class AsyncExports:
                 pending=pending,
                 failed=failed,
                 rate_limited=rate_limited,
+                outside_window=outside_window,
                 events_charged=events_charged,
                 rows_charged=rows_charged,
                 coverage=coverage,
@@ -655,6 +663,7 @@ class AsyncExports:
             pending=pending,
             failed=failed,
             rate_limited=rate_limited,
+            outside_window=outside_window,
             events_charged=events_charged,
             rows_charged=rows_charged,
             coverage=coverage,

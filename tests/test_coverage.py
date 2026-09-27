@@ -340,6 +340,22 @@ def test_pending_export_lands_in_skipped(mock_api, client, tmp_path):
     assert [(sk.market_id, sk.reason) for sk in result.skipped] == [("m-1", "export pending")]
 
 
+def test_markets_outside_the_free_window_are_skipped_with_that_reason(mock_api, client, tmp_path, status_lines):
+    m1 = _m("m-1", data_start=T_OPEN - 5, data_end=T_CLOSE + 5)
+    _series_mocks(mock_api, [m1], {})
+    mock_api.get("/markets/btc-up-or-down-5m/export").mock(return_value=httpx.Response(404, json={
+        "error": {"code": "MARKET_NOT_FOUND", "message": "Not found"}}))
+    mock_api.get("/series/btc-up-or-down-5m/export").mock(return_value=httpx.Response(200, json={
+        "ready": [], "pending": [], "failed": [], "rate_limited": [], "outside_window": ["m-1"],
+        "events_charged": 0, "rows_charged": 0,
+    }))
+    result = client.backtest(_Noop(), "btc-up-or-down-5m", after=T_OPEN, before=T_CLOSE,
+                             initial_cash=1000, data_dir=str(tmp_path / "d"), progress=False)
+    assert [(sk.market_id, sk.reason) for sk in result.skipped] == [("m-1", "outside the free 7 day window")]
+    assert "Skipping 1 of 1 markets for 'BTC Up or Down 5m': outside the free 7 day window" in status_lines
+    assert not any(l.startswith("No markets for") for l in status_lines)
+
+
 def test_skipped_survives_save_and_load(mock_api, client, tmp_path):
     gone = _m("m-gone", data_start=T_CLOSE + 60_000, data_end=T_CLOSE + 90_000)
     _series_mocks(mock_api, [gone], {})

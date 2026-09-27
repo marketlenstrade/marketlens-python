@@ -2,6 +2,10 @@
 
 All notable changes to the `marketlens` Python SDK, version by version.
 
+## [1.8.7] 2026-09-27
+
+* A backtest with `data_dir` on a free account lists the markets in the window that start before the free 7 day window under `result.skipped` with the reason "outside the free 7 day window", instead of "no history file". The status line names each skip reason. `SeriesDownloadResult.outside_window` lists those market ids (empty against older servers).
+
 ## [1.8.6] 2026-09-27
 
 * An alpha backtest with `data_dir` raises `FreeAllowanceExhaustedError` and `HistoryWindowError` instead of skipping the market as a missing bar file (every earlier version since 1.6.0 dropped it silently).
