@@ -65,7 +65,9 @@ Timestamps (after / before / at): epoch ms or an ISO 8601 string like
 "2026-03-01T12:00:00Z".
 
 Coverage: history runs from 2026-03-01 up to roughly 3 hours ago; the most
-recent few hours are not built yet, so keep windows within that range. Every
+recent few hours are not built yet, so keep windows within that range. A free
+account reads only the last 7 days (an older window errors with the range it
+can read) and has a one time row allowance. Every
 market from get_market / search_markets carries data_start and data_end,
 the span in which it was live in our data (data_end is null while it is
 still open on the platform), so choose windows from those instead of

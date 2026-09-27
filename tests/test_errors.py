@@ -6,6 +6,8 @@ from marketlens import (
     MarketLens,
     AuthenticationError,
     DailyBudgetExceededError,
+    FreeAllowanceExhaustedError,
+    HistoryWindowError,
     NotFoundError,
     InvalidParameterError,
     RateLimitError,
@@ -112,6 +114,19 @@ class TestBudget429Codes:
         with pytest.raises(exc_cls) as exc_info:
             client.markets.list().to_list()
         assert exc_info.value.retry_after == 600
+        assert exc_info.value.code == code
+        assert route.call_count == 1  # no retry
+
+    @pytest.mark.parametrize("status,code,exc_cls", [
+        (402, "FREE_ALLOWANCE_EXHAUSTED", FreeAllowanceExhaustedError),
+        (403, "HISTORY_WINDOW_EXCEEDED", HistoryWindowError),
+    ])
+    def test_free_plan_walls_map_and_never_retry(self, mock_api, client, status, code, exc_cls):
+        route = mock_api.get("/markets").mock(return_value=httpx.Response(
+            status, json={"error": {"code": code, "message": "free plan", "status": status}},
+        ))
+        with pytest.raises(exc_cls) as exc_info:
+            client.markets.list().to_list()
         assert exc_info.value.code == code
         assert route.call_count == 1  # no retry
 

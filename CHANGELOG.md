@@ -2,6 +2,12 @@
 
 All notable changes to the `marketlens` Python SDK, version by version.
 
+## [1.8.5] 2026-09-26
+
+* The free plan changed server side: 2M data rows once per account (it no longer resets daily) and the last 7 days of data. Two new errors, both raised by every SDK version and retried by none: `FREE_ALLOWANCE_EXHAUSTED` (402) raises `marketlens.FreeAllowanceExhaustedError` when the free allowance is used up, naming the rows the request needed; `HISTORY_WINDOW_EXCEEDED` (403) raises `marketlens.HistoryWindowError` (a `ForbiddenError`) when a request reaches before the last 7 days, naming the range the account can read. Older SDKs raise `APIError` and `ForbiddenError` with the same code and message. A free series export that does not fit now raises instead of returning a partial manifest; `dry_run` still quotes.
+* `DailyBudgetExceededError` now only covers the legacy daily budget of grandfathered paid seats.
+* MCP: the instructions say a free account reads the last 7 days on a one time allowance.
+
 ## [1.8.4] 2026-09-24
 
 * `download_series` raises `IncompleteExportError` on a plain download too, not only inside a backtest, after the ready files are on disk. The server now states the wall once on the manifest (`wall`: reason, markets withheld, rows needed to finish, reset time, upgrade link); the exception carries those as `rows_needed`, `resets_at` and `upgrade_url`, plus the partial `result`. `dry_run` never raises and its result exposes `wall` as the quote.

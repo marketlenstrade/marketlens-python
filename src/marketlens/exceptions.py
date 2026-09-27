@@ -25,6 +25,13 @@ class ForbiddenError(APIError):
     """403 Forbidden."""
 
 
+class HistoryWindowError(ForbiddenError):
+    """403 HISTORY_WINDOW_EXCEEDED: the request reaches before the data the
+    plan can read (Free reads the last 7 days). The message names the
+    accessible range and the upgrade link. Never retried.
+    """
+
+
 class NotFoundError(APIError):
     """404 Not Found."""
 
@@ -70,7 +77,8 @@ class RateLimitError(APIError):
 
 
 class DailyBudgetExceededError(APIError):
-    """429 Daily data budget exhausted (free tier). Resets at midnight UTC.
+    """429 Legacy daily event budget exhausted (grandfathered seats only).
+    Resets at midnight UTC.
 
     Not auto-retried by the SDK (unlike :class:`RateLimitError`).
     """
@@ -78,6 +86,13 @@ class DailyBudgetExceededError(APIError):
     def __init__(self, status_code: int, code: str, message: str, retry_after: int | None = None) -> None:
         super().__init__(status_code, code, message)
         self.retry_after = retry_after
+
+
+class FreeAllowanceExhaustedError(APIError):
+    """402 FREE_ALLOWANCE_EXHAUSTED: the free plan's one time data row
+    allowance is used up. It does not reset; the message carries the rows
+    needed and the upgrade link. Never retried.
+    """
 
 
 class RowLimitExceededError(APIError):
@@ -187,6 +202,8 @@ _CODE_TO_EXCEPTION: dict[str, type[APIError]] = {
     "CURSOR_EXPIRED": InvalidParameterError,
     "RATE_LIMITED": RateLimitError,
     "DAILY_BUDGET_EXCEEDED": DailyBudgetExceededError,
+    "FREE_ALLOWANCE_EXHAUSTED": FreeAllowanceExhaustedError,
+    "HISTORY_WINDOW_EXCEEDED": HistoryWindowError,
     "ROW_LIMIT_EXCEEDED": RowLimitExceededError,
     "STORE_UNAVAILABLE": StoreUnavailableError,
     "UNIT_LIMIT_EXCEEDED": RequestUnitsExceededError,
