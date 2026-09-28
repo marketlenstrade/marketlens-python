@@ -7,7 +7,7 @@ engine trades each market to it, filling at the next bar's mid plus slippage and
 fees. State resets per market via ``on_market_start``.
 """
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from marketlens import MarketLens
 from marketlens.backtest import AlphaStrategy
@@ -27,12 +27,12 @@ class MomentumTilt(AlphaStrategy):
 
 
 client = MarketLens()
+end = datetime.now(timezone.utc) - timedelta(days=1)
 result = client.backtest(
     MomentumTilt(), "solana-up-or-down-hourly",
     initial_cash=10_000,
     resolution="1m", price="mid", fill="next", slippage_bps=5,
-    after=datetime(2026, 3, 5, 0, 0, tzinfo=timezone.utc),
-    before=datetime(2026, 3, 6, 0, 0, tzinfo=timezone.utc),
+    after=end - timedelta(days=1), before=end,
 )
 print(result)
 print(result.equity_df().tail().to_string())

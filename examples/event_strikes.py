@@ -4,16 +4,16 @@ Walks a multi-strike series and captures the final surface state per event,
 showing how the implied distribution shifts across successive expirations.
 """
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from marketlens import MarketLens
 
 client = MarketLens()
+end = datetime.now(timezone.utc) - timedelta(days=1)
 
 walk = client.orderbook.walk(
     "ethereum-multi-strikes-weekly",
-    after=datetime(2026, 3, 5, 10, 0, tzinfo=timezone.utc),
-    before=datetime(2026, 3, 5, 10, 5, tzinfo=timezone.utc),
+    after=end - timedelta(minutes=5), before=end,
 )
 
 last_event_id = None

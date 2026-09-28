@@ -4,7 +4,7 @@ Runs one strategy against two rolling series simultaneously with shared
 capital. Each fill draws from the same cash pool.
 """
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from marketlens import MarketLens
 from marketlens.backtest import Strategy
@@ -26,12 +26,12 @@ class BuyOnImbalance(Strategy):
 
 
 client = MarketLens()
+end = datetime.now(timezone.utc) - timedelta(days=1)
 result = client.backtest(
     BuyOnImbalance(),
     ["eth-up-or-down-5m", "sol-up-or-down-5m"],
     initial_cash=10_000,
-    after=datetime(2026, 3, 5, 10, 0, tzinfo=timezone.utc),
-    before=datetime(2026, 3, 5, 10, 5, tzinfo=timezone.utc),
+    after=end - timedelta(minutes=5), before=end,
 )
 
 print(result)

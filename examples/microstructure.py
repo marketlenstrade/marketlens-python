@@ -4,16 +4,16 @@ Walks a rolling series, builds a per-market feature matrix from L2 replay,
 and checks whether imbalance direction correlates with the winning outcome.
 """
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from marketlens import MarketLens
 
 client = MarketLens()
+end = datetime.now(timezone.utc) - timedelta(days=1)
 
 df = client.orderbook.walk(
     "eth-up-or-down-15m",
-    after=datetime(2026, 3, 5, 10, 0, tzinfo=timezone.utc),
-    before=datetime(2026, 3, 5, 10, 5, tzinfo=timezone.utc),
+    after=end - timedelta(minutes=5), before=end,
 ).to_dataframe()
 
 features = df.groupby("market_id").agg(

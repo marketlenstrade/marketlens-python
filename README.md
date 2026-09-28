@@ -10,11 +10,13 @@ Polymarket historical data and backtesting in Python. Marketlens records every o
 pip install marketlens
 ```
 
-Python 3.10+. Get a free API key at [marketlens.trade](https://marketlens.trade/?utm_source=github&utm_medium=repo&utm_campaign=marketlens-python) and export it as `MARKETLENS_API_KEY`. Order book history starts 2026-03-01.
+Python 3.10+. Get a free API key at [marketlens.trade](https://marketlens.trade/?utm_source=github&utm_medium=repo&utm_campaign=marketlens-python) and export it as `MARKETLENS_API_KEY`. Order book history starts 2026-03-01; a free key reads markets open in the last 7 days, with 2M data rows once.
 
 ## Quickstart
 
 ```python
+from datetime import datetime, timedelta, timezone
+
 from marketlens import MarketLens
 from marketlens.backtest import Strategy
 
@@ -32,10 +34,11 @@ class OpeningFader(Strategy):
         self._entered = True
 
 client = MarketLens()  # reads MARKETLENS_API_KEY
+end = datetime.now(timezone.utc) - timedelta(days=1)
 result = client.backtest(
     OpeningFader(), "btc-up-or-down-5m",
     initial_cash=10_000,
-    after="2026-04-15T01:45:00Z", before="2026-04-15T02:00:00Z",
+    after=end - timedelta(minutes=15), before=end,
 )
 print(result.summary())
 ```
@@ -66,7 +69,7 @@ A rolling series, every market in `[after, before)`:
 ```python
 result = client.backtest(
     strategy, "btc-up-or-down-5m", initial_cash=10_000,
-    after="2026-04-15T01:45:00Z", before="2026-04-15T02:00:00Z",
+    after=end - timedelta(minutes=15), before=end,
 )
 ```
 
@@ -76,7 +79,7 @@ A portfolio with shared capital across series:
 result = client.backtest(
     strategy, ["btc-up-or-down-5m", "eth-up-or-down-5m", "sol-up-or-down-5m"],
     initial_cash=10_000,
-    after="2026-04-15T01:45:00Z", before="2026-04-15T02:00:00Z",
+    after=end - timedelta(minutes=15), before=end,
 )
 ```
 
@@ -85,7 +88,7 @@ A structured product, every strike in the matched event replayed together (`ctx.
 ```python
 result = client.backtest(
     strategy, "btc-multi-strikes-weekly", initial_cash=10_000,
-    after="2026-05-08T00:00:00Z",  # picks the next event ending after this
+    after=end - timedelta(days=6),  # picks the next event ending after this
 )
 ```
 
@@ -94,7 +97,7 @@ A sports league, one bet type across the day's games:
 ```python
 result = client.backtest(
     strategy, "mlb", subtype="moneyline", initial_cash=10_000,
-    after="2026-06-21T17:30:00Z", before="2026-06-22T03:30:00Z",
+    after=end - timedelta(hours=10), before=end,
 )
 ```
 
@@ -122,7 +125,7 @@ result = client.backtest(
     MomentumTilt(), "btc-up-or-down-5m",
     initial_cash=10_000,
     resolution="1m", price="mid", fill="next", slippage_bps=5,
-    after="2026-03-01T00:00:00Z", before="2026-03-08T00:00:00Z",
+    after=end - timedelta(days=1), before=end,
 )
 ```
 
@@ -139,7 +142,7 @@ result = client.backtest(
     strategy, "btc-up-or-down-5m",
     data_dir="data/btc-5m",
     initial_cash=10_000,
-    after="2026-03-01", before="2026-03-08",
+    after=end - timedelta(hours=1), before=end,
 )
 # tweak the strategy, run again: replays entirely from disk
 ```
@@ -150,12 +153,12 @@ This works for both engines (tick history and alpha bars). To prefetch explicitl
 
 ```python
 data = client.exports.download_series(
-    "btc-up-or-down-5m", after="2026-03-01", before="2026-03-08")
+    "btc-up-or-down-5m", after=end - timedelta(hours=1), before=end)
 print(data.ready, data.pending, data.failed, data.events_charged)
 
 result = client.backtest(strategy, "btc-up-or-down-5m", data_dir=data,
                          initial_cash=10_000,
-                         after="2026-03-01", before="2026-03-08")
+                         after=end - timedelta(hours=1), before=end)
 ```
 
 Exports are Parquet files (snapshots, deltas, trades, and reference prices for the underlying), built server-side. A single market comes via `client.exports.download(market_id)`, which raises `ExportNotReadyError` until its file is built; `download_series` lists such markets under `result.pending` and skips them. When your remaining row allowance does not cover the whole window, the ready files are downloaded and then `IncompleteExportError` is raised with the rows needed to finish, the reset time and the upgrade link; rerun with the same `data_dir` after upgrading, since downloaded files re-download free.
@@ -164,7 +167,7 @@ Downloads charge data rows against your plan's row balance the first time you ta
 
 ```python
 quote = client.exports.download_series(
-    "btc-up-or-down-5m", after="2026-03-01", before="2026-03-08", dry_run=True)
+    "btc-up-or-down-5m", after=end - timedelta(hours=1), before=end, dry_run=True)
 print(quote.rows_charged)  # cost of the real call, narrow the window if too high
 ```
 
@@ -206,7 +209,7 @@ Pass a list of strategies to race them over the same window; you get a `MultiBac
 result = client.backtest(
     [maker, fader], "btc-up-or-down-5m",
     labels=["maker", "fader"], initial_cash=10_000,
-    after="2026-04-15T01:45:00Z", before="2026-04-15T02:00:00Z",
+    after=end - timedelta(minutes=15), before=end,
 )
 result.show()
 ```
@@ -220,15 +223,15 @@ active = client.markets.list(status="active", sort="-volume", take=10)
 
 candles = client.markets.candles(
     market_id, resolution="1m",
-    after="2026-04-15T01:45:00Z", before="2026-04-15T01:50:00Z",
+    after=end - timedelta(minutes=5), before=end,
 ).to_dataframe()
 
 trades = client.markets.trades(
     market_id,
-    after="2026-04-15T01:45:00Z", before="2026-04-15T01:50:00Z",
+    after=end - timedelta(minutes=5), before=end,
 ).to_list()
 
-book = client.orderbook.get(market_id, at="2026-04-15T01:45:00Z")  # point-in-time L2
+book = client.orderbook.get(market_id, at=end)  # point-in-time L2
 book.nearest  # "before": latest book at or before `at` (clamped to data_end); "after": `at` was before data_start, this is the book there
 ```
 
@@ -256,7 +259,7 @@ Binance spot at 1-second resolution is available for crypto underlyings (BTC, ET
 ```python
 candles = client.reference.candles(
     "BTC", resolution="1s",
-    after="2026-04-15T01:45:00Z", before="2026-04-15T01:50:00Z",
+    after=end - timedelta(minutes=5), before=end,
 )
 ```
 
@@ -266,7 +269,7 @@ Multi-strike series imply a probability distribution over the underlying. Pre-co
 
 ```python
 walk = client.orderbook.walk("btc-multi-strikes-weekly",
-                             after="2026-05-08T00:00:00Z")
+                             after=end - timedelta(days=6))
 for market, book in walk:
     surface = walk.surface()
     if surface:

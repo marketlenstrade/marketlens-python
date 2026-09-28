@@ -4,7 +4,7 @@ The engine walks sequential markets in the series, settling each before
 moving to the next. Strategy state resets per market via on_market_start.
 """
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from marketlens import MarketLens
 from marketlens.backtest import Strategy
@@ -23,11 +23,11 @@ class SpreadTimer(Strategy):
 
 
 client = MarketLens()
+end = datetime.now(timezone.utc) - timedelta(days=1)
 result = client.backtest(
     SpreadTimer(), "solana-up-or-down-hourly",
     initial_cash=10_000,
-    after=datetime(2026, 3, 5, 10, 0, tzinfo=timezone.utc),
-    before=datetime(2026, 3, 5, 10, 5, tzinfo=timezone.utc),
+    after=end - timedelta(minutes=5), before=end,
 )
 print(result)
 print(result.trades_df().to_string())

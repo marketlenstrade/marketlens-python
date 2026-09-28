@@ -6,7 +6,7 @@ drained by trades and cancellations. For a simpler (but less accurate) model,
 replace queue_position with limit_fill_rate (e.g. limit_fill_rate=0.2).
 """
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from marketlens import MarketLens
 from marketlens.backtest import Strategy
@@ -23,10 +23,10 @@ class LimitTrader(Strategy):
 
 
 client = MarketLens()
+end = datetime.now(timezone.utc) - timedelta(days=1)
 result = client.backtest(
     LimitTrader(), "eth-up-or-down-5m",
-    after=datetime(2026, 3, 5, 10, 0, tzinfo=timezone.utc),
-    before=datetime(2026, 3, 5, 10, 5, tzinfo=timezone.utc),
+    after=end - timedelta(minutes=5), before=end,
     initial_cash=10_000,
     include_trades=True,
     queue_position=True,

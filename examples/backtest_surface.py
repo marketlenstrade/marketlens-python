@@ -9,7 +9,7 @@ state, compute_surface for real-time PAVA regression, and ctx.reference_price()
 to filter trades to strikes near the current spot price.
 """
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from marketlens import MarketLens
 from marketlens.backtest import Strategy
@@ -45,12 +45,12 @@ class SurfaceMispricing(Strategy):
 
 
 client = MarketLens()
+end = datetime.now(timezone.utc) - timedelta(days=1)
 series = client.series.get("ethereum-multi-strikes-weekly")
 result = client.backtest(
     SurfaceMispricing(series, edge=0.01), "ethereum-multi-strikes-weekly",
     initial_cash=10_000,
-    after=datetime(2026, 3, 5, 10, 0, tzinfo=timezone.utc),
-    before=datetime(2026, 3, 5, 10, 5, tzinfo=timezone.utc),
+    after=end - timedelta(minutes=5), before=end,
 )
 print(result)
 print(result.trades_df().to_string())
