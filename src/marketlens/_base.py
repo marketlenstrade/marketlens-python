@@ -25,6 +25,7 @@ from marketlens.exceptions import (
     DailyBudgetExceededError,
     DataNotAvailableError,
     ExportNotReadyError,
+    HistoryWindowError,
     NON_RETRYABLE_429_CODES,
     RateLimitError,
     RequestUnitsExceededError,
@@ -171,9 +172,9 @@ def _raise_for_error(response: httpx.Response) -> None:
             export_status=export_status, last_error=last_error,
         )
 
-    if exc_cls is DataNotAvailableError:
+    if exc_cls in (DataNotAvailableError, HistoryWindowError):
         details = {k: v for k, v in error.items() if k not in ("code", "message", "status")}
-        raise DataNotAvailableError(response.status_code, code, message, details=details)
+        raise exc_cls(response.status_code, code, message, details=details)
 
     raise exc_cls(response.status_code, code, message)
 

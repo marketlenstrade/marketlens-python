@@ -179,6 +179,16 @@ class TestAlphaBacktest:
             data_dir=str(tmp_path))
         assert res.total_trades == 0 and len(res._settlements) == 0
 
+    @pytest.mark.parametrize("offline", [False, True])
+    def test_named_market_before_the_free_window_raises_in_both_modes(self, mock_api, client, tmp_path, offline):
+        from marketlens import HistoryWindowError
+        mock_api.get("/markets/m1").mock(return_value=httpx.Response(200, json=_resolved_market(win_index=0)))
+        wall = httpx.Response(403, json={"error": {"code": "HISTORY_WINDOW_EXCEEDED", "message": "free plan", "window_start": 99 * MIN}})
+        mock_api.get("/markets/m1/orderbook/metrics" + ("/export" if offline else "")).mock(return_value=wall)
+        with pytest.raises(HistoryWindowError):
+            client.backtest(LongYes(), "m1", after=0, before=11 * MIN, initial_cash=10_000,
+                            data_dir=str(tmp_path) if offline else None)
+
     def test_reference_price_available(self, mock_api, client):
         market = _resolved_market(win_index=0)
         market["underlying"] = "BTC"

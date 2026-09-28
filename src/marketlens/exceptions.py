@@ -26,10 +26,16 @@ class ForbiddenError(APIError):
 
 
 class HistoryWindowError(ForbiddenError):
-    """403 HISTORY_WINDOW_EXCEEDED: the request reaches before the data the
-    plan can read (Free reads the last 7 days). The message names the
-    accessible range and the upgrade link. Never retried.
+    """403 HISTORY_WINDOW_EXCEEDED: the market's data ended before the
+    plan's history window (Free reads markets open in the last 7 days). The
+    message names the window and the upgrade link; ``window_start`` is its
+    start (epoch ms). Never retried.
     """
+
+    def __init__(self, status_code: int, code: str, message: str, details: dict | None = None) -> None:
+        super().__init__(status_code, code, message)
+        self.details: dict = dict(details or {})
+        self.window_start: int | None = self.details.get("window_start")
 
 
 class NotFoundError(APIError):

@@ -2,6 +2,15 @@
 
 All notable changes to the `marketlens` Python SDK, version by version.
 
+## [1.8.8] 2026-09-28
+
+* The free plan window is now per market, server side: a free account reads, in full, every market open in the last 7 days, and a market that ended before them answers `HistoryWindowError` (403). `HistoryWindowError` carries `window_start` and the raw `details` (`data_end`, `upgrade_url`).
+* A series backtest (streaming or `data_dir`, tick or alpha) skips the markets that ended before the window under `result.skipped` with the reason "outside the free 7 day window" instead of stopping at the first one; after the first such market the rest are skipped without a request. A market or window you name yourself still raises. `data_dir` reruns keep the reason (saved in `.outside-window`), and `BarsDownloadResult.outside` lists those markets instead of raising.
+* Skips are reported once, after the run: one `Skipped N of M markets for '<series>': <reasons>` line per series, the free window reason carrying the upgrade link. The coverage reason reads "no coverage in window" and the file reason "no history file", as in `result.skipped`.
+* Streaming requests order book history from 1 ms before a market's replay start (the route's `after` is exclusive), so an event at a market's first millisecond replays as it does from `data_dir`.
+* `SeriesDownloadResult.upgrade_url`, set when `outside_window` is not empty.
+* MCP: the instructions say a free account reads markets open in the last 7 days.
+
 ## [1.8.7] 2026-09-27
 
 * A backtest with `data_dir` on a free account lists the markets in the window that start before the free 7 day window under `result.skipped` with the reason "outside the free 7 day window", instead of "no history file". The status line names each skip reason. `SeriesDownloadResult.outside_window` lists those market ids (empty against older servers).

@@ -4,7 +4,6 @@ import bisect
 import json
 import os
 import sys
-from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, AsyncIterator, Iterator
@@ -12,8 +11,9 @@ from typing import Any, AsyncIterator, Iterator
 import pyarrow.parquet as pq
 
 from marketlens._base import _coerce_timestamp
+from marketlens.resources.exports import OUTSIDE_MARKER
 from marketlens._progress import _ProgressReporter, make_reporter
-from marketlens.exceptions import NotFoundError, ExportNotReadyError, StoreUnavailableError
+from marketlens.exceptions import HistoryWindowError, NotFoundError, ExportNotReadyError, StoreUnavailableError
 from marketlens.backtest._bar import (
     _RESOLUTION_MS,
     AlphaConfig,
@@ -150,6 +150,7 @@ _EPS_SHARE = 1e-4  # half a tick on shares (4 d.p.)
 # once the server's own concurrency is saturated.
 _PREWARM_MAX_WORKERS = 4
 _STOP = object()
+_WINDOW_SKIP = "outside the free 7 day window"
 
 
 def _prewarm_streams(
@@ -401,6 +402,10 @@ class _EngineCore:
         self._skipped: dict[str, SkippedMarket] = {}
         self._coverage: dict[str, dict] = {}
         self._direct_targets: set[str] = set()
+        # The account's history window and where to lift it, from the first
+        # market a series run could not read (Free reads markets open in the last 7 days).
+        self._window_start: int | None = None
+        self._upgrade_url: str | None = None
         self._target_series: dict[str, str] = {}  # series target as passed -> series id
         self._resolved_markets: dict[str, Market] = {}
         self._announced: set[str] = set()
@@ -493,62 +498,60 @@ class _EngineCore:
     ) -> int:
         """Pre-resolve local files before the progress bar starts.
 
-        Logs one ``Skipping N of M markets for '<series>'`` line per series via
-        ``_prep_status`` (printed before the bar, so it never interleaves with
-        the live render) and returns the count of markets that have data — the
-        correct bar total. ``_make_file_stream`` then skips missing files
+        Records each missing market's reason (reported once after the run by
+        ``_announce_unreported_skips``) and returns the count of markets that
+        have data — the correct bar total. ``_make_file_stream`` then skips missing files
         silently. Existence-only check (no side effects on resolver state).
         """
         dir_path = Path(data_dir)
-        groups: dict[str, dict] = {}
         present_total = 0
         pending_ids: set[str] = set()
         failed_ids: set[str] = set()
-        outside_ids: set[str] = set()
+        marker = dir_path / OUTSIDE_MARKER
+        outside = json.loads(marker.read_text()) if marker.exists() else {}
+        outside_ids = set(outside.get("markets", []))
+        self._upgrade_url = self._upgrade_url or outside.get("upgrade_url")
         for _target, result in self._download_results:
             pending_ids.update(e.market_id for e in getattr(result, "pending", []) or [])
             failed_ids.update(e.market_id for e in getattr(result, "failed", []) or [])
-            outside_ids.update(getattr(result, "outside_window", []) or [])
         for m in markets:
             has = (
                 (dir_path / f"history-{m.id}.parquet").exists()
                 or (dir_path / f"history-{m.id}-compact.parquet").exists()
             )
-            sid = m.series_id or m.id
-            g = groups.setdefault(
-                sid, {"present": 0, "missing": 0, "reasons": Counter(),
-                      "label": m.series_title or m.underlying or sid},
-            )
             if has:
-                g["present"] += 1
                 present_total += 1
             else:
-                g["missing"] += 1
                 if m.id in pending_ids:
                     self._record_skip(m, "export pending")
                 elif m.id in failed_ids:
                     self._record_skip(m, "export failed")
                 elif m.id in outside_ids:
-                    self._record_skip(m, "outside the free 7 day window")
+                    self._record_skip(m, _WINDOW_SKIP)
                 else:
                     self._record_skip(m, "no history file")
                 if m.id in self._direct_targets:
                     self._report_empty_market(m, self._skipped[m.id].reason, announce=announce)
-                    g["missing"] -= 1
-                else:
-                    self._announced.add(m.id)
-                    g["reasons"][self._skipped[m.id].reason] += 1
-        if announce and self._announce:
-            for g in groups.values():
-                if g["missing"]:
-                    total = g["present"] + g["missing"]
-                    why = ", ".join(
-                        (f"no history file in {dir_path}" if r == "no history file" else r)
-                        + (f" ({n})" if len(g["reasons"]) > 1 else "")
-                        for r, n in g["reasons"].items()
-                    )
-                    _prep_status(f"Skipping {g['missing']} of {total} markets for '{g['label']}': {why}")
         return present_total
+
+    def _outside_window(self, market: Market) -> bool:
+        """A series market the account's history window is known to exclude:
+        its data ended before the window, so it is skipped without a request."""
+        w = self._window_start
+        return (
+            w is not None and market.id not in self._direct_targets
+            and market.data_end is not None and market.data_end < w
+        )
+
+    def _window_skip(self, market: Market, exc: HistoryWindowError, user_before: int | None) -> None:
+        """A market the history window excludes: the wall for a market or a
+        window the caller named, a skip for a market a series brought in
+        (every later one ending before the window is then skipped unasked)."""
+        w = exc.window_start
+        if w is None or market.id in self._direct_targets or (user_before is not None and user_before <= w):
+            raise exc
+        self._window_start, self._upgrade_url = w, exc.details.get("upgrade_url")
+        self._record_skip(market, _WINDOW_SKIP)
 
     def _record_skip(self, market: Market, reason: str) -> None:
         if market.id in self._skipped:
@@ -574,7 +577,6 @@ class _EngineCore:
         after_ms = _coerce_timestamp(after)
         before_ms = _coerce_timestamp(before)
         kept: list[Market] = []
-        groups: dict[str, dict] = {}
         for m in markets:
             reason = _coverage_gap(m, after_ms, before_ms)
             if reason is None:
@@ -583,21 +585,6 @@ class _EngineCore:
             self._record_skip(m, reason)
             if m.id in self._direct_targets:
                 self._report_empty_market(m, reason, announce=announce)
-                continue
-            sid = m.series_id or m.id
-            g = groups.setdefault(
-                sid, {"skipped": 0, "ids": [], "label": m.series_title or m.underlying or sid},
-            )
-            g["skipped"] += 1
-            g["ids"].append(m.id)
-        for sid, g in groups.items():
-            total = sum(1 for m in markets if (m.series_id or m.id) == sid)
-            if announce and self._announce:
-                _prep_status(
-                    f"Skipping {g['skipped']} of {total} markets for "
-                    f"'{g['label']}': no order book coverage in window"
-                )
-            self._announced.update(g["ids"])
         return kept
 
     def _fill_target_coverage(self) -> None:
@@ -656,11 +643,13 @@ class _EngineCore:
             self._announced.update(g["ids"])
             if not self._announce:
                 continue
-            reasons = ", ".join(f"{n} {r}" for r, n in g["reasons"].items())
-            _prep_status(
-                f"'{g['label']}': {len(g['ids'])} of {total} markets contributed no data "
-                f"in the window ({reasons})"
+            multi = len(g["reasons"]) > 1
+            url = self._upgrade_url
+            reasons = ", ".join(
+                r + (f" ({n})" if multi else "") + (f", full archive: {url}" if r == _WINDOW_SKIP and url else "")
+                for r, n in g["reasons"].items()
             )
+            _prep_status(f"Skipped {len(g['ids'])} of {total} markets for '{g['label']}': {reasons}")
 
     def _note_empty_window(self, target: str, cov: Any, after: Any, before: Any) -> None:
         """Record and announce the series' data span for a window that held
@@ -1301,7 +1290,7 @@ class _EngineCore:
             eff_after, eff_before = _stream_window(market, user_after_ms, user_before_ms)
             history = client.orderbook.history(
                 market.id,
-                after=eff_after,
+                after=None if eff_after is None else eff_after - 1,  # the route's after is exclusive
                 before=eff_before,
                 **history_params,
             )
@@ -1312,16 +1301,24 @@ class _EngineCore:
                 on_done=lambda mid=mid: reporter.market_fetch_done(mid),
             )
 
-        current = _make_prefetcher(markets[0]).start()
+        def _start(market: Market) -> PrefetchedIterator | None:
+            return None if self._outside_window(market) else _make_prefetcher(market).start()
+
+        current = _start(markets[0])
         next_prefetcher: PrefetchedIterator | None = None
         try:
             for i, market in enumerate(markets):
                 # Prime market[i+1] before consuming market[i] so the next
                 # market's first page is fetched in parallel.
                 if i + 1 < len(markets):
-                    next_prefetcher = _make_prefetcher(markets[i + 1]).start()
+                    next_prefetcher = _start(markets[i + 1])
 
                 reporter.market_started(market.id, market.id)
+                if current is None:
+                    self._record_skip(market, _WINDOW_SKIP)
+                    reporter.market_finished(market.id)
+                    current, next_prefetcher = next_prefetcher, None
+                    continue
                 replay = OrderBookReplay(
                     current, market_id=market.id, platform=market.platform,
                     lazy_deltas=self._lazy_book,
@@ -1343,6 +1340,8 @@ class _EngineCore:
                     self._record_skip(market, _export_skip_reason(exc))
                 except StoreUnavailableError:
                     self._record_skip(market, "history store unavailable")
+                except HistoryWindowError as exc:
+                    self._window_skip(market, exc, user_before_ms)
                 if not yielded and market.id not in self._skipped:
                     self._record_skip(market, "no events in window")
                 reporter.market_finished(market.id)
@@ -2141,7 +2140,7 @@ class AsyncBacktestEngine(_EngineCore):
             eff_after, eff_before = _stream_window(market, user_after_ms, user_before_ms)
             history = client.orderbook.history(
                 market.id,
-                after=eff_after,
+                after=None if eff_after is None else eff_after - 1,  # the route's after is exclusive
                 before=eff_before,
                 **history_params,
             )
@@ -2155,14 +2154,22 @@ class AsyncBacktestEngine(_EngineCore):
         if not markets:
             return
 
-        current = _make_prefetcher(markets[0]).start()
+        def _start(market: Market) -> AsyncPrefetchedIterator | None:
+            return None if self._outside_window(market) else _make_prefetcher(market).start()
+
+        current = _start(markets[0])
         next_prefetcher: AsyncPrefetchedIterator | None = None
         try:
             for i, market in enumerate(markets):
                 if i + 1 < len(markets):
-                    next_prefetcher = _make_prefetcher(markets[i + 1]).start()
+                    next_prefetcher = _start(markets[i + 1])
 
                 reporter.market_started(market.id, market.id)
+                if current is None:
+                    self._record_skip(market, _WINDOW_SKIP)
+                    reporter.market_finished(market.id)
+                    current, next_prefetcher = next_prefetcher, None
+                    continue
                 replay = AsyncOrderBookReplay(current, market_id=market.id, platform=market.platform)
                 eff_after, eff_before = _stream_window(market, user_after_ms, user_before_ms)
                 yielded = False
@@ -2178,6 +2185,8 @@ class AsyncBacktestEngine(_EngineCore):
                     self._record_skip(market, _export_skip_reason(exc))
                 except StoreUnavailableError:
                     self._record_skip(market, "history store unavailable")
+                except HistoryWindowError as exc:
+                    self._window_skip(market, exc, user_before_ms)
                 if not yielded and market.id not in self._skipped:
                     self._record_skip(market, "no events in window")
                 reporter.market_finished(market.id)
@@ -2414,6 +2423,8 @@ class AlphaBacktestEngine(BacktestEngine):
             mid = getattr(entry, "market_id", entry)
             if mid in by_id:
                 self._record_skip(by_id[mid], "bar export not built")
+        for mid, exc in result.outside.items():
+            self._window_skip(by_id[mid], exc, _coerce_timestamp(self._window[1]))
         return len(markets)
 
     def _make_market_stream(self, client, markets, *, after=None, before=None):  # type: ignore[override]
@@ -2438,7 +2449,14 @@ class AlphaBacktestEngine(BacktestEngine):
             eff_after, eff_before = _stream_window(market, user_after, user_before)
             if eff_after is None or eff_before is None or eff_after >= eff_before:
                 return market, None, None, []
-            bars = list(self._market_bars(client, market, eff_after, eff_before, res, price, data_dir))
+            if self._outside_window(market):
+                self._record_skip(market, _WINDOW_SKIP)
+                return market, None, None, []
+            try:
+                bars = list(self._market_bars(client, market, eff_after, eff_before, res, price, data_dir))
+            except HistoryWindowError as exc:
+                self._window_skip(market, exc, user_before)
+                return market, None, None, []
             return market, eff_after, eff_before, bars
 
         # Prefetch up to `concurrency` markets ahead so their fetch (streaming) or

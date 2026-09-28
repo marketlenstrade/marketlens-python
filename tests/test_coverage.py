@@ -12,7 +12,7 @@ from marketlens.backtest import Strategy
 from marketlens.backtest import _engine as engine_mod
 from marketlens.backtest._engine import _coverage_gap
 from marketlens.backtest._results import BacktestResult
-from marketlens.exceptions import DataNotAvailableError, NotFoundError
+from marketlens.exceptions import DataNotAvailableError, HistoryWindowError, NotFoundError
 from marketlens.types.market import Market
 from marketlens.types.orderbook import OrderBook
 
@@ -212,11 +212,60 @@ def test_uncovered_market_is_skipped_and_listed(mock_api, client, status_lines):
     assert result.summary()["markets_skipped"] == 2
     # The unstamped market was fetched, the late-starting one replayed as is.
     assert routes["m-unstamped"].call_count == 1
+    # The route's after is exclusive; an event at the market's first ms is kept, as offline.
+    assert routes["m-ok"].calls[0].request.url.params["after"] == str(T_OPEN - 1)
     assert routes["m-late"].call_count == 1
     gone_row = next(sk for sk in result.skipped if sk.market_id == "m-gone")
     assert gone_row.open_time == T_OPEN and gone_row.data_start == T_CLOSE + 60_000
-    assert "Skipping 1 of 4 markets for 'BTC Up or Down 5m': no order book coverage in window" in status_lines
+    assert "Skipped 2 of 4 markets for 'BTC Up or Down 5m': no coverage in window (1), no events in window (1)" in status_lines
     assert not any("partially" in l for l in status_lines)
+
+
+def _window_403(window_start):
+    return httpx.Response(403, json={"error": {
+        "code": "HISTORY_WINDOW_EXCEEDED", "message": "Free accounts read the last 7 days", "status": 403,
+        "window_start": window_start, "window_end": window_start + 7 * 86_400_000, "requested": window_start - 1,
+        "upgrade_url": "https://up"}})
+
+
+def test_series_skips_markets_before_the_free_window_without_asking_again(mock_api, client, status_lines):
+    """A series run with no dates: the first old market's 403 teaches the
+    window, the one already prefetched is skipped on its own 403, every later
+    old market is skipped without a request, and the rest replays."""
+    step = 300_000
+    w = T_OPEN + 3 * step + 1  # every old market ends before the window
+    olds = [_m(f"m-old{i}", open_time=T_OPEN + i * step, close_time=T_OPEN + (i + 1) * step,
+               resolved_at=T_OPEN + (i + 1) * step, data_start=T_OPEN + i * step,
+               data_end=T_OPEN + (i + 1) * step) for i in range(3)]
+    new = _m("m-new", open_time=w, close_time=w + step, resolved_at=w + step, data_start=w, data_end=w + step)
+    mock_api.get("/markets/btc-up-or-down-5m").mock(return_value=httpx.Response(404, json={
+        "error": {"code": "MARKET_NOT_FOUND", "message": "Not found"}}))
+    mock_api.get("/series/btc-up-or-down-5m").mock(return_value=httpx.Response(200, json={
+        **SAMPLE_SERIES, "id": "s-1", "platform_series_id": "btc-up-or-down-5m",
+        "is_rolling": True, "title": "BTC Up or Down 5m"}))
+    mock_api.get("/series/s-1/markets").mock(return_value=httpx.Response(200, json={
+        "data": [*olds, new], "meta": {"cursor": None, "has_more": False}}))
+    for mid in ("m-old0", "m-old1"):
+        mock_api.get(f"/markets/{mid}/orderbook/history").mock(return_value=_window_403(w))
+    replayed = mock_api.get("/markets/m-new/orderbook/history").mock(return_value=httpx.Response(200, json={
+        "data": [{**_SNAP, "t": w + 10}], "meta": {"cursor": None, "has_more": False}}))
+
+    result = client.backtest(_Noop(), "btc-up-or-down-5m", initial_cash=1000, progress=False)
+
+    assert {sk.market_id: sk.reason for sk in result.skipped} == {
+        f"m-old{i}": "outside the free 7 day window" for i in range(3)}
+    assert replayed.call_count == 1
+    assert status_lines[-1] == (
+        "Skipped 3 of 4 markets for 'BTC Up or Down 5m': outside the free 7 day window, full archive: https://up")
+
+
+def test_a_named_market_before_the_free_window_raises_the_wall(mock_api, client):
+    old = _m("m-old", data_start=T_OPEN, data_end=T_CLOSE)
+    mock_api.get("/markets/m-old").mock(return_value=httpx.Response(200, json=old))
+    mock_api.get("/markets/m-old/orderbook/history").mock(return_value=_window_403(T_CLOSE + 1))
+    with pytest.raises(HistoryWindowError) as exc_info:
+        client.backtest(_Noop(), "m-old", initial_cash=1000, progress=False)
+    assert exc_info.value.window_start == T_CLOSE + 1
 
 
 def test_pending_export_mid_series_is_skipped_not_fatal(mock_api, client):
@@ -347,12 +396,13 @@ def test_markets_outside_the_free_window_are_skipped_with_that_reason(mock_api, 
         "error": {"code": "MARKET_NOT_FOUND", "message": "Not found"}}))
     mock_api.get("/series/btc-up-or-down-5m/export").mock(return_value=httpx.Response(200, json={
         "ready": [], "pending": [], "failed": [], "rate_limited": [], "outside_window": ["m-1"],
-        "events_charged": 0, "rows_charged": 0,
+        "upgrade_url": "https://up", "events_charged": 0, "rows_charged": 0,
     }))
     result = client.backtest(_Noop(), "btc-up-or-down-5m", after=T_OPEN, before=T_CLOSE,
                              initial_cash=1000, data_dir=str(tmp_path / "d"), progress=False)
     assert [(sk.market_id, sk.reason) for sk in result.skipped] == [("m-1", "outside the free 7 day window")]
-    assert "Skipping 1 of 1 markets for 'BTC Up or Down 5m': outside the free 7 day window" in status_lines
+    assert ("Skipped 1 of 1 markets for 'BTC Up or Down 5m': outside the free 7 day window, full archive: https://up"
+            in status_lines)
     assert not any(l.startswith("No markets for") for l in status_lines)
 
 
@@ -446,8 +496,8 @@ def test_series_run_groups_stream_time_skips_into_one_line(mock_api, client, sta
     quiet = [_m(f"m-q{i}", data_start=T_OPEN - 5, data_end=T_CLOSE + 5) for i in range(3)]
     _series_mocks(mock_api, [ok, *quiet], {"m-ok": [_SNAP], **{q["id"]: [] for q in quiet}})
     result = client.backtest(_Noop(), "btc-up-or-down-5m", after=T_OPEN, before=T_CLOSE, initial_cash=1000, progress=False)
-    grouped = [l for l in status_lines if l.startswith("'BTC Up or Down 5m'")]
-    assert grouped == ["'BTC Up or Down 5m': 3 of 4 markets contributed no data in the window (3 no events in window)"]
+    grouped = [l for l in status_lines if l.startswith("Skipped ")]
+    assert grouped == ["Skipped 3 of 4 markets for 'BTC Up or Down 5m': no events in window"]
     assert not any(l.startswith("Market '") for l in status_lines)
     assert result.markets_skipped == 3
 
@@ -488,8 +538,8 @@ async def test_async_engine_reports_the_same_way(mock_api, status_lines):
         result = await c.backtest(_Noop(), ["btc-up-or-down-5m", "m-solo"], after=T_OPEN, before=T_CLOSE, initial_cash=1000, progress=False)
     finally:
         await c.close()
-    assert [l for l in status_lines if l.startswith("'BTC Up or Down 5m'")] == [
-        "'BTC Up or Down 5m': 2 of 3 markets contributed no data in the window (2 no events in window)"]
+    assert [l for l in status_lines if l.startswith("Skipped ")] == [
+        "Skipped 2 of 3 markets for 'BTC Up or Down 5m': no events in window"]
     assert len([l for l in status_lines if l.startswith("Market '") and "(m-solo)" in l]) == 1
     assert result.markets_skipped == 3
 

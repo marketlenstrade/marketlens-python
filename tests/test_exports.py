@@ -81,17 +81,18 @@ class TestBarsBatchDownload:
         assert (tmp_path / "metrics-r1-1m.parquet").read_bytes() == body
         assert os.fspath(res) == str(tmp_path)   # PathLike → usable as data_dir
 
-    @pytest.mark.parametrize("status,code", [
-        (402, "FREE_ALLOWANCE_EXHAUSTED"), (403, "HISTORY_WINDOW_EXCEEDED"),
-    ])
-    def test_plan_walls_raise_instead_of_not_found(self, mock_api, client, tmp_path, status, code):
+    def test_allowance_wall_raises_and_window_wall_lands_in_outside(self, mock_api, client, tmp_path):
         from marketlens import FreeAllowanceExhaustedError, HistoryWindowError
-        mock_api.get("/markets/w1/orderbook/metrics/export").mock(
-            return_value=httpx.Response(status, json={"error": {"code": code, "message": "free plan"}}))
-        with pytest.raises((FreeAllowanceExhaustedError, HistoryWindowError)):
+        route = mock_api.get("/markets/w1/orderbook/metrics/export")
+        route.mock(return_value=httpx.Response(403, json={"error": {"code": "HISTORY_WINDOW_EXCEEDED", "message": "free plan"}}))
+        res = client.exports.download_market_bars_batch(
+            ["w1"], resolution="1m", price="mid", data_dir=str(tmp_path), concurrency=2, progress=False,
+        )
+        assert isinstance(res.outside["w1"], HistoryWindowError) and res.ready == []
+        route.mock(return_value=httpx.Response(402, json={"error": {"code": "FREE_ALLOWANCE_EXHAUSTED", "message": "free plan"}}))
+        with pytest.raises(FreeAllowanceExhaustedError):
             client.exports.download_market_bars_batch(
-                ["w1"], resolution="1m", price="mid",
-                data_dir=str(tmp_path), concurrency=2, progress=False,
+                ["w1"], resolution="1m", price="mid", data_dir=str(tmp_path), concurrency=2, progress=False,
             )
 
 

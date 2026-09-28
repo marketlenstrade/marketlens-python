@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -91,6 +92,7 @@ class SeriesDownloadResult:
     # Markets the window holds that the account's plan cannot read (Free reads
     # the last 7 days); no file is downloaded for them.
     outside_window: list[str] = field(default_factory=list)
+    upgrade_url: str | None = None  # set when outside_window is not empty
     events_charged: int = 0
     rows_charged: int = 0
     # The series' data span. None against older servers.
@@ -128,11 +130,24 @@ def _parse_wall(raw: Any) -> SeriesWall | None:
 # Written into data_dir when the export stopped short, one withheld market id
 # per line, so a partial directory is recognisable on disk.
 INCOMPLETE_MARKER = ".incomplete"
+# Markets the account's history window left out and where to lift it (JSON),
+# so a rerun from data_dir reports them as streaming does.
+OUTSIDE_MARKER = ".outside-window"
 
 
 def _finish_series(series_id: str, data_dir: Path, result: "SeriesDownloadResult") -> "SeriesDownloadResult":
     """Return the result, or raise ``IncompleteExportError`` once the ready
     files are on disk when the server withheld markets."""
+    if result.outside_window:
+        marker = data_dir / OUTSIDE_MARKER
+        try:
+            seen = json.loads(marker.read_text())["markets"] if marker.exists() else []
+            marker.write_text(json.dumps({
+                "upgrade_url": result.upgrade_url,
+                "markets": sorted(set(seen) | set(result.outside_window)),
+            }))
+        except (OSError, ValueError, KeyError):
+            pass
     marker = data_dir / INCOMPLETE_MARKER
     if not result.rate_limited:
         try:
@@ -175,6 +190,9 @@ class BarsDownloadResult:
     ready: list[str] = field(default_factory=list)
     pending: list[str] = field(default_factory=list)
     not_found: list[str] = field(default_factory=list)
+    # Markets whose data ended before the account's history window, with the
+    # server's HistoryWindowError.
+    outside: dict[str, Any] = field(default_factory=dict)
 
     def __fspath__(self) -> str:
         return str(self.data_dir)
@@ -347,6 +365,7 @@ class Exports:
                 failed=failed,
                 rate_limited=rate_limited,
                 outside_window=outside_window,
+                upgrade_url=body.get("upgrade_url"),
                 events_charged=events_charged,
                 rows_charged=rows_charged,
                 coverage=coverage,
@@ -401,6 +420,7 @@ class Exports:
             failed=failed,
             rate_limited=rate_limited,
             outside_window=outside_window,
+            upgrade_url=body.get("upgrade_url"),
             events_charged=events_charged,
             rows_charged=rows_charged,
             coverage=coverage,
@@ -449,11 +469,13 @@ class Exports:
         ``price="mid"`` (metrics) or ``price="close"`` (candles) export at
         ``resolution``, fetched through :meth:`download_market_bars`. Cached files
         are reused. Variants still building land in ``pending`` (re-run to pick
-        them up once built); markets with no data land in ``not_found``.
+        them up once built); markets with no data land in ``not_found``, and
+        markets whose data ended before the account's window in ``outside``.
         """
         data_dir = Path(data_dir)
         data_dir.mkdir(parents=True, exist_ok=True)
         targets = list(market_ids)
+        outside: dict[str, Any] = {}
 
         with make_reporter(enabled=progress, n_markets=len(targets)) as reporter:
             if targets:
@@ -469,8 +491,11 @@ class Exports:
                     state = "pending"
                 except NotFoundError:
                     state = "not_found"
-                except (FreeAllowanceExhaustedError, HistoryWindowError):
-                    raise  # a plan wall, not a missing file: the caller must see it
+                except FreeAllowanceExhaustedError:
+                    raise  # the allowance, not a missing file: the caller must see it
+                except HistoryWindowError as exc:
+                    outside[market_id] = exc
+                    state = "outside"
                 except Exception:
                     state = "not_found"
                 reporter.batch_download_advance()
@@ -483,6 +508,7 @@ class Exports:
             ready=[m for m, s in results if s == "ready"],
             pending=[m for m, s in results if s == "pending"],
             not_found=[m for m, s in results if s == "not_found"],
+            outside=outside,
         )
 
     def _ensure_reference(
@@ -607,6 +633,7 @@ class AsyncExports:
                 failed=failed,
                 rate_limited=rate_limited,
                 outside_window=outside_window,
+                upgrade_url=body.get("upgrade_url"),
                 events_charged=events_charged,
                 rows_charged=rows_charged,
                 coverage=coverage,
@@ -664,6 +691,7 @@ class AsyncExports:
             failed=failed,
             rate_limited=rate_limited,
             outside_window=outside_window,
+            upgrade_url=body.get("upgrade_url"),
             events_charged=events_charged,
             rows_charged=rows_charged,
             coverage=coverage,
