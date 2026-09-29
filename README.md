@@ -38,7 +38,7 @@ end = datetime.now(timezone.utc) - timedelta(days=1)
 result = client.backtest(
     OpeningFader(), "btc-up-or-down-5m",
     initial_cash=10_000,
-    after=end - timedelta(minutes=15), before=end,
+    after=end - timedelta(minutes=10), before=end,
 )
 print(result.summary())
 ```
@@ -69,7 +69,7 @@ A rolling series, every market in `[after, before)`:
 ```python
 result = client.backtest(
     strategy, "btc-up-or-down-5m", initial_cash=10_000,
-    after=end - timedelta(minutes=15), before=end,
+    after=end - timedelta(minutes=10), before=end,
 )
 ```
 
@@ -79,7 +79,7 @@ A portfolio with shared capital across series:
 result = client.backtest(
     strategy, ["btc-up-or-down-5m", "eth-up-or-down-5m", "sol-up-or-down-5m"],
     initial_cash=10_000,
-    after=end - timedelta(minutes=15), before=end,
+    after=end - timedelta(minutes=5), before=end,
 )
 ```
 
@@ -88,7 +88,7 @@ A structured product, every strike in the matched event replayed together (`ctx.
 ```python
 result = client.backtest(
     strategy, "btc-multi-strikes-weekly", initial_cash=10_000,
-    after=end - timedelta(days=6),  # picks the next event ending after this
+    after=end - timedelta(hours=1), before=end,
 )
 ```
 
@@ -142,7 +142,7 @@ result = client.backtest(
     strategy, "btc-up-or-down-5m",
     data_dir="data/btc-5m",
     initial_cash=10_000,
-    after=end - timedelta(hours=1), before=end,
+    after=end - timedelta(minutes=5), before=end,
 )
 # tweak the strategy, run again: replays entirely from disk
 ```
@@ -153,12 +153,12 @@ This works for both engines (tick history and alpha bars). To prefetch explicitl
 
 ```python
 data = client.exports.download_series(
-    "btc-up-or-down-5m", after=end - timedelta(hours=1), before=end)
+    "btc-up-or-down-5m", after=end - timedelta(minutes=30), before=end)
 print(data.ready, data.pending, data.failed, data.events_charged)
 
 result = client.backtest(strategy, "btc-up-or-down-5m", data_dir=data,
                          initial_cash=10_000,
-                         after=end - timedelta(hours=1), before=end)
+                         after=end - timedelta(minutes=30), before=end)
 ```
 
 Exports are Parquet files (snapshots, deltas, trades, and reference prices for the underlying), built server-side. A single market comes via `client.exports.download(market_id)`, which raises `ExportNotReadyError` until its file is built; `download_series` lists such markets under `result.pending` and skips them. When your remaining row allowance does not cover the whole window, the ready files are downloaded and then `IncompleteExportError` is raised with the rows needed to finish, the reset time and the upgrade link; rerun with the same `data_dir` after upgrading, since downloaded files re-download free.
@@ -167,7 +167,7 @@ Downloads charge data rows against your plan's row balance the first time you ta
 
 ```python
 quote = client.exports.download_series(
-    "btc-up-or-down-5m", after=end - timedelta(hours=1), before=end, dry_run=True)
+    "btc-up-or-down-5m", after=end - timedelta(minutes=30), before=end, dry_run=True)
 print(quote.rows_charged)  # cost of the real call, narrow the window if too high
 ```
 
@@ -209,7 +209,7 @@ Pass a list of strategies to race them over the same window; you get a `MultiBac
 result = client.backtest(
     [maker, fader], "btc-up-or-down-5m",
     labels=["maker", "fader"], initial_cash=10_000,
-    after=end - timedelta(minutes=15), before=end,
+    after=end - timedelta(minutes=5), before=end,
 )
 result.show()
 ```
