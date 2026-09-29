@@ -372,6 +372,36 @@ class TestSeriesDownload:
         )
         assert quote.wall.rows_needed == 60
 
+    def test_free_wall_carries_the_server_allowance_text(self, mock_api, client, tmp_path):
+        text = (
+            "This export needs 60 data rows; 10 of your 2,000,000 free rows are left."
+            " Free rows do not reset.\nUpgrade to Pro for the full archive and"
+            " 5,000,000,000 rows a month ($39/mo): https://marketlens.trade/console/billing?checkout=pro"
+        )
+        manifest = self._manifest(ready_ids=["m1"], events=100)
+        manifest["rate_limited"] = [{"market_id": "m9", "events": 70, "rows": 60}]
+        manifest["wall"] = {
+            "reason": "free_rows", "markets_withheld": 1, "rows_needed": 60,
+            "resets_at": None,
+            "upgrade_url": "https://marketlens.trade/console/billing?checkout=pro",
+            "message": text,
+        }
+        mock_api.get("/series/btc-daily/export").mock(
+            return_value=httpx.Response(200, json=manifest)
+        )
+        mock_api.get(f"{BUCKET_BASE}/history/m1-compact.parquet").mock(
+            return_value=httpx.Response(200, content=b"PAR1-m1")
+        )
+        _series_404(mock_api, "btc-daily")
+
+        with pytest.raises(IncompleteExportError) as exc:
+            client.exports.download_series(
+                "btc-daily", data_dir=str(tmp_path), progress=False,
+            )
+        assert str(exc.value) == f"Series 'btc-daily': 1 markets not delivered (1 saved in {tmp_path}). {text}"
+        assert "allowance reset" not in str(exc.value)
+        assert exc.value.result.wall.message == text
+
     def test_result_is_pathlike(self, mock_api, client, tmp_path):
         mock_api.get("/series/btc-daily/export").mock(
             return_value=httpx.Response(200, json=self._manifest([]))

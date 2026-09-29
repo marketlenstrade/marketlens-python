@@ -2,6 +2,12 @@
 
 All notable changes to the `marketlens` Python SDK, version by version.
 
+## [1.8.9] 2026-09-29
+
+* A free series export that does not fit the remaining allowance now delivers the markets that fit, as paid plans do (server side, so older versions get the files too); from 1.8.4 `download_series` then raises `IncompleteExportError`. Only a window where nothing fits raises `FreeAllowanceExhaustedError` (402), replacing the 1.8.5 behavior.
+* `IncompleteExportError` is shorter, and on Free it ends with the same allowance and upgrade text as `FreeAllowanceExhaustedError` (from the server's new `SeriesWall.message`), instead of a reset that never comes.
+* Typed errors no longer repeat their code in the message: `str(FreeAllowanceExhaustedError)` reads "This export needs..." rather than "FREE_ALLOWANCE_EXHAUSTED: This export needs..." (the traceback and MCP errors already name the class). `.code` is unchanged, and a plain `APIError` keeps the prefix.
+
 ## [1.8.8] 2026-09-28
 
 * The free plan window is now per market, server side: a free account reads, in full, every market open in the last 7 days, and a market that ended before them answers `HistoryWindowError` (403). `HistoryWindowError` carries `window_start` and the raw `details` (`data_end`, `upgrade_url`).

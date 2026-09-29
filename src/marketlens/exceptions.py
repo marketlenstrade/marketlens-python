@@ -14,7 +14,8 @@ class APIError(MarketLensError):
         self.status_code = status_code
         self.code = code
         self.message = message
-        super().__init__(f"{code}: {message}")
+        # A subclass name already says what the code does; ``.code`` keeps it.
+        super().__init__(f"{code}: {message}" if type(self) is APIError else message)
 
 
 class AuthenticationError(APIError):
@@ -164,7 +165,7 @@ class IncompleteExportError(MarketLensError):
     ``result`` is the ``SeriesDownloadResult`` for what was delivered.
     Narrow the window, wait for the reset, or upgrade the plan, then rerun
     with the same ``data_dir``: markets already downloaded are unlocked and
-    free.
+    free. On Free the message is the server's ``FreeAllowanceExhaustedError`` text.
     """
 
     def __init__(

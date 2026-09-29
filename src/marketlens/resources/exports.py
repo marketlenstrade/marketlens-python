@@ -113,6 +113,7 @@ class SeriesWall:
     rows_needed: int
     resets_at: int | None
     upgrade_url: str | None
+    message: str | None = None  # On Free, the server's 402 text.
 
 
 def _parse_wall(raw: Any) -> SeriesWall | None:
@@ -124,6 +125,7 @@ def _parse_wall(raw: Any) -> SeriesWall | None:
         rows_needed=int(raw.get("rows_needed", 0)),
         resets_at=raw.get("resets_at"),
         upgrade_url=raw.get("upgrade_url"),
+        message=raw.get("message"),
     )
 
 
@@ -162,13 +164,14 @@ def _finish_series(series_id: str, data_dir: Path, result: "SeriesDownloadResult
         marker.write_text("\n".join(missing) + "\n")
     except OSError:
         pass
+    reason = wall.message if wall and wall.message else (
+        f"Unlocking them needs {rows_needed:,} data rows. Narrow the window,"
+        " wait for the allowance reset, or upgrade the plan"
+        + (f" at {wall.upgrade_url}" if wall and wall.upgrade_url else "") + "."
+    )
     raise IncompleteExportError(
-        f"Series '{series_id}': {len(missing)} markets in the window were not"
-        f" delivered because unlocking them needs {rows_needed:,} data rows"
-        " and the account's remaining allowance does not cover it. Files"
-        f" already downloaded are in {data_dir} and re-download free. Narrow"
-        " the window, wait for the allowance reset, or upgrade the plan"
-        + (f" at {wall.upgrade_url}" if wall and wall.upgrade_url else "") + ".",
+        f"Series '{series_id}': {len(missing)} markets not delivered"
+        f" ({len(result.ready)} saved in {data_dir}). {reason}",
         missing=missing,
         rows_needed=rows_needed,
         upgrade_url=wall.upgrade_url if wall else None,
