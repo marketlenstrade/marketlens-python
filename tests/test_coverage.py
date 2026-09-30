@@ -283,6 +283,16 @@ def test_pending_export_mid_series_is_skipped_not_fatal(mock_api, client):
     assert routes["m-ok"].call_count == 1
 
 
+def test_event_walk_skips_a_strike_whose_history_is_not_built(mock_api, client):
+    _event_series_mocks(mock_api, {"e-1": [_m("m-ok"), _m("m-open", status="active")]})
+    mock_api.get("/markets/m-ok/orderbook/history").mock(return_value=httpx.Response(200, json={
+        "data": [_SNAP], "meta": {"cursor": None, "has_more": False}}))
+    mock_api.get("/markets/m-open/orderbook/history").mock(return_value=httpx.Response(409, json={
+        "error": {"code": "EXPORT_NOT_READY", "message": "Export not ready (status=pending)"}}))
+    walk = client.orderbook.walk("btc-multi-strikes-weekly", after=T_OPEN, before=T_CLOSE)
+    assert [m.id for m, _ in walk] == ["m-ok"]
+
+
 def test_store_stall_mid_series_is_skipped_not_fatal(mock_api, client, monkeypatch):
     """A 503 from the history store on one market (after the transport's own
     retries) skips that market like a pending export, instead of aborting a

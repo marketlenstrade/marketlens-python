@@ -92,15 +92,6 @@ result = client.backtest(
 )
 ```
 
-A sports league, one bet type across the day's games:
-
-```python
-result = client.backtest(
-    strategy, "mlb", subtype="moneyline", initial_cash=10_000,
-    after=end - timedelta(hours=10), before=end,
-)
-```
-
 Rolling and structured series hold one kind of bet and run whole. A sports league bundles several under one ticker (moneyline, spread, totals, player props), so pass `subtype` to pick one; leave it off and the run stops and lists the choices, so different kinds of bets never mix in one backtest.
 
 The portfolio handles CTF merge automatically: buying NO while holding YES nets matched pairs back to cash at $1 per share.

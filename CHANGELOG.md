@@ -2,6 +2,11 @@
 
 All notable changes to the `marketlens` Python SDK, version by version.
 
+## [1.8.10] 2026-09-30
+
+* `orderbook.walk` over a structured series (strikes, weather buckets) skips a market whose history is not built yet instead of raising `ExportNotReadyError` for the whole walk. Open markets have no history file, so a window that still held one (every weekly strike event until it resolves) used to fail; the backtest engine already skipped them. A single market walk still raises.
+* README and examples: windows sized to a small share of the free allowance, the sports block dropped from the general examples, `examples/event_strikes.py` walks `btc-multi-strikes-weekly`.
+
 ## [1.8.9] 2026-09-29
 
 * A free series export that does not fit the remaining allowance now delivers the markets that fit, as paid plans do (server side, so older versions get the files too); from 1.8.4 `download_series` then raises `IncompleteExportError`. Only a window where nothing fits raises `FreeAllowanceExhaustedError` (402), replacing the 1.8.5 behavior.

@@ -27,6 +27,7 @@ from __future__ import annotations
 from typing import Any, AsyncIterator, Iterator
 
 from marketlens._base import _coerce_timestamp
+from marketlens.exceptions import ExportNotReadyError
 from marketlens.helpers.merge import async_merge_replays, merge_replays
 from marketlens.helpers.replay import (
     AsyncOrderBookReplay,
@@ -41,6 +42,21 @@ from marketlens.types.market import Market
 from marketlens.types.orderbook import OrderBook
 from marketlens.types.series import Series
 from marketlens.types.signal import Surface
+
+
+def _ready(events):
+    try:
+        yield from events
+    except ExportNotReadyError:
+        return
+
+
+async def _aready(events):
+    try:
+        async for event in events:
+            yield event
+    except ExportNotReadyError:
+        return
 
 
 # ── Sequential walk (single market / rolling series) ─────────────
@@ -349,7 +365,7 @@ class EventOrderBookWalk:
                 )
                 replays.append((
                     m,
-                    OrderBookReplay(history, market_id=m.id, platform=m.platform),
+                    OrderBookReplay(_ready(history), market_id=m.id, platform=m.platform),
                 ))
 
             for market, event, book in merge_replays(replays):
@@ -436,7 +452,7 @@ class AsyncEventOrderBookWalk:
                 )
                 replays.append((
                     m,
-                    AsyncOrderBookReplay(history, market_id=m.id, platform=m.platform),
+                    AsyncOrderBookReplay(_aready(history), market_id=m.id, platform=m.platform),
                 ))
 
             async for market, event, book in async_merge_replays(replays):

@@ -12,7 +12,7 @@ client = MarketLens()
 end = datetime.now(timezone.utc) - timedelta(days=1)
 
 walk = client.orderbook.walk(
-    "ethereum-multi-strikes-weekly",
+    "btc-multi-strikes-weekly",
     after=end - timedelta(minutes=5), before=end,
 )
 
