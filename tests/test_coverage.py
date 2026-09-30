@@ -483,7 +483,9 @@ def test_single_market_outside_window_reports_once_by_name(mock_api, client, sta
     mock_api.get("/markets/m-1").mock(return_value=httpx.Response(200, json=m))
     result = client.backtest(_Noop(), "m-1", after=T_CLOSE + 1_000, before=T_CLOSE + 2_000, initial_cash=1000, progress=False)
     lines = [l for l in status_lines if l.startswith("Market '")]
-    assert len(lines) == 1 and "(m-1)" in lines[0] and "outside window" in lines[0] and "its data runs" in lines[0]
+    # data runs past the window's start, but the market closed before it: the line names the close
+    assert len(lines) == 1 and "(m-1)" in lines[0] and "closed " in lines[0] and "before the window" in lines[0]
+    assert "its data runs" not in lines[0]
     assert not any(l.startswith("Skipping") for l in status_lines)
     assert result.coverage == {"m-1": {"kind": "market", "data_start": T_OPEN - 5, "data_end": T_CLOSE + 5, "collection_tier": "streamed"}}
 

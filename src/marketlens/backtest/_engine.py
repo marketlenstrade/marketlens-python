@@ -613,7 +613,17 @@ class _EngineCore:
         if not (announce and self._announce):
             return
         after, before = self._window
-        line = f"Market '{m.question}' ({m.id[:8]}): {reason} between {_fmt_ts(after)} and {_fmt_ts(before)}"
+        head = f"Market '{m.question}' ({m.id[:8]}): "
+        if reason == "outside window":
+            # Its life misses the window while its data may not (trading past
+            # close_time), so name the life, not the data span.
+            a = _coerce_timestamp(after)
+            if m.close_time is not None and a is not None and m.close_time <= a:
+                _prep_status(head + f"closed {_fmt_ts(m.close_time)}, before the window starting {_fmt_ts(after)}")
+            else:
+                _prep_status(head + f"opens {_fmt_ts(m.open_time)}, after the window ending {_fmt_ts(before)}")
+            return
+        line = head + f"{reason} between {_fmt_ts(after)} and {_fmt_ts(before)}"
         if m.data_start is not None:
             # A null span is either an older server or a market that never
             # had a book; neither is worth a claim.
