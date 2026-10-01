@@ -377,9 +377,11 @@ class Exports:
 
         targets = [(e["market_id"], e["url"]) for e in body.get("ready", [])]
 
+        # The bar counts only files to fetch; ones already on disk are reused.
+        n_fetch = sum(not (data_dir / f"history-{m}{suffix}.parquet").exists() for m, _ in targets)
+
         with make_reporter(enabled=progress, n_markets=len(targets)) as reporter:
-            if targets:
-                reporter.batch_download_started(f"Downloading {series_id}", len(targets))
+            reporter.batch_download_started(f"Downloading {series_id}", n_fetch)
 
             def _one(target: tuple[str, str]) -> str:
                 market_id, url = target
@@ -389,7 +391,7 @@ class Exports:
                         url, dest,
                         reporter=reporter, label=f"market {market_id[:8]}",
                     )
-                reporter.batch_download_advance()
+                    reporter.batch_download_advance()
                 return market_id
 
             ready = _run_concurrent(targets, _one, concurrency=concurrency)
@@ -475,14 +477,18 @@ class Exports:
         them up once built); markets with no data land in ``not_found``, and
         markets whose data ended before the account's window in ``outside``.
         """
+        from marketlens.backtest._bar import bar_file
+
         data_dir = Path(data_dir)
         data_dir.mkdir(parents=True, exist_ok=True)
         targets = list(market_ids)
         outside: dict[str, Any] = {}
+        # The bar counts only markets with no file yet (each is attempted:
+        # pending, not found and outside are discovered by the attempt).
+        missing = {m for m in targets if not bar_file(data_dir, m, resolution, price).exists()}
 
         with make_reporter(enabled=progress, n_markets=len(targets)) as reporter:
-            if targets:
-                reporter.batch_download_started("Downloading", len(targets))
+            reporter.batch_download_started("Downloading", len(missing))
 
             def _one(market_id: str) -> tuple[str, str]:
                 try:
@@ -501,7 +507,8 @@ class Exports:
                     state = "outside"
                 except Exception:
                     state = "not_found"
-                reporter.batch_download_advance()
+                if market_id in missing:
+                    reporter.batch_download_advance()
                 return market_id, state
 
             results = _run_concurrent(targets, _one, concurrency=concurrency)
@@ -655,12 +662,15 @@ class AsyncExports:
                         url, dest,
                         reporter=reporter, label=f"market {market_id[:8]}",
                     )
-                reporter.batch_download_advance()
+                    reporter.batch_download_advance()
                 return market_id
+
+        # The bar counts only files to fetch; ones already on disk are reused.
+        n_fetch = sum(not (data_dir / f"history-{m}{suffix}.parquet").exists() for m, _ in targets)
 
         with make_reporter(enabled=progress, n_markets=len(targets)) as reporter:
             if targets:
-                reporter.batch_download_started(f"Downloading {series_id}", len(targets))
+                reporter.batch_download_started(f"Downloading {series_id}", n_fetch)
                 ready = list(await asyncio.gather(*[_one(m, u, reporter) for m, u in targets]))
             else:
                 ready = []

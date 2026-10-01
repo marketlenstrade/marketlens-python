@@ -116,6 +116,14 @@ def _span(markets: list[Market], kind: str) -> dict:
     }
 
 
+def _has_history_file(dir_path: Path, market_id: str) -> bool:
+    """Either history variant (full or compact) is on disk."""
+    return (
+        (dir_path / f"history-{market_id}.parquet").exists()
+        or (dir_path / f"history-{market_id}-compact.parquet").exists()
+    )
+
+
 def _export_skip_reason(exc: ExportNotReadyError) -> str:
     return "export failed" if exc.export_status == "failed" else "export pending"
 
@@ -338,8 +346,8 @@ class BacktestConfig:
     queue_position: bool = False
     settlement_delay_ms: int = 5000  # on-chain balance availability (~5s after MATCHED)
     progress: bool = True  # show rich progress bars for fetch/backtest
-    # Concurrent per-market downloads for the auto-download path (data_dir set
-    # but empty). Capped to the CPU count at download time.
+    # Concurrent per-market downloads for the auto-download path (markets with
+    # no file in data_dir). Capped to the CPU count at download time.
     download_concurrency: int = 8
     # None=auto, True=force compact, False=force full. Auto picks compact
     # when on_book isn't overridden and queue_position/include_trades allow it.
@@ -515,11 +523,7 @@ class _EngineCore:
             pending_ids.update(e.market_id for e in getattr(result, "pending", []) or [])
             failed_ids.update(e.market_id for e in getattr(result, "failed", []) or [])
         for m in markets:
-            has = (
-                (dir_path / f"history-{m.id}.parquet").exists()
-                or (dir_path / f"history-{m.id}-compact.parquet").exists()
-            )
-            if has:
+            if _has_history_file(dir_path, m.id):
                 present_total += 1
             else:
                 if m.id in pending_ids:
@@ -707,11 +711,13 @@ class _EngineCore:
         client: Any,
         id: str | list[str],
         *,
+        markets: list[Market],
         after: Any,
         before: Any,
         data_dir: str | None,
     ) -> None:
-        """Fetch the bulk export when ``data_dir`` is set but empty.
+        """Fetch the bulk export when a market this run replays has no file
+        in ``data_dir`` (the download skips files already there).
 
         Called after each run-path's resolution log so the user sees:
         "Resolving markets in '...'" → "Downloading M/N" → "Backtesting M/N".
@@ -719,13 +725,15 @@ class _EngineCore:
         if data_dir is None:
             return
         path = Path(data_dir)
-        # A ".incomplete" marker means an earlier download was cut short by
-        # the row allowance: retry it (already-unlocked files re-download
-        # free) rather than trusting a partial directory.
-        if (
-            path.exists()
-            and any(path.glob("history-*.parquet"))
-            and not (path / ".incomplete").exists()
+        # Markets the history window left out count as present, so a free
+        # rerun does not ask the manifest again. A ".incomplete" marker means
+        # an earlier download was cut short by the row allowance: retry it
+        # (already-unlocked files re-download free) rather than trusting a
+        # partial directory.
+        marker = path / OUTSIDE_MARKER
+        outside = set(json.loads(marker.read_text()).get("markets", [])) if marker.exists() else set()
+        if not (path / ".incomplete").exists() and all(
+            m.id in outside or _has_history_file(path, m.id) for m in markets
         ):
             return
         concurrency = max(1, min(self._config.download_concurrency, os.cpu_count() or 1))
@@ -1596,7 +1604,7 @@ class BacktestEngine(_EngineCore):
                 client, id, after=after, before=before, data_dir=data_dir,
                 announce=announce, **params,
             )
-            self._maybe_autodownload(client, id, after=after, before=before, data_dir=data_dir)
+            self._maybe_autodownload(client, id, markets=all_markets, after=after, before=before, data_dir=data_dir)
             if data_dir is not None:
                 n_markets = self._prelog_file_skips(all_markets, data_dir, announce=announce)
             with self._with_reporter(n_markets, replay=replay, label=label):
@@ -1610,7 +1618,7 @@ class BacktestEngine(_EngineCore):
             self._register_market(market)
             self._direct_targets.add(market.id)
             kept = self._keep_covered([market], after=after, before=before, announce=announce)
-            self._maybe_autodownload(client, id, after=after, before=before, data_dir=data_dir)
+            self._maybe_autodownload(client, id, markets=kept, after=after, before=before, data_dir=data_dir)
             n_one = (
                 self._prelog_file_skips(kept, data_dir, announce=announce)
                 if data_dir is not None else len(kept)
@@ -1642,7 +1650,7 @@ class BacktestEngine(_EngineCore):
                 markets = self._keep_covered(markets, after=after, before=before, announce=announce)
                 if not markets:
                     self._empty_series_coverage(client, id, after, before)
-                self._maybe_autodownload(client, id, after=after, before=before, data_dir=data_dir)
+                self._maybe_autodownload(client, id, markets=markets, after=after, before=before, data_dir=data_dir)
                 n_markets = (
                     self._prelog_file_skips(markets, data_dir, announce=announce)
                     if data_dir is not None else len(markets)
@@ -1683,11 +1691,10 @@ class BacktestEngine(_EngineCore):
                 self._empty_series_coverage(client, id, after, before)
             n_markets = sum(len(lane) for lane in lanes)
             streams = [_stream(lane) for lane in lanes]
-            self._maybe_autodownload(client, id, after=after, before=before, data_dir=data_dir)
+            markets = [m for lane in lanes for m in lane]
+            self._maybe_autodownload(client, id, markets=markets, after=after, before=before, data_dir=data_dir)
             if data_dir is not None:
-                n_markets = self._prelog_file_skips(
-                    [m for lane in lanes for m in lane], data_dir, announce=announce,
-                )
+                n_markets = self._prelog_file_skips(markets, data_dir, announce=announce)
             with self._with_reporter(n_markets, replay=replay, label=label):
                 self._run_merged(streams)
             return self._build_result()
@@ -1699,7 +1706,7 @@ class BacktestEngine(_EngineCore):
             self._register_market(found[0])
             self._direct_targets.add(found[0].id)
             kept = self._keep_covered([found[0]], after=after, before=before, announce=announce)
-            self._maybe_autodownload(client, id, after=after, before=before, data_dir=data_dir)
+            self._maybe_autodownload(client, id, markets=kept, after=after, before=before, data_dir=data_dir)
             n_one = (
                 self._prelog_file_skips(kept, data_dir, announce=announce)
                 if data_dir is not None else len(kept)
@@ -2396,7 +2403,7 @@ class AlphaBacktestEngine(BacktestEngine):
     def _resolve_compact_mode(self) -> bool:
         return False
 
-    def _maybe_autodownload(self, client, id, *, after, before, data_dir):  # type: ignore[override]
+    def _maybe_autodownload(self, client, id, *, markets, after, before, data_dir):  # type: ignore[override]
         # Bars are downloaded lazily per market in the file stream. Stash the
         # client so that path can fetch on a cache miss.
         self._client = client

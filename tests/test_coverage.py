@@ -334,8 +334,6 @@ def test_stream_with_no_events_is_reported(mock_api, client):
 
 def test_empty_manifest_finishes_with_zero_markets_and_a_hint(mock_api, client, tmp_path, status_lines):
     _series_mocks(mock_api, [], {})
-    mock_api.get("/markets/btc-up-or-down-5m/export").mock(return_value=httpx.Response(404, json={
-        "error": {"code": "MARKET_NOT_FOUND", "message": "Not found"}}))
     mock_api.get("/series/btc-up-or-down-5m/export").mock(return_value=httpx.Response(200, json={
         "ready": [], "pending": [], "failed": [], "rate_limited": [],
         "events_charged": 0, "rows_charged": 0,

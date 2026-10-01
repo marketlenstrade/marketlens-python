@@ -2,6 +2,12 @@
 
 All notable changes to the `marketlens` Python SDK, version by version.
 
+## [1.8.11] 2026-10-01
+
+* A backtest reusing a `data_dir` downloads the markets it has no file for. Before, any history file in the directory stopped the download, so a widened window or an added market replayed only the files already there and skipped the rest as "no history file". Files on disk are never fetched again, and a rerun with every file present makes no download request.
+* The Downloading bar counts only the files it fetches (series exports and AlphaStrategy bars), instead of jumping through the files already on disk.
+* A market you named that lies outside the window is reported with when it closed (or opens), instead of a data span that could cover the window.
+
 ## [1.8.10] 2026-09-30
 
 * `orderbook.walk` over a structured series (strikes, weather buckets) skips a market whose history is not built yet instead of raising `ExportNotReadyError` for the whole walk. Open markets have no history file, so a window that still held one (every weekly strike event until it resolves) used to fail; the backtest engine already skipped them. A single market walk still raises.

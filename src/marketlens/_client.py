@@ -94,8 +94,8 @@ class MarketLens:
 
         Args:
             data_dir: Local Parquet directory for offline replay. Missing files
-                are auto-downloaded on first run (creates the directory if
-                absent); present files are reused. Files are named
+                are auto-downloaded (creates the directory if absent);
+                present files are reused. Files are named
                 ``history-{market_id}.parquet`` (full) or
                 ``history-{market_id}-compact.parquet`` (trade-aligned). The
                 engine auto-picks the variant matching the strategy.
@@ -107,8 +107,8 @@ class MarketLens:
                 and ``include_trades=True``). ``False`` forces full firehose.
                 Fill prices are mode-independent — the override only
                 controls inter-trade event density.
-            concurrency: Parallel per-market downloads when ``data_dir`` is set
-                but empty (the auto-download path). Defaults to 8, capped to the
+            concurrency: Parallel per-market downloads of the files ``data_dir``
+                is missing (the auto-download path). Defaults to 8, capped to the
                 CPU count. No effect once the files are already on disk.
             auto_merge: Merge matched YES+NO pairs back to cash after each fill
                 (CTF merge), mirroring on-chain behaviour. Default ``True``.
@@ -186,7 +186,7 @@ class MarketLens:
             download_concurrency=concurrency,
             auto_merge=auto_merge,
         )
-        # Auto-download (when ``data_dir`` is missing/empty) is dispatched
+        # Auto-download (of the markets ``data_dir`` has no file for) is dispatched
         # from inside engine.run after the market-resolution log, so the
         # status line and the "Downloading" bar appear in the right order.
         if isinstance(strategy, (list, tuple)):

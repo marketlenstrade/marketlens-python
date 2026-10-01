@@ -96,6 +96,42 @@ class TestBarsBatchDownload:
             )
 
 
+def test_downloading_bar_counts_only_files_it_fetches(mock_api, client, tmp_path, monkeypatch):
+    from unittest.mock import MagicMock
+    import marketlens.resources.exports as exports_mod
+
+    bar = MagicMock()
+    bar.__enter__.return_value = bar
+    monkeypatch.setattr(exports_mod, "make_reporter", lambda **k: bar)
+    ids = ["m1", "m2", "m3"]
+    mock_api.get("/series/s1/export").mock(return_value=httpx.Response(200, json={
+        "ready": [{"market_id": m, "url": f"{BUCKET_BASE}/history/{m}-compact.parquet"} for m in ids],
+        "pending": [], "failed": [], "events_charged": 0,
+    }))
+    for m in ids[1:]:
+        mock_api.get(f"{BUCKET_BASE}/history/{m}-compact.parquet").mock(
+            return_value=httpx.Response(200, content=b"PAR1"))
+    _series_404(mock_api, "s1")
+    (tmp_path / "history-m1-compact.parquet").write_bytes(b"x")
+
+    result = client.exports.download_series("s1", data_dir=str(tmp_path), progress=False)
+    assert sorted(result.ready) == ids
+    assert bar.batch_download_started.call_args.args[1] == 2
+    assert bar.batch_download_advance.call_count == 2
+
+    # Bars: a cached market neither counts nor advances; a missing one does,
+    # whatever the attempt finds.
+    bar.reset_mock()
+    (tmp_path / "metrics-r1-1m.parquet").write_bytes(b"x")
+    mock_api.get("/markets/n1/orderbook/metrics/export").mock(return_value=httpx.Response(
+        404, json={"error": {"code": "NOT_FOUND", "message": "x"}}))
+    client.exports.download_market_bars_batch(
+        ["r1", "n1"], resolution="1m", price="mid", data_dir=str(tmp_path), progress=False,
+    )
+    assert bar.batch_download_started.call_args.args[1] == 1
+    assert bar.batch_download_advance.call_count == 1
+
+
 # ── Per-market download ────────────────────────────────────────────
 
 
@@ -753,12 +789,25 @@ class TestIncompleteBacktestDownload:
         )
         engine = BacktestEngine(_S(), BacktestConfig(progress=False))
         (tmp_path / "history-m1.parquet").write_bytes(b"x")
+        (tmp_path / "history-m2-compact.parquet").write_bytes(b"x")
+        (tmp_path / ".outside-window").write_text('{"markets": ["m3"]}')
+        m1, m2, m3, m4 = (SimpleNamespace(id=f"m{i}") for i in range(1, 5))
 
-        # Complete-looking dir: short-circuit, no download.
-        engine._maybe_autodownload(client, "btc-5m", after=0, before=1, data_dir=str(tmp_path))
+        def run(markets):
+            engine._maybe_autodownload(
+                client, "btc-5m", markets=markets, after=0, before=1, data_dir=str(tmp_path),
+            )
+
+        # Every market has a file (either variant) or is outside the window:
+        # short-circuit, no download.
+        run([m1, m2, m3])
         assert calls == []
+
+        # A market with no file (a widened window): the download runs.
+        run([m1, m2, m4])
+        assert len(calls) == 1
 
         # Same dir marked incomplete: the download is retried.
         (tmp_path / ".incomplete").write_text("m-2\n")
-        engine._maybe_autodownload(client, "btc-5m", after=0, before=1, data_dir=str(tmp_path))
-        assert len(calls) == 1
+        run([m1, m2, m3])
+        assert len(calls) == 2
