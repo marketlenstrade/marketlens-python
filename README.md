@@ -307,6 +307,21 @@ pip install 'marketlens[mcp]'
 
 Tools that bill data rows (`get_trades`, `get_candles`, `get_orderbook_metrics`, `get_reference_candles`) require both `after` and `before`. `run_backtest` executes agent-authored strategy code in a subprocess on your machine; disable it with `MARKETLENS_MCP_DISABLE_BACKTEST=1`. See the [MCP docs](https://marketlens.trade/docs/mcp?utm_source=github&utm_medium=repo&utm_campaign=marketlens-python).
 
+## Agent skills
+
+Two skills teach a coding agent (Claude Code, Cursor, Codex and others) to use this SDK without guessing: which calls to make, how to pick windows from `data_start` and `data_end`, and how to stay inside a free key's allowance.
+
+```bash
+npx skills add marketlenstrade/marketlens-python
+```
+
+| Skill | Use it for |
+|-------|------------|
+| [`polymarket-backtest`](skills/polymarket-backtest/SKILL.md) | Writing a `Strategy` and backtesting it on crypto up or down, weather, sports and esports markets |
+| [`polymarket-historical-data`](skills/polymarket-historical-data/SKILL.md) | Pulling price history, trades, order books and Parquet files |
+
+The skills need only `pip install marketlens` and an API key; the MCP server above is optional.
+
 ## Reference
 
 ### Strategy hooks
