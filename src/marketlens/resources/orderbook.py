@@ -157,12 +157,13 @@ class Orderbook:
         try:
             series = self._series.get(id)
             if series.structured_type:
-                event_params = dict(params)
-                if after is not None:
-                    event_params["end_after"] = after
-                if before is not None:
-                    event_params["start_before"] = before
-                events = self._series.events(id, **event_params).to_list()
+                # The events of the markets whose life overlaps the window.
+                event_ids = dict.fromkeys(
+                    m.event_id for m in self._series._markets_in_window(
+                        series.id, after=after, before=before, inclusive=True, **params,
+                    )
+                )
+                events = [self._events.get(eid) for eid in event_ids]
                 return EventOrderBookWalk(
                     events, self._events, self, series,
                     after=after, before=before, coalesce=coalesce,
@@ -273,12 +274,12 @@ class AsyncOrderbook:
         try:
             series = await self._series.get(id)
             if series.structured_type:
-                event_params = dict(params)
-                if after is not None:
-                    event_params["end_after"] = after
-                if before is not None:
-                    event_params["start_before"] = before
-                events = await (await self._series.events(id, **event_params)).to_list()
+                event_ids = dict.fromkeys([
+                    m.event_id async for m in self._series._markets_in_window(
+                        series.id, after=after, before=before, inclusive=True, **params,
+                    )
+                ])
+                events = [await self._events.get(eid) for eid in event_ids]
                 return AsyncEventOrderBookWalk(
                     events, self._events, self, series,
                     after=after, before=before, coalesce=coalesce,

@@ -213,6 +213,7 @@ class MarketLens:
         coalesce: bool,
         progress: bool,
         concurrency: int = 1,
+        subtype: str | None = None,
     ) -> list:
         ids = id if isinstance(id, list) else [id]
         results: list = []
@@ -225,7 +226,7 @@ class MarketLens:
                 result = self.exports.download_series(
                     one, after=after, before=before,
                     data_dir=data_dir, coalesce=coalesce, progress=progress,
-                    concurrency=concurrency,
+                    concurrency=concurrency, subtype=subtype,
                 )
                 results.append((one, result))
         return results
@@ -337,6 +338,7 @@ class AsyncMarketLens:
                 coalesce=engines[0]._resolve_compact_mode(),
                 progress=progress,
                 concurrency=max(1, min(concurrency, os.cpu_count() or 1)),
+                subtype=params.get("subtype"),
             )
 
         results = [
@@ -360,6 +362,7 @@ class AsyncMarketLens:
         coalesce: bool,
         progress: bool,
         concurrency: int = 1,
+        subtype: str | None = None,
     ) -> list:
         ids = id if isinstance(id, list) else [id]
         results: list = []
@@ -372,7 +375,7 @@ class AsyncMarketLens:
                 result = await self.exports.download_series(
                     one, after=after, before=before,
                     data_dir=data_dir, coalesce=coalesce, progress=progress,
-                    concurrency=concurrency,
+                    concurrency=concurrency, subtype=subtype,
                 )
                 results.append((one, result))
         return results

@@ -458,22 +458,26 @@ def test_mcp_book_view_notes_a_forward_book():
 # ── empty-data reporting: once per series target, once per direct market ──
 
 
-def _event_series_mocks(mock_api, markets_by_event: dict):
-    """A structured series whose events resolve to the given markets."""
+def _event_series_mocks(mock_api, markets_by_event: dict, end_date: int = T_CLOSE):
+    """A structured series whose events resolve to the given markets.
+    Returns the /markets list route."""
     structured = {**SAMPLE_SERIES, "id": "s-strk", "platform_series_id": "btc-multi-strikes-weekly",
                   "is_rolling": False, "title": "BTC Strikes", "structured_type": "survival"}
     mock_api.get("/markets/btc-multi-strikes-weekly").mock(return_value=httpx.Response(404, json={
         "error": {"code": "MARKET_NOT_FOUND", "message": "Not found"}}))
     mock_api.get("/series/btc-multi-strikes-weekly").mock(return_value=httpx.Response(200, json=structured))
-    mock_api.get("/events").mock(return_value=httpx.Response(200, json={
-        "data": [{"id": eid, "platform": "polymarket", "platform_event_id": eid, "title": eid, "category": "Crypto",
-                  "series_id": "s-strk", "series_title": "BTC Strikes", "series_recurrence": "weekly",
-                  "market_count": len(ms), "start_date": T_OPEN, "end_date": T_CLOSE,
-                  "created_at": T_OPEN, "updated_at": T_OPEN} for eid, ms in markets_by_event.items()],
+    events = [{"id": eid, "platform": "polymarket", "platform_event_id": eid, "title": eid, "category": "Crypto",
+               "series_id": "s-strk", "series_title": "BTC Strikes", "series_recurrence": "weekly",
+               "market_count": len(ms), "start_date": T_OPEN, "end_date": end_date,
+               "created_at": T_OPEN, "updated_at": T_OPEN} for eid, ms in markets_by_event.items()]
+    markets_route = mock_api.get("/markets").mock(return_value=httpx.Response(200, json={
+        "data": [{**m, "event_id": eid} for eid, ms in markets_by_event.items() for m in ms],
         "meta": {"cursor": None, "has_more": False}}))
-    for eid, ms in markets_by_event.items():
-        mock_api.get(f"/events/{eid}/markets").mock(return_value=httpx.Response(200, json={
+    for evt, ms in zip(events, markets_by_event.values()):
+        mock_api.get(f"/events/{evt['id']}").mock(return_value=httpx.Response(200, json=evt))
+        mock_api.get(f"/events/{evt['id']}/markets").mock(return_value=httpx.Response(200, json={
             "data": ms, "meta": {"cursor": None, "has_more": False}}))
+    return markets_route
 
 
 def test_single_market_outside_window_reports_once_by_name(mock_api, client, status_lines):
@@ -522,6 +526,53 @@ def test_structured_series_with_no_markets_reports_once_with_its_span(mock_api, 
     lines = [l for l in status_lines if l.startswith("No markets for 'btc-multi-strikes-weekly'")]
     assert len(lines) == 1 and "its data runs" in lines[0]
     assert result.coverage["btc-multi-strikes-weekly"]["data_start"] == T_OPEN - 86_400_000
+
+
+def _event_ended_before_window(mock_api):
+    """One event whose listed end is before the window while its market
+    closes inside it (weather trades past the event's listed end)."""
+    markets_route = _event_series_mocks(
+        mock_api, {"e-1": [_m("m-1", data_start=T_OPEN - 5, data_end=T_CLOSE + 5)]}, end_date=T_OPEN - 1)
+    history = mock_api.get("/markets/m-1/orderbook/history").mock(return_value=httpx.Response(200, json={
+        "data": [_SNAP], "meta": {"cursor": None, "has_more": False}}))
+    return markets_route, history
+
+
+def test_structured_selects_markets_by_their_own_life(mock_api, client):
+    markets_route, history = _event_ended_before_window(mock_api)
+    walk = client.orderbook.walk("btc-multi-strikes-weekly", after=T_OPEN, before=T_CLOSE)
+    assert [m.id for m, _ in walk] == ["m-1"]
+    result = client.backtest(_Noop(), "btc-multi-strikes-weekly", after=T_OPEN, before=T_CLOSE, initial_cash=1000, progress=False)
+    assert history.call_count == 2 and result.skipped == []
+    params = markets_route.calls.last.request.url.params
+    assert params["series_id"] == "s-strk"
+    # bounds included, unlike the rolling walk: books can sit at the listed close
+    assert params["close_after"] == str(T_OPEN) and params["open_before"] == str(T_CLOSE)
+    # events are never enumerated by date
+    assert not [c for c in mock_api.calls if c.request.url.path.endswith("/events")]
+
+
+def test_structured_walk_keeps_a_market_closing_at_the_window_start(mock_api, client):
+    markets_route = _event_series_mocks(mock_api, {"e-1": [_m("m-1")]})
+    mock_api.get("/markets/m-1/orderbook/history").mock(return_value=httpx.Response(200, json={
+        "data": [{**_SNAP, "t": T_CLOSE + 10}], "meta": {"cursor": None, "has_more": False}}))
+    walk = client.orderbook.walk("btc-multi-strikes-weekly", after=T_CLOSE, before=T_CLOSE + 60_000)
+    assert [m.id for m, _ in walk] == ["m-1"]
+    assert markets_route.calls.last.request.url.params["close_after"] == str(T_CLOSE)
+
+
+async def test_async_structured_selects_markets_by_their_own_life(mock_api):
+    from marketlens import AsyncMarketLens
+    from conftest import BASE_URL
+    _, history = _event_ended_before_window(mock_api)
+    c = AsyncMarketLens(api_key="mk_test_key", base_url=BASE_URL)
+    try:
+        walk = await c.orderbook.walk("btc-multi-strikes-weekly", after=T_OPEN, before=T_CLOSE)
+        assert [m.id async for m, _ in walk] == ["m-1"]
+        result = await c.backtest(_Noop(), "btc-multi-strikes-weekly", after=T_OPEN, before=T_CLOSE, initial_cash=1000, progress=False)
+    finally:
+        await c.close()
+    assert history.call_count == 2 and result.skipped == []
 
 
 def test_multi_strategy_run_announces_once(mock_api, client, status_lines):

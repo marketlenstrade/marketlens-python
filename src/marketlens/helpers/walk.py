@@ -26,7 +26,6 @@ from __future__ import annotations
 
 from typing import Any, AsyncIterator, Iterator
 
-from marketlens._base import _coerce_timestamp
 from marketlens.exceptions import ExportNotReadyError
 from marketlens.helpers.merge import async_merge_replays, merge_replays
 from marketlens.helpers.replay import (
@@ -332,22 +331,8 @@ class EventOrderBookWalk:
             self._series_obj, self._current_event,
         )
 
-    @staticmethod
-    def _event_overlaps(evt: Event, after_ms: int | None, before_ms: int | None) -> bool:
-        """Check if event's time range overlaps [after, before]."""
-        if after_ms and evt.end_date and evt.end_date < after_ms:
-            return False
-        if before_ms and evt.start_date and evt.start_date > before_ms:
-            return False
-        return True
-
     def __iter__(self) -> Iterator[tuple[Market, OrderBook]]:
-        after_ms = _coerce_timestamp(self._after) if self._after else None
-        before_ms = _coerce_timestamp(self._before) if self._before else None
-
         for evt in self._events_list:
-            if not self._event_overlaps(evt, after_ms, before_ms):
-                continue
             self._current_event = evt
             self._books = {}
 
@@ -429,12 +414,7 @@ class AsyncEventOrderBookWalk:
         )
 
     async def __aiter__(self) -> AsyncIterator[tuple[Market, OrderBook]]:
-        after_ms = _coerce_timestamp(self._after) if self._after else None
-        before_ms = _coerce_timestamp(self._before) if self._before else None
-
         for evt in self._events_list:
-            if not EventOrderBookWalk._event_overlaps(evt, after_ms, before_ms):
-                continue
             self._current_event = evt
             self._books = {}
 

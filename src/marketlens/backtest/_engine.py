@@ -718,6 +718,7 @@ class _EngineCore:
         after: Any,
         before: Any,
         data_dir: str | None,
+        subtype: str | None = None,
     ) -> None:
         """Fetch the bulk export when a market this run replays has no file
         in ``data_dir`` (the download skips files already there).
@@ -746,6 +747,7 @@ class _EngineCore:
             coalesce=self._resolve_compact_mode(),
             progress=self._config.progress,
             concurrency=concurrency,
+            subtype=subtype,
         ) or []
         self._announce_empty_manifests(after, before)
 
@@ -1442,8 +1444,10 @@ class _EngineCore:
         prices = self._ref_prices.get(symbol)
         if not prices:
             return None
-        # Each entry is a candle close at its exact timestamp.
-        # Return the most recent close at or before at_time.
+        # Each entry is a price at the time it became known (a candle close
+        # is stamped at the last millisecond of its bucket, like a bar's
+        # close_time).
+        # Return the most recent one at or before at_time.
         idx = bisect.bisect_right(prices, (at_time, float("inf"))) - 1
         return prices[idx][1] if idx >= 0 else None
 
@@ -1493,10 +1497,13 @@ class _EngineCore:
                 )
                 prices: list[tuple[int, float]] = []
                 for candle in client.reference.candles(
-                    symbol, after=eff_after, before=eff_before,
+                    symbol, after=eff_after - bucket_ms, before=eff_before,
                     resolution=resolution, limit=5000,
                 ):
-                    prices.append((candle.timestamp, candle.close))
+                    # The API labels a bucket by its start; its close is only
+                    # known at its end. Stamp it at the bucket's last
+                    # millisecond, where a close bar of the same bucket sits.
+                    prices.append((candle.timestamp + bucket_ms - 1, candle.close))
                     self._reporter.download_progress(len(prices))
                 self._reporter.download_finished()
                 self._ref_prices[symbol] = prices
@@ -1561,7 +1568,7 @@ class BacktestEngine(_EngineCore):
         after: Any = None,
         before: Any = None,
         data_dir: str | None = None,
-        reference_resolution: str = "1m",
+        reference_resolution: str | None = None,
         announce: bool = True,
         label: str | None = None,
         subtype: str | None = None,
@@ -1695,7 +1702,17 @@ class BacktestEngine(_EngineCore):
             n_markets = sum(len(lane) for lane in lanes)
             streams = [_stream(lane) for lane in lanes]
             markets = [m for lane in lanes for m in lane]
-            self._maybe_autodownload(client, id, markets=markets, after=after, before=before, data_dir=data_dir)
+            # Download only the cohort's bet type: the one asked for, or the
+            # one every inferred cohort market carries. A structured series
+            # is its whole strike surface and is never narrowed.
+            bet_type = subtype
+            if bet_type is None and not series.structured_type:
+                kinds = {m.subtype for m in markets}
+                bet_type = kinds.pop() if len(kinds) == 1 else None
+            self._maybe_autodownload(
+                client, id, markets=markets, after=after, before=before,
+                data_dir=data_dir, subtype=bet_type,
+            )
             if data_dir is not None:
                 n_markets = self._prelog_file_skips(markets, data_dir, announce=announce)
             with self._with_reporter(n_markets, replay=replay, label=label):
@@ -1808,34 +1825,15 @@ class BacktestEngine(_EngineCore):
         products), this collapses N markets into K = peak-concurrency
         lanes, bounding the prefetcher count to actual data concurrency.
         """
-        event_params = dict(params)
-        if after is not None:
-            event_params["end_after"] = after
-        # Only filter by end_after; many structured events have NULL
-        # start_date which causes start_before to exclude them.
-        # Individual markets are filtered by open_time/close_time below.
-        events = client.series.events(series_id, **event_params).to_list()
-
-        after_ms = _coerce_timestamp(after) if after is not None else None
-        before_ms = _coerce_timestamp(before) if before is not None else None
-
-        all_markets: list[Market] = []
-        for evt in events:
-            # Skip events that end before our window
-            if after_ms is not None and evt.end_date and evt.end_date < after_ms:
-                continue
-            # Skip events that start after our window (when start_date is known)
-            if before_ms is not None and evt.start_date and evt.start_date > before_ms:
-                continue
-            event_markets = client.events.markets(evt.id).to_list()
-            for m in event_markets:
-                if after_ms is not None and m.close_time and m.close_time < after_ms:
-                    continue
-                if before_ms is not None and m.open_time and m.open_time > before_ms:
-                    continue
-                self._market_series[m.id] = series.id
-                self._register_market(m)
-                all_markets.append(m)
+        # Markets are selected by their own life, as on the rolling walk
+        # (an event's dates can differ from its markets'), but with the
+        # bounds included: a market can hold books at its listed close.
+        all_markets: list[Market] = list(client.series._markets_in_window(
+            series.id, after=after, before=before, inclusive=True, **params,
+        ))
+        for m in all_markets:
+            self._market_series[m.id] = series.id
+            self._register_market(m)
 
         lanes = _pack_into_lanes(all_markets)
         # Mark all markets in a lane as belonging to the same group so
@@ -1961,7 +1959,7 @@ class AsyncBacktestEngine(_EngineCore):
         after: Any = None,
         before: Any = None,
         data_dir: str | None = None,
-        reference_resolution: str = "1m",
+        reference_resolution: str | None = None,
         subtype: str | None = None,
         **params: Any,
     ) -> BacktestResult:
@@ -2265,27 +2263,14 @@ class AsyncBacktestEngine(_EngineCore):
 
         See sync ``_resolve_structured`` for the rationale.
         """
-        event_params = dict(params)
-        if after is not None:
-            event_params["end_after"] = after
-        if before is not None:
-            event_params["start_before"] = before
-        events = await (await client.series.events(series_id, **event_params)).to_list()
-
-        after_ms = _coerce_timestamp(after) if after is not None else None
-        before_ms = _coerce_timestamp(before) if before is not None else None
-
-        all_markets: list[Market] = []
-        for evt in events:
-            event_markets = await client.events.markets(evt.id).to_list()
-            for m in event_markets:
-                if after_ms is not None and m.close_time and m.close_time < after_ms:
-                    continue
-                if before_ms is not None and m.open_time and m.open_time > before_ms:
-                    continue
-                self._market_series[m.id] = series.id
-                self._register_market(m)
-                all_markets.append(m)
+        all_markets: list[Market] = [
+            m async for m in client.series._markets_in_window(
+                series.id, after=after, before=before, inclusive=True, **params,
+            )
+        ]
+        for m in all_markets:
+            self._market_series[m.id] = series.id
+            self._register_market(m)
 
         lanes = _pack_into_lanes(all_markets)
         for i, lane in enumerate(lanes):
@@ -2387,6 +2372,9 @@ class AlphaBacktestEngine(BacktestEngine):
         self._current_mid: float = 0.0
         self._client: Any = None            # stashed for offline lazy fetch
         self._n_bars_pending = 0            # markets skipped: bar export still building
+        # Bars finer than a minute read a reference at their own cadence.
+        if _RESOLUTION_MS[alpha.resolution] < 60_000:
+            self._REF_RESOLUTION_DEFAULT = alpha.resolution
 
     # ── accessors used by AlphaContext ────────────────────────────
 
@@ -2406,20 +2394,10 @@ class AlphaBacktestEngine(BacktestEngine):
     def _resolve_compact_mode(self) -> bool:
         return False
 
-    def _maybe_autodownload(self, client, id, *, markets, after, before, data_dir):  # type: ignore[override]
+    def _maybe_autodownload(self, client, id, *, markets, after, before, data_dir, subtype=None):  # type: ignore[override]
         # Bars are downloaded lazily per market in the file stream. Stash the
         # client so that path can fetch on a cache miss.
         self._client = client
-        if data_dir is None:
-            return
-        # Reference (Binance spot) for ctx.reference_price(): the same files the
-        # tick offline path downloads, so a signal that reads it runs fully
-        # offline. Underlyings/bounds were populated during target resolution.
-        for symbol, (lo, hi) in self._underlying_bounds.items():
-            try:
-                client.exports._ensure_reference(Path(data_dir), symbol, lo, hi)
-            except Exception:
-                pass
 
     def _prelog_file_skips(self, markets, data_dir, *, announce=True):  # type: ignore[override]
         # Streaming has nothing to pre-download.

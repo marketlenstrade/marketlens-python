@@ -2,6 +2,15 @@
 
 All notable changes to the `marketlens` Python SDK, version by version.
 
+## [1.8.13] 2026-11-24
+
+* A backtest of a structured series by slug (daily weather, strikes, hit price, rate decisions) selects markets by their own open and close times instead of the event's listed end. Daily weather events list their end at 12:00 UTC on the target day while the markets trade until local midnight, so a window starting after 12:00 UTC silently left that day's markets out. `orderbook.walk` on a structured slug is fixed the same way. Resolving the markets now takes one request instead of one per event.
+* On a structured series, extra filters such as `status="resolved"` now apply to its markets, as they already did on rolling series. Fills that land at the same instant in different markets can come in a different order than before; the old order followed each market's live volume and was not stable between runs.
+* An `AlphaStrategy` backtest with `data_dir` no longer downloads Binance tick files. `ctx.reference_price()` loads reference candles the first time the strategy calls it, in both streaming and `data_dir` runs, so a strategy that never reads the reference downloads none. A `reference-{symbol}.parquet` already in the directory is still used.
+* `ctx.reference_price()` from candles returns the close of the last finished candle. Before, a streamed lookup returned the close of the candle still in progress, up to one candle ahead of the strategy's clock, so streamed strategies that read the reference will see different results. Candles are 1 minute by default, the bar size for bars shorter than a minute, or `reference_resolution=` when you pass it.
+* `subtype=` on a series backtest with `data_dir` downloads only that kind of bet. Before, every bet type in the window was downloaded and billed. `exports.download_series` takes `subtype=` too.
+* `orderbook.walk(coalesce=True)` over the API returns the compact stream. It used to yield nothing; this was fixed on the server, so earlier versions get it as well.
+
 ## [1.8.12] 2026-10-21
 
 * A backtest skips a market that has not resolved yet as "market not resolved yet" instead of "export pending", since history files are built only after a market resolves (usually within 2 hours). "export pending" now means a resolved market whose file is still being built.

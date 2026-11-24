@@ -706,7 +706,7 @@ ctx:
   split / merge(size, *, market_id=None)   # CTF mint/redeem: size YES+NO <-> size cash
   cash, equity, open_orders, book, market, time
   books -> dict[market_id, OrderBook]   # all active books
-  reference_price(market_id=None) -> float | None   # ~1s Binance spot; a signal, not the resolution oracle
+  reference_price(market_id=None) -> float | None   # Binance spot, last finished minute; a signal, not the resolution oracle
 
 book: midpoint, best_bid, best_ask, spread, bid_levels, ask_levels (0 = that side empty),
   spread_bps(), microprice(), imbalance(levels=3), impact(side, size), slippage(side, size).

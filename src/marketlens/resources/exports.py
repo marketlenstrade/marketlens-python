@@ -290,6 +290,7 @@ class Exports:
         coalesce: bool = True,
         concurrency: int = 1,
         dry_run: bool = False,
+        subtype: str | None = None,
     ) -> SeriesDownloadResult:
         """Download all data needed to backtest a series.
 
@@ -313,6 +314,8 @@ class Exports:
                 ``dry_run`` would bill right now (files this account already
                 unlocked count as zero). Use it to check the price of a
                 window before spending rows on it.
+            subtype: Keep only markets of this bet type (e.g.
+                ``"moneyline"``): only those are downloaded and billed.
 
         Returns:
             ``SeriesDownloadResult`` with ``data_dir``, ``ready``, ``pending``,
@@ -342,6 +345,8 @@ class Exports:
             params["coalesce"] = "true"
         if dry_run:
             params["dry_run"] = "true"
+        if subtype is not None:
+            params["subtype"] = subtype
 
         body = self._client.get(f"/series/{series_id}/export", params=params)
         suffix = "-compact" if coalesce else ""
@@ -602,6 +607,7 @@ class AsyncExports:
         coalesce: bool = True,
         concurrency: int = 1,
         dry_run: bool = False,
+        subtype: str | None = None,
     ) -> SeriesDownloadResult:
         """Async equivalent of :meth:`Exports.download_series`."""
         data_dir = Path(data_dir)
@@ -617,6 +623,8 @@ class AsyncExports:
             params["coalesce"] = "true"
         if dry_run:
             params["dry_run"] = "true"
+        if subtype is not None:
+            params["subtype"] = subtype
 
         body = await self._client.get(f"/series/{series_id}/export", params=params)
         suffix = "-compact" if coalesce else ""

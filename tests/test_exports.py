@@ -320,6 +320,16 @@ class TestSeriesDownload:
             "events_charged": events or 100 * len(ready_ids),
         }
 
+    def test_subtype_is_sent_only_when_given(self, mock_api, client, tmp_path):
+        route = mock_api.get("/series/nba-2026/export").mock(
+            return_value=httpx.Response(200, json=self._manifest([])))
+        for subtype in (None, "moneyline"):
+            client.exports.download_series(
+                "nba-2026", data_dir=str(tmp_path), dry_run=True, subtype=subtype,
+            )
+        first, second = (c.request.url.params for c in route.calls)
+        assert "subtype" not in first and second.get("subtype") == "moneyline"
+
     def test_parses_json_and_downloads_ready(self, mock_api, client, tmp_path):
         manifest = self._manifest(
             ready_ids=["m1", "m2"],
@@ -640,6 +650,15 @@ class TestAsyncExports:
 
         out = await aclient.exports.download("m1", data_dir=str(tmp_path), progress=False)
         assert (out / "history-m1-compact.parquet").read_bytes() == b"PAR1"
+
+    async def test_series_download_sends_subtype(self, mock_api, aclient, tmp_path):
+        route = mock_api.get("/series/nba-2026/export").mock(return_value=httpx.Response(200, json={
+            "ready": [], "pending": [], "failed": [], "events_charged": 0,
+        }))
+        await aclient.exports.download_series(
+            "nba-2026", data_dir=str(tmp_path), dry_run=True, subtype="moneyline",
+        )
+        assert route.calls[0].request.url.params.get("subtype") == "moneyline"
 
     async def test_reference_download_applies_open_lookback(self, mock_api, aclient, tmp_path):
         captured = {}

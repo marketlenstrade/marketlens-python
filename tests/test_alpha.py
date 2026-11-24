@@ -210,6 +210,89 @@ class TestAlphaBacktest:
         client.backtest(UsesRef(), "m1", after=0, before=11 * MIN, initial_cash=10_000)
         assert any(p is not None for p in seen), "reference_price should be available to AlphaStrategy"
 
+    def test_reference_price_is_the_last_finished_bucket(self, mock_api, client):
+        # The API labels a candle by the start of its bucket. A lookup at t
+        # reads the bucket that ended at t, never the one starting there.
+        market = _resolved_market(win_index=0)
+        market["underlying"] = "BTC"
+        _mock_market(mock_api, market)
+        mock_api.get("/reference/candles").mock(return_value=httpx.Response(200, json={
+            "data": [
+                {"symbol": "BTC", "timestamp": i * MIN, "open": 100.0, "high": 100.0,
+                 "low": 100.0, "close": 100.0 + i, "volume": 1.0}
+                for i in range(12)
+            ],
+            "meta": {"cursor": None, "has_more": False},
+        }))
+        seen = []
+
+        class UsesRef(AlphaStrategy):
+            def on_bar(self, ctx, market, bar):
+                seen.append((ctx.time, ctx.reference_price()))
+
+        client.backtest(UsesRef(), "m1", after=0, before=11 * MIN, initial_cash=10_000)
+        assert seen and all(p == 100.0 + t // MIN - 1 for t, p in seen)
+
+    def test_close_bar_reads_the_reference_close_of_its_own_bucket(self, mock_api, client):
+        # A close bar sits at the last millisecond of its bucket and reads the
+        # reference close of that same bucket.
+        market = _resolved_market(win_index=0)
+        market["underlying"] = "BTC"
+        mock_api.get("/markets/m1").mock(return_value=httpx.Response(200, json=market))
+        mock_api.get("/markets/m1/candles").mock(return_value=httpx.Response(200, json={
+            "data": [
+                {"open_time": i * MIN, "close_time": (i + 1) * MIN - 1, "open": 0.5, "high": 0.5,
+                 "low": 0.5, "close": 0.5, "volume": 1.0, "trade_count": 1}
+                for i in range(1, 10)
+            ],
+            "meta": {"cursor": None, "has_more": False},
+        }))
+        mock_api.get("/reference/candles").mock(return_value=httpx.Response(200, json={
+            "data": [
+                {"symbol": "BTC", "timestamp": i * MIN, "open": 100.0, "high": 100.0,
+                 "low": 100.0, "close": 100.0 + i, "volume": 1.0}
+                for i in range(12)
+            ],
+            "meta": {"cursor": None, "has_more": False},
+        }))
+        seen = []
+
+        class UsesRef(AlphaStrategy):
+            def on_bar(self, ctx, market, bar):
+                seen.append((ctx.time, ctx.reference_price()))
+
+        client.backtest(UsesRef(), "m1", after=0, before=11 * MIN, initial_cash=10_000, price="close")
+        assert seen and all(p == 100.0 + t // MIN for t, p in seen)
+
+    def test_offline_run_that_never_reads_reference_downloads_none(self, mock_api, client, tmp_path, monkeypatch):
+        # No reference route is mocked, so a candles request would raise.
+        market = _resolved_market(win_index=0)
+        market["underlying"] = "BTC"
+        mock_api.get("/markets/m1").mock(return_value=httpx.Response(200, json=market))
+        bucket_url = "https://bucket.example/metrics/m1-1m.parquet"
+        mock_api.get("/markets/m1/orderbook/metrics/export").mock(
+            return_value=httpx.Response(302, headers={"Location": bucket_url}))
+        mock_api.get(bucket_url).mock(
+            return_value=httpx.Response(200, content=_metrics_parquet_bytes()))
+        tick_downloads = []
+        monkeypatch.setattr(client.exports, "_ensure_reference", lambda *a, **k: tick_downloads.append(a))
+        res = client.backtest(
+            LongYes(), "m1", after=0, before=11 * MIN, initial_cash=10_000,
+            data_dir=str(tmp_path))
+        assert res.total_trades > 0
+        assert tick_downloads == []
+
+    @pytest.mark.parametrize("explicit,expected", [(None, "30s"), ("5m", "5m")])
+    def test_sub_minute_bars_read_reference_at_bar_resolution(self, mock_api, client, explicit, expected):
+        from marketlens.backtest import AlphaBacktestEngine
+        route = mock_api.get("/reference/candles").mock(return_value=httpx.Response(
+            200, json={"data": [], "meta": {"cursor": None, "has_more": False}}))
+        engine = AlphaBacktestEngine(LongYes(), AlphaConfig(resolution="30s", price="close"))
+        engine._ref_load_ctx = {"client": client, "after": 0, "before": MIN, "resolution": explicit}
+        engine.get_reference_price("BTC", MIN)
+        assert route.calls.last.request.url.params["resolution"] == expected
+        assert AlphaBacktestEngine(LongYes(), AlphaConfig())._REF_RESOLUTION_DEFAULT == "1m"
+
     def test_bar_params_rejected_for_tick_strategy(self, client):
         from marketlens.backtest import Strategy
 

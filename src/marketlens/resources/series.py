@@ -83,24 +83,37 @@ class SeriesResource:
                 f"series.walk() is only supported for rolling series. "
                 f"'{resolved.title}' is not rolling. Use series.events() to browse its events."
             )
+        yield from self._markets_in_window(resolved.id, after=after, before=before, **params)
+
+    def _markets_in_window(
+        self, series_uuid: str, *, after: Any = None, before: Any = None,
+        inclusive: bool = False, **params: Any,
+    ) -> Iterator[Market]:
+        """Markets of a series whose life overlaps ``[after, before)``, by close_time.
+
+        ``inclusive=True`` also keeps a market with ``close_time == after`` or
+        ``open_time == before``: a structured market can hold books at its
+        listed close, so those paths keep the boundary market.
+        """
         params["sort"] = "close_time"
+        edge = 0 if inclusive else 1
 
         if after is not None or before is not None:
-            params["series_id"] = resolved.id
-            # Translate to the server's inclusive bounds. close_time >= after+1
+            params["series_id"] = series_uuid
+            # The server's bounds are inclusive. Half-open: close_time >= after+1
             # iff close_time > after; open_time <= before-1 iff open_time < before.
             # Timestamps are integer ms so the +1/-1 is exact.
             if after is not None:
-                params["close_after"] = _coerce_timestamp(after) + 1
+                params["close_after"] = _coerce_timestamp(after) + edge
             if before is not None:
-                params["open_before"] = _coerce_timestamp(before) - 1
+                params["open_before"] = _coerce_timestamp(before) - edge
             yield from SyncPageIterator(
                 self._client, "/markets",
                 _coerce_timestamp_params(params), Market,
             )
         else:
             yield from SyncPageIterator(
-                self._client, f"/series/{resolved.id}/markets",
+                self._client, f"/series/{series_uuid}/markets",
                 _coerce_timestamp_params(params), Market,
             )
 
@@ -174,14 +187,25 @@ class AsyncSeriesResource:
                 f"series.walk() is only supported for rolling series. "
                 f"'{resolved.title}' is not rolling. Use series.events() to browse its events."
             )
+        async for market in self._markets_in_window(
+            resolved.id, after=after, before=before, **params,
+        ):
+            yield market
+
+    async def _markets_in_window(
+        self, series_uuid: str, *, after: Any = None, before: Any = None,
+        inclusive: bool = False, **params: Any,
+    ):
+        """Async version of :meth:`SeriesResource._markets_in_window`."""
         params["sort"] = "close_time"
+        edge = 0 if inclusive else 1
 
         if after is not None or before is not None:
-            params["series_id"] = resolved.id
+            params["series_id"] = series_uuid
             if after is not None:
-                params["close_after"] = _coerce_timestamp(after) + 1
+                params["close_after"] = _coerce_timestamp(after) + edge
             if before is not None:
-                params["open_before"] = _coerce_timestamp(before) - 1
+                params["open_before"] = _coerce_timestamp(before) - edge
             async for market in AsyncPageIterator(
                 self._client, "/markets",
                 _coerce_timestamp_params(params), Market,
@@ -189,7 +213,7 @@ class AsyncSeriesResource:
                 yield market
         else:
             async for market in AsyncPageIterator(
-                self._client, f"/series/{resolved.id}/markets",
+                self._client, f"/series/{series_uuid}/markets",
                 _coerce_timestamp_params(params), Market,
             ):
                 yield market

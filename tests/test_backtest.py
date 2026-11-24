@@ -2168,8 +2168,10 @@ class TestLazyReferencePrices:
     def test_strategy_with_reference_triggers_fetch(self, mock_api, client):
         """When reference_price() IS called, the candles endpoint is hit."""
         self._setup_market(mock_api, with_underlying=True)
+        # One default (1m) bucket that closes at the snapshot's time: a close is
+        # only readable once its bucket has ended.
         candle = {
-            "symbol": "BTC", "timestamp": 999,
+            "symbol": "BTC", "timestamp": 1000 - 60_000,
             "open": "100", "high": "100", "low": "100", "close": "100",
             "volume": "1",
         }
@@ -2675,6 +2677,7 @@ class TestStreamingEqualsBulk:
             export_qs = series_export.calls[0].request.url.params
             assert export_qs.get("after") == str(1_776_218_400_000)
             assert export_qs.get("before") == str(1_776_218_700_000)
+            assert "subtype" not in export_qs  # rolling: the whole series
 
             # Re-run with the dir now populated: no further export traffic.
             client.backtest(
@@ -2689,3 +2692,50 @@ class TestStreamingEqualsBulk:
             assert bucket.call_count == 1
         finally:
             client.close()
+
+    @pytest.mark.parametrize("asked", ["moneyline", None])
+    def test_data_dir_download_asks_for_the_cohort_bet_type(self, mock_api, tmp_path, asked):
+        """A series backtest of one bet type downloads that bet type only,
+        whether it was named or inferred."""
+        T_OPEN, T_CLOSE = 1_776_218_400_000, 1_776_218_700_000
+        series = {
+            **SAMPLE_SERIES, "id": "nba-uuid", "platform_series_id": "nba-2026",
+            "is_rolling": False, "structured_type": None, "title": "NBA",
+        }
+        game = {
+            **SAMPLE_MARKET, "platform": "polymarket", "series_id": "nba-uuid",
+            "open_time": T_OPEN, "close_time": T_CLOSE,
+        }
+        not_found = httpx.Response(404, json={
+            "error": {"code": "MARKET_NOT_FOUND", "message": "Not found"},
+        })
+        mock_api.get("/series/nba-2026").mock(return_value=httpx.Response(200, json=series))
+        mock_api.get("/markets/nba-2026").mock(return_value=not_found)
+        mock_api.get("/markets/nba-2026/export").mock(return_value=not_found)
+        mock_api.get("/markets").mock(return_value=httpx.Response(200, json={
+            "data": [
+                {**game, "id": "mkt-ml", "subtype": "moneyline"},
+                {**game, "id": "mkt-rest", "subtype": "rest"},
+            ],
+            "meta": {"cursor": None, "has_more": False},
+        }))
+        series_export = mock_api.get("/series/nba-2026/export").mock(
+            return_value=httpx.Response(200, json={
+                "ready": [], "pending": [{"market_id": "mkt-ml", "status": "pending"}],
+                "failed": [], "events_charged": 0,
+            })
+        )
+
+        class Noop(Strategy):
+            pass
+
+        client = MarketLens(api_key="mk_test", base_url=BASE_URL)
+        try:
+            client.backtest(
+                Noop(), "nba-2026", initial_cash="10000", subtype=asked,
+                after=T_OPEN, before=T_CLOSE,
+                data_dir=str(tmp_path / "nba"), progress=False,
+            )
+        finally:
+            client.close()
+        assert series_export.calls[0].request.url.params.get("subtype") == "moneyline"
