@@ -13,7 +13,7 @@ For pulling raw data (candles, trades, books, Parquet files) without a strategy,
 ## 1. Setup
 
 ```bash
-pip install marketlens        # Python 3.10+
+pip install -U marketlens     # Python 3.10+, needs 1.8.13 or later
 ```
 
 The key is read from the `MARKETLENS_API_KEY` environment variable. If it is not set, ask the user to sign in at https://marketlens.trade/?signin=1&utm_source=skills&utm_medium=agent&utm_campaign=polymarket-backtest (Google sign in, no card), create a key under Console > API Keys, and export it. Do not write the key into a script or print it. A brand new key can answer 401 for about a minute; wait and retry once before assuming it is wrong.
@@ -45,14 +45,14 @@ Measured row costs (free keys, 2026-11-23). Use them to size a run before you st
 | One Counter-Strike match winner | about 34,000 |
 | One NYC weather day, all 11 temperature buckets, whole life | about 85,000 |
 | Alpha engine (`AlphaStrategy`), streamed, any market | 1 per bar per market |
-| Binance reference ticks that `data_dir` adds on crypto markets | about 1,000 per minute of window |
+| Binance reference ticks that `data_dir` adds on crypto markets (`Strategy` runs) | about 1,000 per minute of window |
 
 Four rules follow from that table:
 
 1. **Write `on_trade`, not `on_book`,** unless the strategy truly needs every book change between trades. A strategy that does not override `on_book` gets the compact history (the book is still exact at every trade), about 6 times fewer rows.
-2. **Pass `data_dir=` on every `Strategy` run.** Files download once; every rerun over the same markets is free and takes about a second. Without it each run bills again. (The alpha engine in step 7 is the exception.)
+2. **Pass `data_dir=` on every `Strategy` run.** Files download once; every rerun over the same markets is free and takes about a second. Without it each run bills again. (The alpha engine in step 7 is cheap enough to stream.)
 3. **Start with 1 to 3 markets** (for weather, the buckets of one day). Check that orders fill and the numbers make sense, then widen, multiplying the per market cost by the market count first (busy markets cost two or three times a quiet one, so size from the heaviest market in your sample). The allowance is the user's and does not come back: keep one widening step under about a quarter of the rows left, say what it will cost before running it, and ask before going further.
-4. **Pass explicit market ids for sports and weather** (step 5). On SDK 1.8.12 a series slug with `data_dir` downloads every market the series holds in the window, whatever `subtype` says: a window of three NBA games fetched 324 files (every spread and total) and 559,000 rows in one call.
+4. **On a league slug always pass `subtype`** (step 5). With it a window downloads and bills only that kind of bet: one NBA game is 1 moneyline file of 62,571 rows, against 65 files and 129,375 rows for every kind of bet in the same window.
 
 **Two engines, pick by sample size.** The execution engine (`Strategy`, steps 4 to 6) replays every trade against the real book and is the one to trust for fills, but a free allowance covers about 70 BTC 5m markets of it. When the question needs hundreds of markets ("over the past week"), use the alpha engine (`AlphaStrategy`, step 7): it runs on 1 minute bars at one row each, applies the same fees and settles at the real outcome, so a full day of ETH 15m markets (96 of them) measured 1,423 rows and 2 seconds. Prove the idea there, then confirm fills on a handful of markets with the execution engine. Do not compute P&L by hand from bars: fees and settlement are easy to get wrong and the engine already has them.
 
@@ -176,7 +176,7 @@ ids = [x.id for x in client.events.markets(m.event_id)]
 result = client.backtest(FadeExtremes(), ids, initial_cash=10_000, data_dir="data/nyc-weather")
 ```
 
-`ctx.books` then holds all the buckets, and `market.question` names each one. A week of one city (77 markets) takes about 4 minutes to replay. Use the id list rather than the slug: on SDK 1.8.12 a slug window that starts after 12:00 UTC on the target day leaves that day out, and most weather volume trades after that hour.
+`ctx.books` then holds all the buckets, and `market.question` names each one. A week of one city (77 markets) takes about 4 minutes to replay. To cover several days, pass the city slug with `after=` and `before=`: every day's buckets that trade inside the window replay (most weather volume trades after 12:00 UTC on the target day).
 
 **Sports and esports** (a league mixes several kinds of bet under one slug, so choose one with `subtype`: `moneyline`, `spread` or `total`):
 
@@ -185,6 +185,8 @@ games = recent("nba-2026", 2, subtype="moneyline")
 result = client.backtest(FadeExtremes(), [g.id for g in games],
                          initial_cash=10_000, data_dir="data/nba")
 ```
+
+To widen to every game in a window, pass the league slug: `client.backtest(FadeExtremes(), "nba-2026", subtype="moneyline", after=..., before=..., initial_cash=10_000, data_dir="data/nba")`.
 
 Useful options, all keyword: `fees="polymarket"` (default: taker fees on Crypto and Sports category markets, zero on every other category, so mention that when reporting a weather or esports result; `None` for zero everywhere), `latency_ms=50`, `slippage_bps=0`, `limit_fill_rate=0.1` (the share of each crossing trade a resting limit order gets), `queue_position=False` (set `True` to fill a limit only after the size queued ahead of it trades; needs the full history), `progress=False` to silence the progress bars.
 
@@ -238,8 +240,8 @@ print(result.summary())
 - `ctx.target_position(n)` holds `n` YES shares (negative holds NO, 0 is flat); `ctx.target_weight(w)` holds YES worth `w` of equity. A target persists until changed.
 - `bar` has `t` (epoch ms), `mid`, `spread`, `bid_depth`, `ask_depth`. `resolution` runs from `1m` to `1d`.
 - Fills happen at the next bar's mid, so there is no look ahead, but also no spread: `slippage_bps=5` is a reasonable stand-in. Orders, queues and latency are not modeled.
-- Run it without `data_dir`. On a crypto series `data_dir` also downloads every Binance tick in the window (630,000 rows for six hours of BTC), and a streamed alpha run is cheap enough to repeat.
-- The target takes the same forms as in step 5. A crypto slug with `after=` and `before=` is the usual one; a sports league slug needs `subtype=`; for weather pass the event's market ids.
+- Run it without `data_dir`: a streamed alpha run bills one row per bar and is cheap enough to repeat. `ctx.reference_price()` adds one row per minute of window, and only if the strategy calls it.
+- The target takes the same forms as in step 5. A crypto slug with `after=` and `before=` is the usual one; a sports league slug needs `subtype=`; a weather city slug works the same way as a crypto one.
 
 ## 8. Errors
 

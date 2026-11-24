@@ -13,7 +13,7 @@ To run a trading strategy over this data, use the `polymarket-backtest` skill fr
 ## 1. Setup
 
 ```bash
-pip install marketlens pandas     # Python 3.10+
+pip install -U marketlens pandas  # Python 3.10+
 ```
 
 The key is read from the `MARKETLENS_API_KEY` environment variable. If it is not set, ask the user to sign in at https://marketlens.trade/?signin=1&utm_source=skills&utm_medium=agent&utm_campaign=polymarket-historical-data (Google sign in, no card), create a key under Console > API Keys, and export it. Do not write the key into a script or print it. A brand new key can answer 401 for about a minute; wait and retry once before assuming it is wrong.
@@ -44,6 +44,7 @@ Pick the cheapest call that answers the question. Measured on one BTC 5 minute m
 | `client.markets.trades(id, ...)` | every trade | 1,377 (one per trade) |
 | `client.exports.download(id, data_dir=...)` | Parquet: every trade, the book exact at each trade | 32,964, then free forever |
 | `client.orderbook.walk(id, after=, before=)` over the API | every book change | 19,627 for 30 seconds |
+| the same walk with `coalesce=True` | the book at every trade and snapshot | about 6 times fewer |
 
 So: candles and metrics for price and spread history, `trades` for the tape, `exports.download` for tick-level books (then read the file as often as you like), and avoid walking books over the API on a free key.
 
@@ -174,7 +175,7 @@ data = client.exports.download_series("btc-up-or-down-5m", data_dir="data/btc-5m
 print(len(data.ready), "downloaded,", len(data.pending), "not built yet,", data.rows_charged, "rows")
 ```
 
-Always pass both `after` and `before`. `quote.wall` is set when the window needs more rows than the account has left; the quote then covers only what fits. Do not use `download_series` on a sports league slug on a free key: it takes every kind of bet in the window (two days of NBA is about 490 files).
+Always pass both `after` and `before`. `quote.wall` is set when the window needs more rows than the account has left; the quote then covers only what fits. On a sports league slug pass `subtype="moneyline"` (or `spread`, `total`), in the quote and in the download: without it the call takes every kind of bet in the window (two days of NBA is about 490 files).
 
 ## 7. Errors
 
