@@ -335,6 +335,25 @@ class TestAlphaConfig:
             AlphaConfig(**kw).validate()
 
 
+class TestEmptySide:
+    def test_one_sided_bucket_yields_no_bar(self):
+        from marketlens.types.orderbook import BookMetrics
+        rows = [
+            BookMetrics(**_metric(0, 0.5)),     # genuine two-sided 0.5 mid
+            BookMetrics(t=MIN, best_bid=None, best_ask=0.99, spread=None, midpoint=None,
+                        bid_depth=0.0, ask_depth=10.0, bid_levels=0, ask_levels=1),
+            BookMetrics(t=2 * MIN, best_bid=0.01, best_ask=None, spread=None, midpoint=None,
+                        bid_depth=10.0, ask_depth=0.0, bid_levels=1, ask_levels=0),
+        ]
+
+        class _OB:
+            def metrics(self, mid, *, after, before, resolution, **kw):
+                return [r for r in rows if after <= r.t < before]
+
+        bars = list(iter_bars(_OB(), None, "m", 0, 3 * MIN, resolution="1m", price="mid"))
+        assert [(b.t, b.mid) for b in bars] == [(0, 0.5)]
+
+
 class TestChunking:
     def test_metrics_window_chunked_under_span_cap(self):
         span = int(2.5 * 86_400_000)        # 2.5 days at 1m, cap is 1 day -> 3 chunks
@@ -346,6 +365,7 @@ class TestChunking:
                 return [type("M", (), {
                     "t": t, "midpoint": 0.5, "spread": 0.0,
                     "bid_depth": 0.0, "ask_depth": 0.0,
+                    "bid_levels": 1, "ask_levels": 1,
                 })() for t in range(after, before, MIN)]
 
         ob = _OB()

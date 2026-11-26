@@ -120,12 +120,14 @@ def book_view(b: Any, *, depth: int) -> dict:
 
 
 def metric_row(m: Any) -> dict:
+    """A side with no orders reports null prices, as in ``book_view``."""
+    two_sided = bool(m.bid_levels and m.ask_levels)
     return {
         "t": m.t,
-        "best_bid": m.best_bid,
-        "best_ask": m.best_ask,
-        "midpoint": m.midpoint,
-        "spread": m.spread,
+        "best_bid": m.best_bid if m.bid_levels else None,
+        "best_ask": m.best_ask if m.ask_levels else None,
+        "midpoint": m.midpoint if two_sided else None,
+        "spread": m.spread if two_sided else None,
         "bid_depth": m.bid_depth,
         "ask_depth": m.ask_depth,
         "bid_levels": m.bid_levels,

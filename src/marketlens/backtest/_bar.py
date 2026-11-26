@@ -137,6 +137,8 @@ def iter_bars(
         while w0 < before_ms:
             w1 = min(w0 + max_span, before_ms)
             for m in orderbook.metrics(market_id, after=w0, before=w1, resolution=resolution):
+                if not (m.bid_levels and m.ask_levels):  # empty side -> no real mid, as in data_dir
+                    continue
                 yield Bar(t=m.t, mid=m.midpoint, spread=m.spread,
                           bid_depth=m.bid_depth, ask_depth=m.ask_depth)
             w0 = w1

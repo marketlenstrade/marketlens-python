@@ -368,7 +368,7 @@ The tick-only options (`latency_ms`, `queue_position`, `limit_fill_rate`, `settl
 
 ### Numeric conventions
 
-All numeric fields (prices, sizes, volumes, fees, statistics) are `float`, with defaults picked so call sites need no guards: Polymarket prices (`best_bid`, `best_ask`, `midpoint`) default to `0.5` when the side is missing, sizes and rates default to `0.0`. Sizes (book levels, `bid_depth`, `ask_depth`, trade `size`, candle `volume`) are shares, not dollars; a level's dollar value is price times size. Genuinely optional values (`winning_outcome` before resolution, `strike` on non-structured markets, `book.spread_bps()` on an empty book) return `None`. Detect a truly empty book with `book.bid_levels` / `book.ask_levels`, not by comparing prices to defaults.
+All numeric fields (prices, sizes, volumes, fees, statistics) are `float`, with defaults picked so call sites need no guards: sizes and rates default to `0.0`, and a book side with no orders has no real price, so its `best_bid` or `best_ask` and the `midpoint` hold a placeholder, not a quote. Sizes (book levels, `bid_depth`, `ask_depth`, trade `size`, candle `volume`) are shares, not dollars; a level's dollar value is price times size. Genuinely optional values (`winning_outcome` before resolution, `strike` on non-structured markets, `book.spread_bps()` on an empty book) return `None`. Check `book.bid_levels` / `book.ask_levels` before trusting a price, never compare prices to a default.
 
 ### Resources
 

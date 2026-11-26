@@ -159,6 +159,18 @@ def test_get_orderbook_one_sided_nulls_missing_side(server, mock_api):
     assert "imbalance" not in book
 
 
+def test_metric_row_nulls_missing_side():
+    from marketlens.types.orderbook import BookMetrics
+    m = BookMetrics(t=0, best_bid=None, best_ask=0.99, spread=None, midpoint=None,
+                    bid_depth=0.0, ask_depth=10.0, bid_levels=0, ask_levels=1)
+    row = fmt.metric_row(m)
+    assert row["best_bid"] is None and row["midpoint"] is None and row["spread"] is None
+    assert row["best_ask"] == 0.99
+    two = fmt.metric_row(BookMetrics(t=0, best_bid=0.49, best_ask=0.51, spread=0.02,
+                                     midpoint=0.5, bid_levels=2, ask_levels=2))
+    assert two["midpoint"] == 0.5 and two["spread"] == 0.02
+
+
 def test_list_tool_error_passes_through_cleanly(server, mock_api):
     """A list-returning tool that hits an SDK error must surface the clean
     error dict over the wire, not a mangled output-schema validation failure.

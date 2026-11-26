@@ -128,7 +128,7 @@ for level in book.bids[:3]:
 print(book.imbalance(levels=3), book.microprice(), book.impact("BUY", 1000))  # average price of a 1,000 share market buy
 ```
 
-`at` omitted returns the latest book. The answer is the latest book at or before `at` inside the recorded span; check `book.nearest`: `"before"` is the normal case, `"after"` means `at` was earlier than `data_start` and you received the first recorded book instead. An empty side reports 0.5 as its price, so test `book.bid_levels` and `book.ask_levels` before trusting `midpoint`.
+`at` omitted returns the latest book. The answer is the latest book at or before `at` inside the recorded span; check `book.nearest`: `"before"` is the normal case, `"after"` means `at` was earlier than `data_start` and you received the first recorded book instead. An empty side has no real price, so test `book.bid_levels` and `book.ask_levels` before trusting `best_bid`, `best_ask` or `midpoint`.
 
 ## 6. Tick-level history as Parquet
 

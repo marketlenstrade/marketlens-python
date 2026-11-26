@@ -142,7 +142,7 @@ Hooks, override any subset:
 Things that trip people up:
 
 - Several markets can be live at once (every weather bucket, every game of an evening). Keep state per market, keyed by `market.id` as above; state reset in `on_market_start` is wiped whenever any market starts.
-- An empty side reports 0.5 as its price. Check `book.bid_levels and book.ask_levels` before trusting `midpoint`. Weather buckets far from the forecast often have one empty side for hours, so compare the buckets that do have two sides instead of waiting for all of them.
+- An empty side has no real price. Check `book.bid_levels and book.ask_levels` before trusting `best_bid`, `best_ask` or `midpoint`. Weather buckets far from the forecast often have one empty side for hours, so compare the buckets that do have two sides instead of waiting for all of them.
 - Fills arrive `latency_ms` later (default 50), so `ctx.position()` is unchanged inside the hook that placed the order. React in `on_fill`, or track what you sent.
 - YES is the market's first outcome, `market.outcomes[0].name` (Yes, Up, or the first named team), and every book price is its price. NO is the other outcome at 1 minus that. Print the name before reasoning about which team or direction a position holds.
 - Positions are long only. `sell_yes` reduces a YES position; to bet against YES, `buy_no`. Holding YES and NO together merges back to $1 cash per pair.
