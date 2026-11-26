@@ -84,7 +84,7 @@ Series slugs by family:
 - Weather: `<city>-daily-weather` (daily high) and `<city>-daily-lowest-temperature`, for example `nyc-daily-weather`, `london-daily-weather`, `tokyo-daily-weather`.
 - Sports and esports: `nba-2026`, `nfl-2026`, `nhl-2026`, `cfb-2026`, `atp`, `wta`, `ufc`, `premier-league-2025`, `counter-strike`, `league-of-legends`, `dota-2`, `valorant`.
 
-There is no text search over series. List them by category instead: `client.series.list(category="Weather", take=200, limit=200)` (categories include `Crypto`, `Weather`, `Sports`, `Esports`, `Politics`, `Economy`, `Equities`); each has `platform_series_id` (the slug), `title`, `recurrence`. For anything without a series (elections, one-off events), search markets by question: `client.markets.list(q="fed rate cut", sort="-volume", take=10, limit=10)`.
+Search series by title or slug: `client.series.list(q="tokyo", take=20, limit=20)`. Or list them by category: `client.series.list(category="Weather", take=200, limit=200)` (categories include `Crypto`, `Weather`, `Sports`, `Esports`, `Politics`, `Economy`, `Equities`); each has `platform_series_id` (the slug), `title`, `recurrence`. For anything without a series (elections, one-off events), search markets by question: `client.markets.list(q="fed rate cut", sort="-volume", take=10, limit=10)`.
 
 Look before you trade. A few bars show how a market moved and cost almost nothing:
 

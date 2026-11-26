@@ -83,7 +83,7 @@ Series slugs by family:
 - Weather: `<city>-daily-weather` (daily high) and `<city>-daily-lowest-temperature`, for example `nyc-daily-weather`, `london-daily-weather`, `tokyo-daily-weather`. One city and day is one event of about 11 temperature buckets: `client.events.markets(m.event_id).to_list()`.
 - Sports and esports: `nba-2026`, `nfl-2026`, `nhl-2026`, `cfb-2026`, `atp`, `wta`, `ufc`, `premier-league-2025`, `counter-strike`, `league-of-legends`, `dota-2`, `valorant`. A league mixes kinds of bet under one slug; filter with `subtype="moneyline"` (or `spread`, `total`). Sports books usually start at the scheduled start (`data_start`), so they cover in-play trading.
 
-There is no text search over series. List them by category: `client.series.list(category="Weather", take=200, limit=200)` (categories include `Crypto`, `Weather`, `Sports`, `Esports`, `Politics`, `Economy`, `Equities`); each has `platform_series_id` (the slug), `title`, `recurrence`, `market_count`.
+Search series by title or slug: `client.series.list(q="tokyo", take=20, limit=20)`. Or list them by category: `client.series.list(category="Weather", take=200, limit=200)` (categories include `Crypto`, `Weather`, `Sports`, `Esports`, `Politics`, `Economy`, `Equities`); each has `platform_series_id` (the slug), `title`, `recurrence`, `market_count`.
 
 ## 4. Price, spread and trade history
 

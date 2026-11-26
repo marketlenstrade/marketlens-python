@@ -2,6 +2,15 @@
 
 All notable changes to the `marketlens` Python SDK, version by version.
 
+## [1.8.14] 2026-11-26
+
+* A streamed `AlphaStrategy` backtest skips a bar whose book has an empty side, as a `data_dir` run already did. The SDK reads a missing side as 0.5, so a streamed run could trade at that made-up price: the README `MomentumTilt` example on one day of `btc-up-or-down-5m` reported billions in profit streamed against a loss from `data_dir`. Both modes now give the same bars, fills and P&L. Streamed alpha results change for any strategy that met a one-sided book; `Strategy` backtests and `data_dir` runs do not change.
+* The MCP order book metrics tool reports null for the price, midpoint and spread of an empty side, as the order book tool already did.
+* A reused `data_dir` never reads a stale reference price. A `reference-BTC.parquet` from an earlier run counted as present for any window, so a later market read one constant price on every book. Reference files are now named by their window (`reference-BTC-<after>-<before>.parquet`), only the span no file covers is downloaded, so rows already paid for are not billed again, and `ctx.reference_price()` returns `None` outside every file's span. If the download fails, the backtest says once that reference prices come from 1 minute candles. Old `reference-{symbol}.parquet` files keep working for the span they cover.
+* An enum passed as a filter is sent as its value, so `status=MarketStatus.ACTIVE` works instead of answering 400.
+* `client.series.list(q="...")` searches series by title and slug (a server change, so every version gets it).
+* Docs: book level sizes, `bid_depth`, `ask_depth`, trade `size` and candle `volume` are shares, and `impact()` and `slippage()` take a size in shares. History is built after a market resolves, usually within 2 hours.
+
 ## [1.8.13] 2026-11-24
 
 * A backtest of a structured series by slug (daily weather, strikes, hit price, rate decisions) selects markets by their own open and close times instead of the event's listed end. Daily weather events list their end at 12:00 UTC on the target day while the markets trade until local midnight, so a window starting after 12:00 UTC silently left that day's markets out. `orderbook.walk` on a structured slug is fixed the same way. Resolving the markets now takes one request instead of one per event.
