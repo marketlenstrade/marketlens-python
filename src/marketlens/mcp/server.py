@@ -280,7 +280,7 @@ def build_server() -> FastMCP:
         sort: str | None = None,
         limit: int = 20,
     ) -> list[dict] | dict:
-        """List recurring series (e.g. btc-up-or-down-5m). recurrence: 5m, 1h, daily, ..."""
+        """List recurring series (e.g. btc-up-or-down-5m). recurrence: 5m, 15m, hourly, daily, weekly, ..."""
         params: dict[str, Any] = {"take": _clamp(limit), "limit": _clamp(limit)}
         for k, v in (
             ("category", category), ("platform", platform),

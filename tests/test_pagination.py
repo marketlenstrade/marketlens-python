@@ -157,3 +157,13 @@ class TestSmartDataFrame:
         )
         df = client.markets.list().to_dataframe()
         assert len(df) == 0
+
+
+def test_enum_param_is_sent_as_its_value(mock_api, client):
+    from marketlens.types.shared import MarketStatus
+
+    route = mock_api.get("/markets").mock(
+        return_value=httpx.Response(200, json={"data": [], "meta": {"cursor": None, "has_more": False}})
+    )
+    list(client.markets.list(status=MarketStatus.ACTIVE))
+    assert route.calls[0].request.url.params["status"] == "active"

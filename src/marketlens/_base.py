@@ -5,6 +5,7 @@ import os
 import re
 import time
 from datetime import datetime
+from enum import Enum
 from pathlib import Path
 from typing import Any
 
@@ -109,7 +110,7 @@ def _coerce_timestamp_params(params: dict[str, Any]) -> dict[str, Any]:
 
 
 def _prepare_params(params: dict[str, Any]) -> dict[str, Any]:
-    """Drop None values and serialize bools as lowercase strings.
+    """Drop None values, serialize bools as lowercase strings and enums as their values.
 
     Timestamp coercion happens at the resource boundary — see
     :func:`_coerce_timestamp_params` and individual resource methods. This
@@ -121,6 +122,10 @@ def _prepare_params(params: dict[str, Any]) -> dict[str, Any]:
             continue
         if isinstance(v, bool):
             out[k] = str(v).lower()
+            continue
+        if isinstance(v, Enum):
+            # str() of a str Enum is "MarketStatus.ACTIVE", not its value.
+            out[k] = v.value
             continue
         if isinstance(v, datetime):
             # Defensive: a datetime that slipped past the resource layer
