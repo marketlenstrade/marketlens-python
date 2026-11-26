@@ -305,7 +305,8 @@ def build_server() -> FastMCP:
         price as null, and midpoint/spread/analytics are null unless two-sided.
         When two-sided it also returns spread_bps, microprice, and imbalance:
         top-3-level (bid_depth - ask_depth)/(bid_depth + ask_depth) in [-1, 1],
-        where positive means more resting size on the bid side.
+        where positive means more resting size on the bid side. Level sizes
+        and bid_depth/ask_depth are shares, not dollars.
         """
         book = _get_client().orderbook.get(market_id, at=at, depth=depth)
         return fmt.book_view(book, depth=depth)
@@ -347,7 +348,7 @@ def build_server() -> FastMCP:
 
         `after`/`before` (epoch ms or ISO 8601) are required. Each returned
         trade bills one data row against the row balance, so keep the window
-        tight.
+        tight. `size` and `min_size` are shares, not dollars.
         """
         params: dict[str, Any] = {
             "after": after, "before": before, "order": order, "take": _clamp(limit),
@@ -372,7 +373,7 @@ def build_server() -> FastMCP:
         """OHLCV candles for a market UUID.
 
         `after`/`before` (epoch ms or ISO 8601) are required. Bills one data
-        row per returned candle.
+        row per returned candle. `volume` is shares traded.
         """
         rows = _get_client().markets.candles(
             market_id, after=after, before=before,
@@ -710,7 +711,7 @@ ctx:
 
 book: midpoint, best_bid, best_ask, spread, bid_levels, ask_levels (0 = that side empty),
   spread_bps(), microprice(), imbalance(levels=3), impact(side, size), slippage(side, size).
-  Prices are floats in [0, 1].
+  Prices are floats in [0, 1]. Sizes are shares.
 
 Rules:
 - Positions are long only: buy_* open or add, sell_* reduce (sell up to what you hold).

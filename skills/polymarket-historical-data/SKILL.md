@@ -106,7 +106,7 @@ trades = client.markets.trades(m.id, after=m.data_start, before=m.data_end).to_d
 print(m.question, "->", m.winning_outcome)
 ```
 
-Candle resolutions: `1s`, `5s`, `10s`, `30s`, `1m`, `5m`, `15m`, `1h`, `4h`, `1d`. Metrics resolutions: `1m`, `5m`, `15m`, `1h`, `4h`, `1d`. Every price is the price of the first outcome, `m.outcomes[0].name` (Yes, Up, or the first named team), between 0 and 1; the other outcome is 1 minus that. A candle exists only for buckets with trades, so quiet markets have gaps; metrics come from the book and have none.
+Candle resolutions: `1s`, `5s`, `10s`, `30s`, `1m`, `5m`, `15m`, `1h`, `4h`, `1d`. Metrics resolutions: `1m`, `5m`, `15m`, `1h`, `4h`, `1d`. Every price is the price of the first outcome, `m.outcomes[0].name` (Yes, Up, or the first named team), between 0 and 1; the other outcome is 1 minus that. Sizes (trade `size`, candle `volume`, book levels, `bid_depth`, `ask_depth`) are shares, not dollars; a level's dollar value is price times size. A candle exists only for buckets with trades, so quiet markets have gaps; metrics come from the book and have none.
 
 For a market that is still open, pass `before=datetime.now(timezone.utc)`.
 
@@ -125,7 +125,7 @@ book = client.orderbook.get(m.id, at=m.data_start + 120_000, depth=10)
 print(book.best_bid, book.best_ask, book.spread, book.midpoint)
 for level in book.bids[:3]:
     print(level.price, level.size)
-print(book.imbalance(levels=3), book.microprice(), book.impact("BUY", 1000))  # $1,000 market buy, average price
+print(book.imbalance(levels=3), book.microprice(), book.impact("BUY", 1000))  # average price of a 1,000 share market buy
 ```
 
 `at` omitted returns the latest book. The answer is the latest book at or before `at` inside the recorded span; check `book.nearest`: `"before"` is the normal case, `"after"` means `at` was earlier than `data_start` and you received the first recorded book instead. An empty side reports 0.5 as its price, so test `book.bid_levels` and `book.ask_levels` before trusting `midpoint`.
@@ -149,7 +149,7 @@ One file per market, `history-<market id>-compact.parquet`, sorted by time, with
 | `event_type` | `snapshot`, `delta` or `trade` |
 | `t` | epoch ms |
 | `bids`, `asks` | on snapshots: the full book as a JSON string, `[{"price": "0.49", "size": "1007.86"}, ...]` |
-| `price`, `size`, `side` | on deltas: the new resting size at `price` on the bid (`BUY`) or ask (`SELL`) side, 0 removes the level. On trades: the fill and its aggressor side |
+| `price`, `size`, `side` | on deltas: the new resting size in shares at `price` on the bid (`BUY`) or ask (`SELL`) side, 0 removes the level. On trades: the fill and its aggressor side |
 | `trade_id` | on trades |
 
 A crypto market also gets `reference-BTC.parquet` (`timestamp`, `price`: Binance trades for the underlying).

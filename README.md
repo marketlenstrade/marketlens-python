@@ -233,6 +233,8 @@ for market, book in client.orderbook.walk(market_id, after=start, before=end):
     print(book.midpoint, book.spread_bps())
 ```
 
+History is built after a market resolves, usually within 2 hours. Before that the market answers 409 `EXPORT_NOT_READY`, so walking a single market raises `ExportNotReadyError`. Pass `coalesce=True` to get a book only at each trade and snapshot.
+
 Every `OrderBook`, live or replayed, carries analytics:
 
 ```python
@@ -240,7 +242,7 @@ book.microprice()              # size-weighted mid from best level
 book.weighted_midpoint(n=3)    # n-level weighted mid
 book.spread_bps()              # spread in basis points
 book.imbalance(levels=3)       # bid/ask imbalance [-1, 1]
-book.impact("BUY", 1000)       # VWAP for $1k market buy
+book.impact("BUY", 1000)       # VWAP for a 1,000 share market buy
 book.slippage("BUY", 1000)     # slippage from mid
 book.depth_within(0.02)        # (bid, ask) depth within 2c of mid
 ```
@@ -366,7 +368,7 @@ The tick-only options (`latency_ms`, `queue_position`, `limit_fill_rate`, `settl
 
 ### Numeric conventions
 
-All numeric fields (prices, sizes, volumes, fees, statistics) are `float`, with defaults picked so call sites need no guards: Polymarket prices (`best_bid`, `best_ask`, `midpoint`) default to `0.5` when the side is missing, sizes and rates default to `0.0`. Genuinely optional values (`winning_outcome` before resolution, `strike` on non-structured markets, `book.spread_bps()` on an empty book) return `None`. Detect a truly empty book with `book.bid_levels` / `book.ask_levels`, not by comparing prices to defaults.
+All numeric fields (prices, sizes, volumes, fees, statistics) are `float`, with defaults picked so call sites need no guards: Polymarket prices (`best_bid`, `best_ask`, `midpoint`) default to `0.5` when the side is missing, sizes and rates default to `0.0`. Sizes (book levels, `bid_depth`, `ask_depth`, trade `size`, candle `volume`) are shares, not dollars; a level's dollar value is price times size. Genuinely optional values (`winning_outcome` before resolution, `strike` on non-structured markets, `book.spread_bps()` on an empty book) return `None`. Detect a truly empty book with `book.bid_levels` / `book.ask_levels`, not by comparing prices to defaults.
 
 ### Resources
 

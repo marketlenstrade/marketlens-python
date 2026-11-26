@@ -137,7 +137,7 @@ Hooks, override any subset:
 - `ctx.cash`, `ctx.equity`, `ctx.open_orders`, `ctx.time` (epoch ms), `ctx.books` (dict of market id to book for every market live right now).
 - `ctx.reference_price()` is the Binance spot price of the underlying on crypto markets, `None` elsewhere.
 
-`book`: `midpoint`, `best_bid`, `best_ask`, `spread`, `bid_levels`, `ask_levels`, `bids` and `asks` (lists with `.price`, `.size`), plus `microprice()`, `imbalance(levels=3)`, `spread_bps()`, `impact("BUY", usd)`. Prices are floats between 0 and 1.
+`book`: `midpoint`, `best_bid`, `best_ask`, `spread`, `bid_levels`, `ask_levels`, `bids` and `asks` (lists with `.price`, `.size`), plus `microprice()`, `imbalance(levels=3)`, `spread_bps()`, `impact("BUY", shares)`. Prices are floats between 0 and 1; sizes are shares.
 
 Things that trip people up:
 

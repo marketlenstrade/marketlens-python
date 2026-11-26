@@ -43,7 +43,7 @@ class OrderBook(BaseModel):
 
         Args:
             side: "BUY" or "SELL".
-            size: Order size in USD.
+            size: Order size in shares.
 
         Returns:
             Average execution price, or None if insufficient liquidity.
@@ -89,7 +89,7 @@ class OrderBook(BaseModel):
 
         Args:
             side: "BUY" or "SELL".
-            size: Order size in USD.
+            size: Order size in shares.
 
         Returns:
             Slippage (always non-negative), or None if either side of the

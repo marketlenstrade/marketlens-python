@@ -21,9 +21,9 @@ print(f"depth within 2c: {bid_near} bid / {ask_near} ask")
 for size in [100, 1_000, 5_000, 25_000]:
     avg = book.impact("BUY", size)
     if avg is None:
-        print(f"  ${size:>6} → insufficient liquidity")
+        print(f"  {size:>6} shares → insufficient liquidity")
     else:
         bps = (avg - book.midpoint) / book.midpoint * 10_000
-        print(f"  ${size:>6} → avg_fill={avg:.4f}  slippage={bps:.1f}bps")
+        print(f"  {size:>6} shares → avg_fill={avg:.4f}  slippage={bps:.1f}bps")
 
 client.close()
