@@ -11,7 +11,9 @@ from typing import Any, AsyncIterator, Iterator
 import pyarrow.parquet as pq
 
 from marketlens._base import _coerce_timestamp
-from marketlens.resources.exports import OUTSIDE_MARKER
+from marketlens.resources.exports import (
+    _REFERENCE_LOOKBACK_MS, OUTSIDE_MARKER, reference_files, reference_gaps,
+)
 from marketlens._progress import _ProgressReporter, make_reporter
 from marketlens.exceptions import HistoryWindowError, NotFoundError, ExportNotReadyError, StoreUnavailableError
 from marketlens.backtest._bar import (
@@ -426,6 +428,8 @@ class _EngineCore:
         self._download_results: list = []  # (target, SeriesDownloadResult) from autodownload
         self._market_group: dict[str, str] = {}    # market_id → group key (for sequential slot tracking)
         self._ref_prices: dict[str, list[tuple[int, float]]] = {}  # symbol → sorted (timestamp, price)
+        self._ref_spans: dict[str, list[tuple[int, int]]] = {}  # symbol → spans the data_dir files cover
+        self._ref_warned = False  # candle fallback announced once per run
         self._market_underlying: dict[str, str | None] = {}  # market_id → underlying symbol
         self._underlying_bounds: dict[str, tuple[int, int]] = {}  # symbol → (earliest_open, latest_close)
         # Set in run() so get_reference_price() can lazily load on first use.
@@ -1449,7 +1453,40 @@ class _EngineCore:
         # close_time).
         # Return the most recent one at or before at_time.
         idx = bisect.bisect_right(prices, (at_time, float("inf"))) - 1
-        return prices[idx][1] if idx >= 0 else None
+        if idx < 0:
+            return None
+        ts, price = prices[idx]
+        # Prices from data_dir files answer only inside the span one file
+        # covers, so a market outside every file gets None, not a stale price.
+        spans = self._ref_spans.get(symbol)
+        if spans is not None and not any(
+            lo <= ts and at_time <= hi + _REFERENCE_LOOKBACK_MS for lo, hi in spans
+        ):
+            return None
+        return price
+
+    # Tick engines fetch the reference ticks a data_dir is missing; the alpha
+    # engine reads candles instead when the files fall short.
+    _REF_DOWNLOAD = True
+
+    def _reference_needs(self, symbol: str) -> list[tuple[int, int]]:
+        """The replayed markets' windows on ``symbol``, touching ones merged."""
+        after_ms = _coerce_timestamp(self._ref_load_ctx.get("after"))
+        before_ms = _coerce_timestamp(self._ref_load_ctx.get("before"))
+        spans = []
+        for m in self._resolved_markets.values():
+            if m.underlying != symbol or m.id in self._skipped:
+                continue
+            lo, hi = _effective_window(m, after_ms, before_ms)
+            if lo is not None and hi is not None and lo < hi:
+                spans.append((lo, hi))
+        merged: list[tuple[int, int]] = []
+        for lo, hi in sorted(spans):
+            if merged and lo <= merged[-1][1]:
+                merged[-1] = (merged[-1][0], max(merged[-1][1], hi))
+            else:
+                merged.append((lo, hi))
+        return merged
 
     _REF_RESOLUTION_DEFAULT = "1m"
     _REF_RESOLUTION_MS = {
@@ -1467,15 +1504,37 @@ class _EngineCore:
         """
         ctx = self._ref_load_ctx
         data_dir = ctx.get("data_dir")
-        if data_dir is not None:
-            ref_path = Path(data_dir) / f"reference-{symbol}.parquet"
-            if ref_path.exists():
-                table = pq.read_table(ref_path, columns=["timestamp", "price"])
-                ts_col = table.column("timestamp").to_pylist()
-                price_col = [float(v) for v in table.column("price").to_pylist()]
-                self._ref_prices[symbol] = list(zip(ts_col, price_col))
-                return
         client = ctx.get("client")
+        if data_dir is not None:
+            path = Path(data_dir)
+            needs = self._reference_needs(symbol)
+            failed = None
+            if client is not None and self._REF_DOWNLOAD:
+                for lo, hi in needs:
+                    try:
+                        client.exports._ensure_reference(path, symbol, lo, hi)
+                    except Exception as exc:
+                        failed = exc
+            files = reference_files(path, symbol)
+            # Files that leave a replayed market uncovered fall back to
+            # candles when a client can fetch them.
+            if files and (client is None or not any(reference_gaps(files, lo, hi) for lo, hi in needs)):
+                loaded: list[tuple[int, float]] = []
+                for _, _, ref_path in files:
+                    table = pq.read_table(ref_path, columns=["timestamp", "price"])
+                    ts_col = table.column("timestamp").to_pylist()
+                    loaded += zip(ts_col, (float(v) for v in table.column("price").to_pylist()))
+                if len(files) > 1:
+                    loaded.sort(key=lambda p: p[0])
+                self._ref_prices[symbol] = loaded
+                self._ref_spans[symbol] = [(lo, hi) for lo, hi, _ in files]
+                return
+            if failed is not None and client is not None and self._announce and not self._ref_warned:
+                self._ref_warned = True
+                _prep_status(
+                    f"Reference trades download for {symbol} failed ({failed}); "
+                    f"reference prices come from {ctx.get('resolution') or self._REF_RESOLUTION_DEFAULT} candles instead"
+                )
         if client is not None:
             # Use the union of the user's window and the registered markets'
             # open/close range — book reconstruction can yield events at the
@@ -1973,6 +2032,7 @@ class AsyncBacktestEngine(_EngineCore):
             "after": after, "before": before,
             "resolution": reference_resolution,
         }
+        self._async_client = client
 
         if isinstance(id, list):
             if subtype is not None:
@@ -2224,6 +2284,17 @@ class AsyncBacktestEngine(_EngineCore):
         first_book_seen: set[str] = set()
         active: dict[str, Market] = {}
 
+        # The lookup hook is sync and cannot fetch, so a data_dir gets the
+        # reference ticks its replayed markets are missing up front.
+        data_dir = self._ref_load_ctx.get("data_dir")
+        if data_dir is not None:
+            for symbol in {m.underlying for m in self._resolved_markets.values() if m.underlying}:
+                for lo, hi in self._reference_needs(symbol):
+                    try:
+                        await self._async_client.exports._ensure_reference(Path(data_dir), symbol, lo, hi)
+                    except Exception:
+                        pass
+
         async for market, event, book in async_merge_streams(streams):
             self._reporter.consumed(market.id, 1)
 
@@ -2342,6 +2413,8 @@ class AlphaBacktestEngine(BacktestEngine):
     the reconcile loop (trade the delta to each market's target), and the result
     metrics (time-series, not per-settlement). The tick engine is untouched.
     """
+
+    _REF_DOWNLOAD = False
 
     def __init__(self, strategy: Strategy, config: AlphaConfig | None = None) -> None:
         alpha = config or AlphaConfig()

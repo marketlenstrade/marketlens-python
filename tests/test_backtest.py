@@ -2739,3 +2739,96 @@ class TestStreamingEqualsBulk:
         finally:
             client.close()
         assert series_export.calls[0].request.url.params.get("subtype") == "moneyline"
+
+
+class TestReferenceSpan:
+    """A data_dir's reference files answer only inside the span they cover,
+    and a market outside them gets its own window fetched."""
+
+    DAY = 86_400_000
+    A_OPEN = 1779148800000
+    B_OPEN = A_OPEN + DAY
+
+    def _market(self, mid, open_time):
+        from marketlens.types.market import Market
+        from conftest import SAMPLE_MARKET
+        return Market.model_validate({
+            **SAMPLE_MARKET, "id": mid, "underlying": "BTC",
+            "open_time": open_time, "close_time": open_time + 300_000,
+        })
+
+    @staticmethod
+    def _parquet(lo, hi, price):
+        import io
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+        ts = list(range(lo, hi, 1_000))
+        buf = io.BytesIO()
+        pq.write_table(pa.table({"timestamp": ts, "price": [price] * len(ts)}), buf)
+        return buf.getvalue()
+
+    def _setup(self, mock_api, tmp_path):
+        # The legacy file of an earlier run: market A, 60s lookback, price 100.
+        (tmp_path / "reference-BTC.parquet").write_bytes(
+            self._parquet(self.A_OPEN - 59_800, self.A_OPEN + 300_000, 100.0))
+        calls = []
+
+        def _serve(request):
+            a, b = int(request.url.params["after"]), int(request.url.params["before"])
+            calls.append((a, b))
+            return httpx.Response(200, content=self._parquet(a + 300, b, 200.0))
+
+        mock_api.get("/reference/trades/export").mock(side_effect=_serve)
+        mock_api._assert_all_called = False  # some cases assert it is never called
+        return calls
+
+    def _engine(self, cls, markets, tmp_path, client):
+        engine = cls(Strategy())
+        engine._ref_load_ctx = {"client": client, "data_dir": str(tmp_path), "after": None, "before": None}
+        for m in markets:
+            engine._register_market(m)
+        return engine
+
+    def test_market_outside_the_file_gets_its_own_window(self, mock_api, client, tmp_path):
+        calls = self._setup(mock_api, tmp_path)
+        engine = self._engine(BacktestEngine, [self._market("b", self.B_OPEN)], tmp_path, client)
+        assert engine.get_reference_price("BTC", self.B_OPEN + 60_000) == 200.0
+        assert calls == [(self.B_OPEN - 60_000, self.B_OPEN + 300_000)]
+
+        # Both markets now covered: nothing is fetched again, each reads its own.
+        rerun = self._engine(
+            BacktestEngine, [self._market("a", self.A_OPEN), self._market("b", self.B_OPEN)], tmp_path, client)
+        assert rerun.get_reference_price("BTC", self.A_OPEN + 60_000) == 100.0
+        assert rerun.get_reference_price("BTC", self.B_OPEN + 60_000) == 200.0
+        assert rerun.get_reference_price("BTC", self.A_OPEN + self.DAY // 2) is None
+        assert len(calls) == 1
+
+    def test_covered_rerun_downloads_nothing(self, mock_api, client, tmp_path):
+        calls = self._setup(mock_api, tmp_path)
+        engine = self._engine(BacktestEngine, [self._market("a", self.A_OPEN)], tmp_path, client)
+        assert engine.get_reference_price("BTC", self.A_OPEN) == 100.0
+        assert engine.get_reference_price("BTC", self.A_OPEN + 299_999) == 100.0
+        assert calls == []
+
+    def test_no_stale_price_without_a_fetch(self, mock_api, tmp_path):
+        calls = self._setup(mock_api, tmp_path)
+        engine = self._engine(BacktestEngine, [self._market("b", self.B_OPEN)], tmp_path, None)
+        assert engine.get_reference_price("BTC", self.B_OPEN + 60_000) is None
+        assert calls == []
+
+    def test_partial_overlap_fetches_only_the_gap(self, mock_api, client, tmp_path):
+        calls = self._setup(mock_api, tmp_path)
+        client.exports._ensure_reference(tmp_path, "BTC", self.A_OPEN, self.A_OPEN + 600_000)
+        last_tick = self.A_OPEN + 299_200
+        assert calls == [(last_tick, self.A_OPEN + 600_000)]
+
+    async def test_async_run_fetches_the_missing_window(self, mock_api, tmp_path):
+        from marketlens import AsyncMarketLens
+        from marketlens.backtest import AsyncBacktestEngine
+        calls = self._setup(mock_api, tmp_path)
+        async with AsyncMarketLens(api_key="mk_test_key", base_url=BASE_URL) as aclient:
+            engine = self._engine(AsyncBacktestEngine, [self._market("b", self.B_OPEN)], tmp_path, None)
+            engine._async_client = aclient
+            await engine._run_merged([])
+        assert calls == [(self.B_OPEN - 60_000, self.B_OPEN + 300_000)]
+        assert engine.get_reference_price("BTC", self.B_OPEN + 60_000) == 200.0

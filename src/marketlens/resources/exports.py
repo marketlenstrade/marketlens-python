@@ -2,10 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+import pyarrow.compute as pc
+import pyarrow.parquet as pq
 
 from marketlens._base import AsyncHTTPClient, SyncHTTPClient, _coerce_timestamp
 from marketlens._progress import make_reporter
@@ -135,6 +139,51 @@ INCOMPLETE_MARKER = ".incomplete"
 # Markets the account's history window left out and where to lift it (JSON),
 # so a rerun from data_dir reports them as streaming does.
 OUTSIDE_MARKER = ".outside-window"
+
+
+def reference_files(data_dir: Path, symbol: str) -> list[tuple[int, int, Path]]:
+    """Reference files for ``symbol`` as ``(start, end, path)``, sorted. A
+    windowed file is named for the window it was fetched for; the older
+    unwindowed ``reference-<SYM>.parquet`` covers its first to last trade."""
+    found = []
+    legacy = data_dir / f"reference-{symbol}.parquet"
+    if legacy.exists():
+        ts = pq.read_table(legacy, columns=["timestamp"]).column("timestamp")
+        if len(ts):
+            mm = pc.min_max(ts)
+            found.append((mm["min"].as_py(), mm["max"].as_py(), legacy))
+    for path in data_dir.glob(f"reference-{symbol}-*-*.parquet"):
+        start, end = path.stem.rsplit("-", 2)[1:]
+        found.append((int(start), int(end), path))
+    return sorted(found)
+
+
+def reference_gaps(spans: Any, after: int, before: int) -> list[tuple[int, int]]:
+    """The parts of ``[after, before]`` no span covers. A span's last price
+    stays good for the lookback past its end, the same slack the lookup uses."""
+    gaps, cur = [], after
+    for start, end, *_ in sorted(spans):
+        if cur >= before:
+            break
+        if start > cur:
+            gaps.append((cur, min(start, before)))
+        cur = max(cur, end + _REFERENCE_LOOKBACK_MS)
+    if cur < before:
+        gaps.append((cur, before))
+    return gaps
+
+
+def _missing_reference(data_dir: Path, symbol: str, after: Any, before: Any) -> list[tuple[Path, int, int]]:
+    """Files to fetch so ``[after, before]`` is covered: one per gap, each
+    reaching back the lookback. Ends stop at the last 5 minute boundary, where
+    the server stops too, so a window still in progress is fetched again later."""
+    now = int(time.time() * 1000) // 300_000 * 300_000
+    lo, hi = _coerce_timestamp(after), min(_coerce_timestamp(before), now)
+    out = []
+    for a, b in reference_gaps(reference_files(data_dir, symbol), lo, hi):
+        a -= _REFERENCE_LOOKBACK_MS
+        out.append((data_dir / f"reference-{symbol}-{a}-{b}.parquet", a, b))
+    return out
 
 
 def _finish_series(series_id: str, data_dir: Path, result: "SeriesDownloadResult") -> "SeriesDownloadResult":
@@ -531,22 +580,16 @@ class Exports:
         self, data_dir: Path, symbol: str, after: int, before: int,
         *, reporter: Any = None,
     ) -> None:
-        """Download reference trades if not already present."""
-        dest = data_dir / f"reference-{symbol}.parquet"
-        if dest.exists():
-            return
-        try:
-            self._client.download(
-                "/reference/trades/export", dest,
-                params={
-                    "symbol": symbol,
-                    "after": _coerce_timestamp(after) - _REFERENCE_LOOKBACK_MS,
-                    "before": _coerce_timestamp(before),
-                },
-                reporter=reporter, label=f"reference {symbol}",
-            )
-        except NotFoundError:
-            pass
+        """Download the reference trades ``[after, before]`` is missing."""
+        for dest, a, b in _missing_reference(data_dir, symbol, after, before):
+            try:
+                self._client.download(
+                    "/reference/trades/export", dest,
+                    params={"symbol": symbol, "after": a, "before": b},
+                    reporter=reporter, label=f"reference {symbol}",
+                )
+            except NotFoundError:
+                pass
 
 
 class AsyncExports:
@@ -724,19 +767,13 @@ class AsyncExports:
         self, data_dir: Path, symbol: str, after: int, before: int,
         *, reporter: Any = None,
     ) -> None:
-        """Download reference trades if not already present."""
-        dest = data_dir / f"reference-{symbol}.parquet"
-        if dest.exists():
-            return
-        try:
-            await self._client.download(
-                "/reference/trades/export", dest,
-                params={
-                    "symbol": symbol,
-                    "after": _coerce_timestamp(after) - _REFERENCE_LOOKBACK_MS,
-                    "before": _coerce_timestamp(before),
-                },
-                reporter=reporter, label=f"reference {symbol}",
-            )
-        except NotFoundError:
-            pass
+        """Download the reference trades ``[after, before]`` is missing."""
+        for dest, a, b in _missing_reference(data_dir, symbol, after, before):
+            try:
+                await self._client.download(
+                    "/reference/trades/export", dest,
+                    params={"symbol": symbol, "after": a, "before": b},
+                    reporter=reporter, label=f"reference {symbol}",
+                )
+            except NotFoundError:
+                pass

@@ -152,7 +152,7 @@ One file per market, `history-<market id>-compact.parquet`, sorted by time, with
 | `price`, `size`, `side` | on deltas: the new resting size in shares at `price` on the bid (`BUY`) or ask (`SELL`) side, 0 removes the level. On trades: the fill and its aggressor side |
 | `trade_id` | on trades |
 
-A crypto market also gets `reference-BTC.parquet` (`timestamp`, `price`: Binance trades for the underlying).
+A crypto market also gets `reference-BTC-<after>-<before>.parquet` (`timestamp`, `price`: Binance trades for the underlying over that window in epoch ms, one file per window fetched).
 
 The compact file keeps the book exact at every trade and snapshot and drops the churn between trades. Pass `coalesce=False` for every single book change (about 6 times the rows on BTC 5m).
 
